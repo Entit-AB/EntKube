@@ -107,10 +107,43 @@ public static class ApiTokenAuthExtensions
     /// and the document deserves the same guard as the routes it describes. Route call sites are
     /// unchanged — they still get their own builder type back and still chain.
     /// </remarks>
+    /// <param name="operationName">
+    /// The operation's name, which becomes its <c>operationId</c> in the generated document and
+    /// therefore the method name on every generated client.
+    ///
+    /// <para>⚠️ <b>Required, and here rather than in a <c>.WithName()</c> of its own.</b> Not one
+    /// of the forty-three operations had an <c>operationId</c>, so a generator had to invent
+    /// method names from the method and path — which means a path edit silently renames a client
+    /// method, and the name a caller binds to never appears in review at all. This method is
+    /// already the one place every operation passes through, so making the parameter required
+    /// means the COMPILER refuses a route with no name, rather than a test noticing later.</para>
+    ///
+    /// <para>⚠️ Uniqueness is enforced by ASP.NET Core, which throws at startup on two endpoints
+    /// sharing a name. That is a stronger guarantee than this repository could write for itself,
+    /// and it is why the name is passed to <c>WithName</c> rather than only into metadata.</para>
+    /// </param>
+    /// <param name="problems">
+    /// The statuses THIS route can refuse with, beyond the 401 and 403 every route shares.
+    ///
+    /// <para>⚠️ Eighteen of these were undeclared across sixteen routes — measured, not guessed:
+    /// the 503 that six sweep-backed reports answer before their first sweep completes, the 422
+    /// eight action routes answer when the cluster refuses, and two 400s. A
+    /// <c>ProblemHttpResult</c> in a handler's <c>Results&lt;…&gt;</c> union contributes NOTHING
+    /// to the generated document, so each of those routes was described as only ever answering
+    /// 200, 401 or 403. A generated client built from that would deserialise a
+    /// <c>ProblemDetails</c> into whatever the 200 was meant to be — which is the same defect the
+    /// 401 and 403 declarations below were added to fix, one level further in.</para>
+    ///
+    /// <para>Declared here rather than at each route's own <c>.ProducesProblem</c> for the reason
+    /// everything else in this method is: it is the one call every operation already makes, so the
+    /// name, the scope and the refusals are read in one place and reviewed together.</para>
+    /// </param>
     public static TBuilder RequireApiScope<TBuilder>(
-        this TBuilder builder, string? scope = null)
+        this TBuilder builder, string operationName, string? scope = null, params int[] problems)
         where TBuilder : IEndpointConventionBuilder
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationName);
+
         // ⚠️ The same fact in two places, but derived ONCE. The filter ENFORCES the scope; the
         // metadata DESCRIBES it, and nothing outside the filter could see which scope a route
         // needed — it lived in a filter instance's field — so the generated OpenAPI document,
@@ -124,6 +157,7 @@ public static class ApiTokenAuthExtensions
 
         builder = builder
             .AddEndpointFilter(filter)
+            .WithName(operationName)
             .WithMetadata(new ApiScopeMetadata(filter.RequiredScope))
             // ⚠️ And the status this route chooses must survive to the caller. Program.cs installs
             // UseStatusCodePagesWithReExecute("/not-found") for the whole app, which re-executes
@@ -160,6 +194,12 @@ public static class ApiTokenAuthExtensions
         if (filter.RequiredScope is not null)
         {
             builder = builder.ProducesProblem(StatusCodes.Status403Forbidden);
+        }
+
+        // And the ones only this route can answer.
+        foreach (int problem in problems.Distinct().Order())
+        {
+            builder = builder.ProducesProblem(problem);
         }
 
         return builder;

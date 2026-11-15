@@ -44,11 +44,20 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// </summary>
     private static readonly Dictionary<string, string> NoToolByDesign = new(StringComparer.Ordinal)
     {
+        // ⚠️ This reason USED to be "the shared client has no body-carrying verb at all, so
+        // this is unreachable by construction rather than by choice". That stopped being true
+        // when EntKubeApiClient gained SendJsonAsync for the generated client, and nothing went
+        // red: a ratchet asserts the NUMBER of exemptions, never the explanation, so a reason can
+        // rot indefinitely while the count stays right. An exemption justified by "impossible" is
+        // also the one most easily widened later — once it IS possible, the stated objection has
+        // already been conceded.
+        //
+        // So it is written as the decision it actually is, which is the same decision as the
+        // DELETE below.
         ["PUT /api/v1/cost-rates/{}"] =
-            "the shared client has no body-carrying verb at all, so this is unreachable by "
-            + "construction rather than by choice — see EntKubeApiClient's note on PutAsync, and "
-            + "A_bodyless_put_is_refused_rather_than_silently_accepted below, which asserts the "
-            + "reason instead of asserting around it",
+            "rewriting a cluster's price sheet changes what a customer is invoiced. A model that "
+            + "did this while investigating a cost question would cause a billing incident with no "
+            + "obvious cause — the same reason as the DELETE below, and it was always the real one",
 
         ["DELETE /api/v1/cost-rates/{}"] =
             "deleting a cluster's price sheet silently re-prices it against the installation-wide "
@@ -64,14 +73,19 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
         // scim:provision is its own scope precisely because the token holding it is handed to a
         // directory connector and has no business reading clusters or syncing apps. The inverse is
         // just as true: nothing that reads clusters has any business provisioning people. A tool
-        // that disables a user account is not a tool a language model should hold, and three of
-        // these need a request body the shared client cannot send regardless.
+        // that disables a user account is not a tool a language model should hold.
+        //
+        // ⚠️ This used to add "and three of these need a request body the shared client cannot
+        // send regardless" — a second, weaker reason that is no longer true since SendJsonAsync
+        // was added. It is gone rather than corrected: the scope argument above stands on its
+        // own, and a reason that depends on a missing capability expires the moment the
+        // capability arrives.
         ["GET /scim/v2/ServiceProviderConfig"] = "SCIM is a directory connector's surface, not a model's",
         ["GET /scim/v2/Users"] = "SCIM is a directory connector's surface, not a model's",
-        ["POST /scim/v2/Users"] = "SCIM is a directory connector's surface, not a model's; also needs a body",
+        ["POST /scim/v2/Users"] = "SCIM is a directory connector's surface, not a model's",
         ["GET /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's",
-        ["PUT /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's; also needs a body",
-        ["PATCH /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's; also needs a body",
+        ["PUT /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's",
+        ["PATCH /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's",
         ["DELETE /scim/v2/Users/{}"] = "SCIM is a directory connector's surface, not a model's",
     };
 
@@ -260,8 +274,9 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
 
         status.Should().Be(HttpStatusCode.BadRequest,
             "if this ever becomes a 2xx, a bodyless PUT reaches the handler and the four prices "
-            + "take default(decimal) — every price silently zero. The exemption's stated reason, "
-            + "and the absence of PutAsync, both depend on this being a refusal");
+            + "take default(decimal) — every price silently zero. ⚠️ This no longer props up the "
+            + "exemption's reason, which is now a decision about invoices rather than a claim "
+            + "about what the client can send: the refusal matters on its own, for any caller");
     }
 
     private const string ApiScopeForCostWrite = "config:write";

@@ -132,7 +132,13 @@ public class OpenApiDocumentTests
         program.Should().Contain("AddPublicApiOpenApi()",
             "the document has to be registered before the host is built");
 
-        Match map = Regex.Match(program, @"app\.MapOpenApi\([^)]*\)\s*\r?\n?\s*\.RequireApiScope\(\)");
+        // ⚠️ The argument list is deliberately not pinned. RequireApiScope now also takes the
+        // operation's name, so a regex demanding `RequireApiScope()` with nothing in it failed on
+        // a change that did not touch what this test is about. What is asserted is that the
+        // document route goes through the guard at all; the scope it passes — none, meaning "any
+        // live token" — is read off the generated document by ApiScopeAdvertisementTests, where
+        // it is a fact about the server rather than about this file's punctuation.
+        Match map = Regex.Match(program, @"app\.MapOpenApi\([^)]*\)\s*\r?\n?\s*\.RequireApiScope\(");
         map.Success.Should().BeTrue(
             "the document is served behind the same token as the routes it describes — an "
             + "unauthenticated endpoint on a management plane is a thing to justify, and no "

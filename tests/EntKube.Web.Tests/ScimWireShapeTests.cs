@@ -39,14 +39,19 @@ internal static class ScimAsWritten
 /// <summary>
 /// The SCIM wire shape, pinned BEFORE anyone types these routes.
 ///
-/// <para><b>Why this file exists ahead of the change it guards.</b> The seven SCIM operations are
-/// the only part of the API that does not serialise an object: every payload is a hand-built
-/// <see cref="JsonObject"/> with literal keys, flattened with <c>ToJsonString()</c> and written
-/// through <c>Results.Content(json, "application/scim+json", …)</c>. That is why they do not
-/// register in the <c>UndescribedSuccessBodies</c> ratchet, and it is also why they are the most
-/// dangerous routes on the list to type: the work that drives that ratchet to 0
-/// (<c>docs/decomposition.md</c> item 8) is transcription, and transcribing these particular keys
-/// into records breaks them in ways that answer <c>200 OK</c>.</para>
+/// <para><b>Why this file was written ahead of the change it guards — and how that turned out.</b>
+/// The seven SCIM operations were the only part of the API that did not serialise an object: every
+/// payload was a hand-built <see cref="JsonObject"/> with literal keys, flattened with
+/// <c>ToJsonString()</c> and written through <c>Results.Content(json, "application/scim+json", …)</c>.
+/// That is why they carried no response schema, and it is also why they were the most dangerous
+/// routes on the list to type: transcribing these particular keys into records breaks them in ways
+/// that answer <c>200 OK</c>.</para>
+///
+/// <para>They are typed now, and <c>UndescribedSuccessBodies</c> is <b>0</b>. Of eleven mutations
+/// applied to the finished work, ten were caught by the assertions below and the eleventh does not
+/// compile in its naive form — so every hazard this file was written to predict was a real one.
+/// The bodies are <c>ScimUserResponse</c> and its siblings; the assertions read what the server's
+/// own serializer writes, because that is where every one of these hazards lives.</para>
 ///
 /// <para>⚠️ <b>The hazard that motivated the file: capital-R <c>Resources</c>.</b> RFC 7644 §3.4.2
 /// names the ListResponse member <c>Resources</c> — the one member in the whole SCIM specification
@@ -572,12 +577,15 @@ public class ScimErrorEnvelopeWireShapeTests
 /// application, call the routes as the holder of <c>scim:provision</c>, and read what comes
 /// back.</para>
 ///
-/// <para>⚠️ <b>Why the content type is the fragile part.</b> The response-typing programme
-/// (<c>ApiDocumentedResponsesTests.UndescribedSuccessBodies</c>) converts handlers to
-/// <c>TypedResults.Ok(record)</c> so the document gains a schema. On these seven routes that would
-/// also switch the media type to <c>application/json</c> — silently, with the body otherwise
-/// intact — and <c>ScimEndpoints.cs</c>'s own comment records that some connectors reject it. So
-/// the media type is asserted on every call below, not just the body.</para>
+/// <para>⚠️ <b>Why the content type is the fragile part.</b> Every other route on the API gained
+/// its schema by returning <c>TypedResults.Ok(record)</c>, which answers
+/// <c>application/json</c> — and <c>ScimEndpoints.cs</c>'s own comment records that some
+/// connectors reject it. These seven therefore do NOT use <c>TypedResults</c>: they return
+/// <c>ScimOk</c>, <c>ScimCreated</c> and <c>ScimNoContent</c>, which write SCIM's media type and
+/// declare it. <c>TypedResults.Json</c> was not enough either — it writes a given content type
+/// while still declaring <c>application/json</c>, so the document would have contradicted the
+/// wire. The media type is asserted on every call below, not just the body, and
+/// <c>ScimDocumentedResponseTests</c> asserts the DECLARED one too.</para>
 ///
 /// <para>The host's database is empty, which is exactly what makes the list case useful: an empty
 /// page is where a shape is most likely to omit a member, and <c>Resources</c> must be present as
@@ -910,6 +918,59 @@ public class ScimDocumentedResponseTests(GeneratedOpenApiDocumentFixture fixture
         {
             successes[(method, path)].Should().Equal(["200"], $"{method} {path} answers 200");
         }
+    }
+
+    /// <summary>
+    /// A SCIM route's own refusals are declared as its own envelope — and the two the token
+    /// filter produces are not.
+    ///
+    /// <para>⚠️ <b>This is the distinction that makes the document honest.</b> A SCIM route
+    /// answers <c>400</c>, <c>404</c> and <c>409</c> with <see cref="ScimErrorResponse"/> at
+    /// <c>application/scim+json</c>, but its <c>401</c> and <c>403</c> come from
+    /// <c>ApiTokenAuthFilter</c>, which returns <c>Results.Problem</c> — so for those two it
+    /// really does answer <c>application/problem+json</c>. Declaring every refusal the same way
+    /// would be wrong in one direction or the other whichever way it was done, and
+    /// <c>ProducesProblem</c> on a SCIM route is the easy mistake: it compiles, it looks right,
+    /// and it tells a generated client to parse a <c>ProblemDetails</c> out of a SCIM
+    /// envelope.</para>
+    /// </summary>
+    [Fact]
+    public void A_scim_refusal_is_its_own_envelope_and_the_tokens_are_not()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        List<(string Method, string Path, string Code, Microsoft.OpenApi.IOpenApiResponse Response)> refusals =
+            [.. ScimResponses(fixture.Document!)
+                .Where(r => !r.Code.StartsWith("2", StringComparison.Ordinal))];
+
+        refusals.Should().NotBeEmpty("otherwise SCIM declares no refusals at all");
+
+        List<string> wrong = [];
+
+        foreach ((string method, string path, string code, Microsoft.OpenApi.IOpenApiResponse response) in refusals)
+        {
+            string[] media = [.. response.Content?.Keys ?? []];
+
+            string[] want = code is "401" or "403"
+                ? ["application/problem+json"]
+                : [ScimJson];
+
+            if (!media.SequenceEqual(want))
+            {
+                wrong.Add($"{method} {path} {code}: {string.Join("+", media)} (wanted {want[0]})");
+            }
+        }
+
+        wrong.Should().BeEmpty(
+            "a SCIM route's own refusal is a SCIM envelope; only the token filter's two are "
+            + "problem+json: " + string.Join("; ", wrong));
+
+        // ⚠️ And they are actually there. Every one of these was undeclared until the document
+        // was read for them — the handlers returned 404 and 409 while the document said the route
+        // could only answer 200, 401 or 403.
+        refusals.Select(r => r.Code).Distinct().Order().Should().Equal(
+            ["400", "401", "403", "404", "409"],
+            "these are the five a SCIM route can refuse with");
     }
 
     /// <summary>

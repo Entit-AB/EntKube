@@ -90,6 +90,24 @@ public static class PublicApiOpenApi
 
             options.AddOperationTransformer((operation, context, _) =>
             {
+                // ⚠️ Set explicitly rather than left to the framework. Every route calls
+                // WithName through RequireApiScope, and WithName alone produced NO operationId
+                // here — measured, not assumed: the document came back with 0 of 43 after every
+                // route had a name. A generated client with no operationIds has to invent method
+                // names from the method and path, so a path edit silently renames a client
+                // method and the name a caller binds to never appears in review.
+                //
+                // Read off IEndpointNameMetadata, which is what WithName sets and what ASP.NET
+                // Core enforces uniqueness on at startup — so the name in the document is the
+                // same name the router already refuses to duplicate.
+                string? endpointName = context.Description.ActionDescriptor.EndpointMetadata
+                    .OfType<IEndpointNameMetadata>().LastOrDefault()?.EndpointName;
+
+                if (!string.IsNullOrWhiteSpace(endpointName))
+                {
+                    operation.OperationId = endpointName;
+                }
+
                 ApiScopeMetadata? scope = context.Description.ActionDescriptor
                     .EndpointMetadata.OfType<ApiScopeMetadata>().FirstOrDefault();
 

@@ -2562,6 +2562,97 @@ contribute **nothing** to the document. A generated client needs error shapes as
 shapes, so this is the next piece of item 8 rather than a separate concern — and it has now been
 deferred five times.
 
+### 6.12 Item 8 is done: the document is an artifact, the client is generated, and the refusals are declared (2026-11-15)
+
+Three steps, in order, each ratcheted by its own test so a failure says which link moved:
+**application → `docs/openapi/v1.json` → `src/EntKube.ApiClient/Generated/EntKubeApi.g.cs`.**
+
+| | before | after |
+|---|---|---|
+| the document | existed only inside a test process | committed, 5,339 lines, regenerated with `ENTKUBE_UPDATE_OPENAPI=1` |
+| `operationId` | **0 of 43** | 43 of 43, unique |
+| typed client methods | 0 — three clients interpolated route strings | **43**, with 54 response types |
+| undeclared reachable statuses | **28** | 0 |
+
+#### The document had to become a file before anything else was worth doing
+
+Everything this repository knew about the API's described shape was asserted by a *count*. A count
+says something changed, never **what** — so an API change arrived in review as a one-line diff to a
+ratchet constant, and the wire difference was invisible. The committed document is that difference.
+It is also why §6.12's own status work needed no bespoke pin: a change to any declared status now
+shows up as a diff in a reviewable file.
+
+#### ⚠️ Two facts about naming, and only one of them is compiler-checked
+
+`RequireApiScope` now requires the operation's name, so the **compiler** refuses an unnamed route,
+and ASP.NET Core throws at startup on two endpoints sharing a name — a stronger guarantee than this
+repository could write for itself.
+
+That is a different fact from *the name reaching the document*, and the second failed silently:
+with all 43 routes named through `WithName`, the generated document came back with **0 of 43**
+operationIds. `PublicApiOpenApi` now sets `OperationId` explicitly from `IEndpointNameMetadata`.
+Nothing about the compiler check would have noticed, so it has its own test.
+
+#### Why the generator is in this repository rather than NSwag or Kiota
+
+Measured, not assumed. Two properties of this document defeat a stock generator:
+
+- .NET 10 writes a number as `type: ["integer","string"]` with a `pattern` constraining the string
+  form — **109 properties here**, including every count and every price. Read as a literal union
+  that is "integer or string", which resolves to `object`: the `UndescribedSuccessBodies` problem
+  arriving again through the tool meant to solve it.
+- **six success bodies are `application/scim+json`**, which a generator keyed on
+  `application/json` skips entirely — wasting §6.11 in full.
+
+⚠️ **Money is `decimal`, not `double`, and that is a deliberate departure from a literal reading of
+the document.** The server declares `decimal` (`ClusterRateResponse.CpuCoreHourCost`); .NET's
+OpenAPI generation writes `format: double` and loses it. A client reading a price into a `double`
+would put binary floating-point error into a billing API, and this repository has already shipped
+eight cost-arithmetic defects. Pinned by a test rather than left as a comment.
+
+⚠️ The DTOs are **init-only properties, not positional records**. A positional record makes the
+document's field ORDER part of the client's source compatibility, so reordering two members of a
+response — which changes nothing on the wire — would break every caller.
+
+⚠️ **A bad generation wedges the build.** The generated file is compiled by the project the
+generator's own test depends on, so a syntax error in the output breaks the thing that would fix
+it. Recovery is delete-and-regenerate; both generator defects found here were found that way.
+
+#### The refusals: 28 reachable statuses were described nowhere
+
+⚠️ **A `ProblemHttpResult` in a handler's `Results<…>` union contributes NOTHING to the document.**
+So routes that could refuse were described as only ever answering 200, 401 or 403, and a generated
+client would deserialise a `ProblemDetails` into whatever the 200 was meant to be — the same defect
+the central 401/403 declarations fixed, one level further in.
+
+| | routes | statuses |
+|---|---|---|
+| `503` — "no sweep has completed yet", which a client should RETRY rather than report | 7 | 7 |
+| `422` — the cluster refused | 9 | 9 |
+| `400` | 2 | 2 |
+| SCIM's own `400`/`404`/`409` | 6 | 10 |
+
+⚠️ **SCIM's refusals are NOT `ProducesProblem`.** A SCIM route answers its own envelope at
+`application/scim+json`, but its 401 and 403 come from `ApiTokenAuthFilter`, which returns
+`Results.Problem` — so for those two it really does answer `application/problem+json`. Declaring
+every refusal the same way is wrong in one direction or the other whichever way it is done.
+`ProducesScimError` exists for that, and `ProducesProblem` on a SCIM route is the easy mistake: it
+compiles, it looks right, and it tells a client to parse a `ProblemDetails` out of a SCIM envelope.
+
+⚠️ **The earlier note that this was "five routes and six statuses" was a stale undercount** — it
+was 28. And the first measurement of it was WRONG in a way worth recording: scanning handler source
+for status codes attributed a shared helper's `422` to the route registered above it, and
+`SyncAppSecrets`'s `207` to the route before that. The statuses are pinned as an explicit table for
+that reason, and the pin asserts **both directions** — a route advertising a refusal it cannot
+answer sends a client writing dead error handling, which is as wrong as hiding one.
+
+#### What this does NOT yet do
+
+Generation added a layer; it has not yet removed one. **The CLI and MCP server still interpolate
+route strings and parse JSON by hand** — 922 and 867 lines. Migrating them onto `EntKubeApi` is
+where the hand-maintained client code actually shrinks, and it is the next step rather than part of
+this one.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations

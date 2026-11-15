@@ -12,7 +12,9 @@ namespace EntKube.Web.Tests;
 /// <c>GET /rollouts</c> and <c>GET /disaster-recovery</c> serialise exactly as the anonymous
 /// objects they replaced. These were the last two operations in <c>PublicApiEndpoints</c> with no
 /// described success body; typing them took
-/// <c>ApiDocumentedResponsesTests.UndescribedSuccessBodies</c> to 7, which is now entirely SCIM.
+/// <c>ApiDocumentedResponsesTests.UndescribedSuccessBodies</c> to 7, all of it SCIM — which was
+/// then typed in turn, so that count is now <b>0</b> and every operation on the API describes the
+/// body it answers with.
 ///
 /// <para>⚠️ <b>The oracles are the OLD code, cut out of <c>origin/main</c> rather than
 /// retyped.</b> A record's mapping and its expected values both written from one reading of the

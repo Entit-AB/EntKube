@@ -74,15 +74,25 @@ public abstract class ScimJsonResult : IResult
     /// content type travels with it: a declaration of <c>application/json</c> beside a wire of
     /// <c>application/scim+json</c> is the specific lie this class exists to avoid.
     /// </summary>
-    private protected sealed class Declared(int statusCode, Type? type, bool hasBody = true)
+    internal sealed class Declared(int statusCode, Type? type, bool hasBody = true)
         : IProducesResponseTypeMetadata
     {
         public Type? Type => type;
         public int StatusCode => statusCode;
 
-        // ⚠️ A 204 declares NO content type. An entry naming a media type while carrying no type
-        // is inconsistent, and the description layer drops it silently — which left the deletion
-        // documented as answering only its two ways of failing.
+        // ⚠️ A 204 declares no content type — and this comment used to claim that was the fix
+        // for the deletion being documented as answering only its two ways of failing. It is not.
+        //
+        // Measured by mutation rather than reasoned about. With `Type` set to `typeof(void)`,
+        // putting the media type back changes the generated document not at all: the description
+        // layer ignores a content type on a response that carries no body, so that mutation is a
+        // no-op and not one test fails. What actually discarded the 204 was `Type` being NULL,
+        // which drops the entry outright — restoring that null fails five tests, one of them
+        // `UndescribedSuccessBodies`, because the deletion goes straight back to undescribed.
+        //
+        // The distinction is kept anyway, as a defence rather than the fix: an entry that says
+        // "no body" while naming a media type is self-contradictory even where it is inert, and
+        // inert in this framework version is not a promise about the next one.
         public IEnumerable<string> ContentTypes => hasBody ? [ContentType] : [];
     }
 }
@@ -140,4 +150,35 @@ public sealed class ScimNoContent : ScimJsonResult, IEndpointMetadataProvider
     public static void PopulateMetadata(MethodInfo method, EndpointBuilder builder) =>
         builder.Metadata.Add(
             new Declared(StatusCodes.Status204NoContent, typeof(void), hasBody: false));
+}
+
+
+/// <summary>
+/// Declares the refusals a SCIM route can answer with.
+///
+/// <para>⚠️ <b>Not <c>ProducesProblem</c>.</b> That declares a <c>ProblemDetails</c> at
+/// <c>application/problem+json</c>, and a SCIM route answers its own envelope at
+/// <c>application/scim+json</c> — see <see cref="ScimErrorResponse"/>. Declaring the wrong one
+/// would put in the document exactly the lie
+/// <c>ScimDocumentedResponseTests.Every_scim_success_is_declared_as_scim_json</c> exists to
+/// catch, one status family over.</para>
+///
+/// <para>⚠️ The <c>401</c> and <c>403</c> are NOT declared here and must not be: those come from
+/// <c>ApiTokenAuthFilter</c>, which returns <c>Results.Problem</c>, so for those two statuses a
+/// SCIM route really does answer <c>problem+json</c>. The central declaration in
+/// <c>RequireApiScope</c> is accurate for them, and this one is accurate for the rest.</para>
+/// </summary>
+public static class ScimErrorDeclaration
+{
+    public static TBuilder ProducesScimError<TBuilder>(this TBuilder builder, params int[] statuses)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        foreach (int status in statuses.Distinct().Order())
+        {
+            builder.WithMetadata(
+                new ScimJsonResult.Declared(status, typeof(ScimErrorResponse)));
+        }
+
+        return builder;
+    }
 }
