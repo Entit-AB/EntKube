@@ -326,3 +326,194 @@ public class SecretRedactionTests
         none.DiffText.Should().BeEmpty();
     }
 }
+
+/// <summary>
+/// ⚠️ <c>kubectl.kubernetes.io/last-applied-configuration</c>: a second copy of the whole Secret,
+/// carried in an ANNOTATION rather than in a <c>data:</c> block.
+///
+/// <para><c>kubectl apply</c> writes the manifest it applied into that annotation as one line of
+/// JSON, values included. So a Secret read back with <c>get -o yaml</c> — which is exactly what
+/// the gate does for a deleted resource, and what a dry-run rendering returns — carries its own
+/// values twice: once in <c>data:</c>, where they are redacted, and once inside a metadata
+/// annotation, where the line-oriented pass never looks because it is not inside a data
+/// block.</para>
+///
+/// <para>Measured rather than reasoned about: the JSON pass runs over the whole text first and
+/// may or may not reach into a YAML scalar that happens to contain JSON. These assertions say
+/// which.</para>
+/// </summary>
+public class LastAppliedAnnotationRedactionTests
+{
+    private const string Password = "aHVudGVyMg==";
+
+    /// <summary>
+    /// A Secret as <c>kubectl get -o yaml</c> returns it after an apply: the value in
+    /// <c>data</c>, and the whole manifest again in the annotation.
+    /// </summary>
+    private const string SecretWithLastApplied = """
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: app-secrets
+          namespace: billing
+          annotations:
+            kubectl.kubernetes.io/last-applied-configuration: '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"app-secrets","namespace":"billing"},"data":{"DB_PASSWORD":"aHVudGVyMg=="},"type":"Opaque"}'
+        type: Opaque
+        data:
+          DB_PASSWORD: aHVudGVyMg==
+        """;
+
+    [Fact]
+    public void The_value_does_not_survive_in_the_annotation()
+    {
+        string? scrubbed = SecretRedaction.Scrub(SecretWithLastApplied);
+
+        scrubbed.Should().NotBeNull();
+        scrubbed!.Should().NotContain(
+            Password,
+            "the annotation carries the same value a second time, and a dialog is a screen that "
+            + "gets screenshotted");
+    }
+
+    /// <summary>
+    /// And the annotation's KEY still shows, so an operator can see the object was applied rather
+    /// than created some other way — the key is not the secret.
+    /// </summary>
+    [Fact]
+    public void The_annotation_itself_still_shows()
+    {
+        SecretRedaction.Scrub(SecretWithLastApplied)!
+            .Should().Contain("last-applied-configuration");
+    }
+
+    /// <summary>
+    /// ⚠️ The same annotation, in the shape where its own quotes are ESCAPED — a JSON document
+    /// carrying the manifest as a string value, which is what a patch body or a JSON-format read
+    /// looks like. The JSON pass matches the literal text <c>"data"</c>, and here the text is
+    /// <c>\"data\"</c>.
+    /// </summary>
+    [Fact]
+    public void The_value_does_not_survive_an_escaped_annotation()
+    {
+        const string escaped =
+            """
+            {"kind":"Secret","metadata":{"name":"app-secrets","annotations":{"kubectl.kubernetes.io/last-applied-configuration":"{\"kind\":\"Secret\",\"data\":{\"DB_PASSWORD\":\"aHVudGVyMg==\"}}"}},"data":{"DB_PASSWORD":"aHVudGVyMg=="}}
+            """;
+
+        string? scrubbed = SecretRedaction.Scrub(escaped);
+
+        scrubbed.Should().NotBeNull();
+        scrubbed!.Should().NotContain(
+            Password,
+            "an escaped copy of the manifest is still a copy of the manifest");
+    }
+
+    /// <summary>
+    /// ⚠️ And a <c>data</c> object whose own value contains a brace. The JSON pass bounds the
+    /// object with <c>[^{}]*</c>, so a brace inside a value ends the match early — and whatever
+    /// follows is outside it.
+    /// </summary>
+    [Fact]
+    public void A_value_containing_a_brace_does_not_break_the_bound()
+    {
+        const string withBrace =
+            """
+            {"kind":"Secret","stringData":{"CONFIG":"{\"nested\":true}","DB_PASSWORD":"aHVudGVyMg=="}}
+            """;
+
+        SecretRedaction.Scrub(withBrace)!.Should().NotContain(
+            Password, "a brace in one value must not expose the next");
+    }
+
+    /// <summary>
+    /// ⚠️ <c>data</c> is not at the root. A patch body and a read-back object both nest it under
+    /// the resource, so a walk that only looked at the top level would redact nothing at all here.
+    /// </summary>
+    [Fact]
+    public void A_nested_data_object_is_redacted_too()
+    {
+        const string nested =
+            """
+            {"items":[{"kind":"Secret","metadata":{"name":"app-secrets"},"data":{"DB_PASSWORD":"aHVudGVyMg=="}}]}
+            """;
+
+        string? scrubbed = SecretRedaction.Scrub(nested);
+
+        scrubbed!.Should().NotContain(Password, "depth is not a reason to stop redacting");
+        scrubbed.Should().Contain("DB_PASSWORD", "the key is not the secret");
+    }
+
+    /// <summary>
+    /// <c>stringData</c> as well as <c>data</c>. It is the shape an operator is most likely to
+    /// have written by hand, so it is the one most likely to hold a plaintext password.
+    /// </summary>
+    [Fact]
+    public void StringData_is_redacted_as_well_as_data()
+    {
+        const string stringData =
+            """
+            {"kind":"Secret","stringData":{"DB_PASSWORD":"aHVudGVyMg=="}}
+            """;
+
+        SecretRedaction.Scrub(stringData)!.Should().NotContain(Password);
+    }
+
+    /// <summary>
+    /// ⚠️ <b>What goes to the dialog is still a document.</b> Redaction replaces values; it must
+    /// not change the shape around them.
+    ///
+    /// <para>This is the assertion that was missing. The first version of the annotation fix
+    /// replaced everything after the annotation's colon to the end of the line — which on a
+    /// single-line JSON document is the entire rest of the document. The output was truncated
+    /// invalid JSON, and <see cref="The_value_does_not_survive_an_escaped_annotation"/> PASSED,
+    /// because the value it was looking for had been destroyed along with everything after it. A
+    /// redaction test that only asks "is the secret gone" cannot tell redaction from
+    /// deletion.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("""{"kind":"Secret","metadata":{"annotations":{"kubectl.kubernetes.io/last-applied-configuration":"{\"data\":{\"P\":\"aHVudGVyMg==\"}}"}},"data":{"P":"aHVudGVyMg=="}}""")]
+    [InlineData("""{"kind":"Secret","stringData":{"CONFIG":"{\"nested\":true}","P":"aHVudGVyMg=="}}""")]
+    [InlineData("""{"items":[{"kind":"Secret","data":{"P":"aHVudGVyMg=="}}]}""")]
+    public void The_scrubbed_document_is_still_valid_json(string raw)
+    {
+        string? scrubbed = SecretRedaction.Scrub(raw);
+
+        scrubbed.Should().NotBeNull();
+
+        Action parse = () => System.Text.Json.Nodes.JsonNode.Parse(scrubbed!);
+
+        parse.Should().NotThrow(
+            "the dialog shows this to an operator; a redaction that truncates the document hides "
+            + "the secret by destroying the page");
+
+        scrubbed!.Should().NotContain(Password, "and the secret is still gone");
+    }
+
+    /// <summary>
+    /// ⚠️ The shape only the annotation rule can save: <b>YAML</b>, so the parser never sees it,
+    /// carrying an annotation whose inner <c>stringData</c> holds a value with a brace — so the
+    /// regex fallback's <c>[^{}]*</c> bound ends before the password.
+    ///
+    /// <para>Without this, every assertion about the annotation passes on the regex's side effect
+    /// of reaching into a YAML scalar, and <c>ScrubLastApplied</c> is code nothing requires.</para>
+    /// </summary>
+    [Fact]
+    public void A_yaml_annotation_whose_inner_value_has_a_brace_is_still_redacted()
+    {
+        const string yaml = """
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: app-secrets
+              annotations:
+                kubectl.kubernetes.io/last-applied-configuration: '{"kind":"Secret","stringData":{"CONFIG":"{\"nested\":true}","DB_PASSWORD":"aHVudGVyMg=="}}'
+            type: Opaque
+            """;
+
+        SecretRedaction.Scrub(yaml)!.Should().NotContain(
+            Password,
+            "the regex cannot bound an object whose value contains a brace, so the annotation's "
+            + "whole value has to go");
+    }
+}
+

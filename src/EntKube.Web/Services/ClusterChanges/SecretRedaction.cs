@@ -59,8 +59,24 @@ public static class SecretRedaction
     {
         if (string.IsNullOrEmpty(text)) return text;
 
-        // JSON first: a patch body is one line of JSON, and the line-oriented pass below cannot
-        // see into it.
+        // ⚠️ A JSON document goes through the parser and NOTHING ELSE. It already handles both
+        // things the line passes are for — every data and stringData object at any depth, and the
+        // last-applied annotation — and it cannot corrupt what it rewrites.
+        //
+        // The line rule must not touch JSON, and the first version of this did: it replaced
+        // everything after the annotation's colon to the end of the line, which on a single-line
+        // JSON document is the whole rest of the document. The dialog got truncated, invalid JSON
+        // — and the test for the annotation PASSED, because the value it was looking for had been
+        // destroyed along with everything after it. See
+        // LastAppliedAnnotationRedactionTests.The_scrubbed_document_is_still_valid_json.
+        if (TryScrubJsonDocument(text, out string? parsed))
+        {
+            return parsed!;
+        }
+
+        // Not a JSON document: YAML or diff text, where an annotation occupies one line and the
+        // rest of the line is its value.
+        text = ScrubLastApplied(text);
         text = ScrubJsonData(text);
 
         if (!text.Contains("data:", StringComparison.Ordinal)
@@ -221,9 +237,146 @@ public static class SecretRedaction
     }
 
     /// <summary>
-    /// Redacts <c>"data"</c> and <c>"stringData"</c> objects in JSON, for the patch bodies the
-    /// gate shows verbatim. Deliberately narrow: it rewrites the values of a flat object following
-    /// one of those keys and leaves the rest of the document alone.
+    /// The annotation <c>kubectl apply</c> writes with the entire applied manifest, values
+    /// included.
+    ///
+    /// <para>⚠️ <b>A Secret read back with <c>get -o yaml</c> carries its values TWICE</b> — once
+    /// in <c>data:</c>, where they are redacted, and once inside this metadata annotation, where
+    /// the data-block pass never looks. The gate does exactly that read for a deleted resource,
+    /// and a dry-run rendering returns the same shape.</para>
+    ///
+    /// <para>The whole value goes, rather than the <c>data</c> object inside it. The operator does
+    /// not need a second copy of the manifest, and keying on the ANNOTATION NAME rather than on
+    /// the structure inside it is what makes this hold for every shape the value arrives in: a
+    /// YAML scalar, a quoted scalar, or a JSON string whose own quotes are escaped. The escaped
+    /// form is what defeated the regex this replaces.</para>
+    /// </summary>
+    private const string LastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration";
+
+    /// <summary>
+    /// Replaces the annotation's value on any line that carries it. The JSON case is handled by
+    /// the parser instead, which is why this may safely take the rest of the line: YAML puts one
+    /// annotation on one line, and a diff line showing a patch is a line too.
+    /// </summary>
+    private static string ScrubLastApplied(string text)
+    {
+        if (!text.Contains(LastAppliedAnnotation, StringComparison.Ordinal)) return text;
+
+        List<string> output = [];
+
+        foreach (string line in text.Split('\n'))
+        {
+            int name = line.IndexOf(LastAppliedAnnotation, StringComparison.Ordinal);
+            if (name < 0)
+            {
+                output.Add(line);
+                continue;
+            }
+
+            int colon = line.IndexOf(':', name + LastAppliedAnnotation.Length);
+            if (colon < 0)
+            {
+                output.Add(line);
+                continue;
+            }
+
+            string value = line[(colon + 1)..].Trim();
+            output.Add(value.Length == 0
+                ? line
+                : line[..(colon + 1)] + " " + Fingerprint(value));
+        }
+
+        return string.Join('\n', output);
+    }
+
+    /// <summary>
+    /// Walks the document as JSON and redacts every <c>data</c> and <c>stringData</c> object at
+    /// any depth, plus the last-applied annotation.
+    ///
+    /// <para>⚠️ A parser rather than a pattern, because the pattern could not say where an object
+    /// ENDS. It bounded the body with <c>[^{}]*</c>, so a value containing a brace — an app
+    /// config blob sitting next to a password in <c>stringData</c> is exactly that — ended the
+    /// match early and left the following key's value in the clear.</para>
+    ///
+    /// <para>Returns false for anything that is not a JSON document, which is most of what
+    /// reaches this: diff text and YAML manifests go to the line-oriented passes.</para>
+    /// </summary>
+    private static bool TryScrubJsonDocument(string text, out string? scrubbed)
+    {
+        scrubbed = null;
+
+        string trimmed = text.TrimStart();
+        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '[')) return false;
+
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(text);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+
+        if (root is null) return false;
+
+        ScrubNode(root, inData: false);
+        scrubbed = root.ToJsonString();
+        return true;
+    }
+
+    private static void ScrubNode(System.Text.Json.Nodes.JsonNode node, bool inData)
+    {
+        if (node is System.Text.Json.Nodes.JsonArray array)
+        {
+            foreach (System.Text.Json.Nodes.JsonNode? item in array)
+            {
+                if (item is not null) ScrubNode(item, inData);
+            }
+
+            return;
+        }
+
+        if (node is not System.Text.Json.Nodes.JsonObject map) return;
+
+        foreach (string key in map.Select(p => p.Key).ToList())
+        {
+            System.Text.Json.Nodes.JsonNode? child = map[key];
+
+            // ⚠️ The annotation is a whole manifest in a string. Redact the string itself rather
+            // than descending into it: parsing it to redact its data block would leave every
+            // other value in it readable, and it is a copy of an object the operator is already
+            // being shown.
+            if (key == LastAppliedAnnotation)
+            {
+                map[key] = Fingerprint(child?.ToString() ?? "");
+                continue;
+            }
+
+            bool childIsData = inData || key is "data" or "stringData";
+
+            if (child is System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray)
+            {
+                ScrubNode(child, childIsData);
+                continue;
+            }
+
+            // A scalar directly inside a data block is a value.
+            if (inData && child is not null)
+            {
+                map[key] = Fingerprint(child.ToString());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Redacts <c>"data"</c> and <c>"stringData"</c> objects in a JSON FRAGMENT — a truncated hunk
+    /// or a diff line, which <see cref="TryScrubJsonDocument"/> cannot parse.
+    ///
+    /// <para>⚠️ Still bounded by <c>[^{}]*</c>, and still unable to say where an object ends when
+    /// a value contains a brace. That is why it is now the fallback rather than the path every
+    /// JSON document takes: on a fragment, over-redaction is the failure mode and the parser
+    /// handles everything well-formed.</para>
     /// </summary>
     private static string ScrubJsonData(string text)
     {
