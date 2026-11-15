@@ -1145,8 +1145,12 @@ public class Program
         //
         // RequireApiScope() with no scope means "any live token", which is the right bar: a
         // reader allowed to call nothing in particular may still read what exists.
+        //
+        // ⚠️ It needs a name like every other route, although it is absent from the document it
+        // serves: MapOpenApi's route carries ApiScopeMetadata but has no API description, so it
+        // is described nowhere and has no operationId to collide with.
         app.MapOpenApi("/api/v1/openapi.json")
-            .RequireApiScope();
+            .RequireApiScope("GetOpenApiDocument");
         EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
 
         app.Run();

@@ -107,10 +107,27 @@ public static class ApiTokenAuthExtensions
     /// and the document deserves the same guard as the routes it describes. Route call sites are
     /// unchanged — they still get their own builder type back and still chain.
     /// </remarks>
+    /// <param name="operationName">
+    /// The operation's name, which becomes its <c>operationId</c> in the generated document and
+    /// therefore the method name on every generated client.
+    ///
+    /// <para>⚠️ <b>Required, and here rather than in a <c>.WithName()</c> of its own.</b> Not one
+    /// of the forty-three operations had an <c>operationId</c>, so a generator had to invent
+    /// method names from the method and path — which means a path edit silently renames a client
+    /// method, and the name a caller binds to never appears in review at all. This method is
+    /// already the one place every operation passes through, so making the parameter required
+    /// means the COMPILER refuses a route with no name, rather than a test noticing later.</para>
+    ///
+    /// <para>⚠️ Uniqueness is enforced by ASP.NET Core, which throws at startup on two endpoints
+    /// sharing a name. That is a stronger guarantee than this repository could write for itself,
+    /// and it is why the name is passed to <c>WithName</c> rather than only into metadata.</para>
+    /// </param>
     public static TBuilder RequireApiScope<TBuilder>(
-        this TBuilder builder, string? scope = null)
+        this TBuilder builder, string operationName, string? scope = null)
         where TBuilder : IEndpointConventionBuilder
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationName);
+
         // ⚠️ The same fact in two places, but derived ONCE. The filter ENFORCES the scope; the
         // metadata DESCRIBES it, and nothing outside the filter could see which scope a route
         // needed — it lived in a filter instance's field — so the generated OpenAPI document,
@@ -124,6 +141,7 @@ public static class ApiTokenAuthExtensions
 
         builder = builder
             .AddEndpointFilter(filter)
+            .WithName(operationName)
             .WithMetadata(new ApiScopeMetadata(filter.RequiredScope))
             // ⚠️ And the status this route chooses must survive to the caller. Program.cs installs
             // UseStatusCodePagesWithReExecute("/not-found") for the whole app, which re-executes

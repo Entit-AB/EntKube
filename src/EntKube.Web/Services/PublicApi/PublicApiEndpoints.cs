@@ -43,7 +43,7 @@ public static class PublicApiEndpoints
                 TenantId: principal.TenantId,
                 Token: principal.TokenName,
                 Scopes: principal.Scopes.OrderBy(s => s)));
-        }).RequireApiScope();
+        }).RequireApiScope("GetWhoami");
 
         // ── Fleet ──
 
@@ -76,7 +76,7 @@ public static class PublicApiEndpoints
                     provisioningStatus: PublishedProvisioningStatus(c.ProvisioningStatus),
                     componentCount: componentCounts.GetValueOrDefault(c.Id)))
                 .ToList());
-        }).RequireApiScope(ApiScopes.FleetRead);
+        }).RequireApiScope("ListClusters", ApiScopes.FleetRead);
 
         api.MapGet("/clusters/{clusterId:guid}/components",
             async Task<Results<Ok<IEnumerable<ComponentResponse>>, NotFound>> (
@@ -107,7 +107,7 @@ public static class PublicApiEndpoints
                     .Select(ComponentResponse.From)];
 
             return TypedResults.Ok<IEnumerable<ComponentResponse>>(components);
-        }).RequireApiScope(ApiScopes.FleetRead);
+        }).RequireApiScope("ListClusterComponents", ApiScopes.FleetRead);
 
         // ── Virtual machines ──
 
@@ -131,7 +131,7 @@ public static class PublicApiEndpoints
 
             return TypedResults.Ok(new VirtualMachineListResponse(
                 [.. list.Machines.Select(VirtualMachineResponse.From)], list.Warnings));
-        }).RequireApiScope(ApiScopes.FleetRead);
+        }).RequireApiScope("ListVirtualMachines", ApiScopes.FleetRead);
 
         // Six routes rather than one with an {action} parameter: each is its own operation in the
         // document and its own line in the scope's grant, and the CLI's six commands each build one.
@@ -141,42 +141,42 @@ public static class PublicApiEndpoints
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Start, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("StartVirtualMachine", ApiScopes.VmsWrite);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/stop",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Stop, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("StopVirtualMachine", ApiScopes.VmsWrite);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/restart",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Restart, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("RestartVirtualMachine", ApiScopes.VmsWrite);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/pause",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Pause, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("PauseVirtualMachine", ApiScopes.VmsWrite);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/unpause",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Unpause, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("UnpauseVirtualMachine", ApiScopes.VmsWrite);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/migrate",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Migrate, fleet, gate, ct))
-            .RequireApiScope(ApiScopes.VmsWrite);
+            .RequireApiScope("MigrateVirtualMachine", ApiScopes.VmsWrite);
 
         // ── Apps and deployments ──
 
@@ -213,7 +213,7 @@ public static class PublicApiEndpoints
                 .OrderBy(a => a.Name, StringComparer.Ordinal)
                 .Select(a => AppResponse.From(a, deploymentCounts.GetValueOrDefault(a.Id)))
                 .ToList());
-        }).RequireApiScope(ApiScopes.AppsRead);
+        }).RequireApiScope("ListApps", ApiScopes.AppsRead);
 
         api.MapGet("/deployments", async Task<Ok<IEnumerable<DeploymentResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery,
@@ -243,7 +243,7 @@ public static class PublicApiEndpoints
                 .OrderBy(d => d.Name, StringComparer.Ordinal)
                 .Select(DeploymentResponse.From)
                 .ToList());
-        }).RequireApiScope(ApiScopes.AppsRead);
+        }).RequireApiScope("ListDeployments", ApiScopes.AppsRead);
 
         api.MapPost("/deployments/{deploymentId:guid}/sync",
             async Task<Results<Ok<DeploymentSyncResponse>, ProblemHttpResult, NotFound>> (
@@ -278,7 +278,7 @@ public static class PublicApiEndpoints
             return result.IsSuccess
                 ? TypedResults.Ok(DeploymentSyncResponse.From(result))
                 : TypedResults.Problem(result.Error ?? "Sync failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
-        }).RequireApiScope(ApiScopes.AppsWrite);
+        }).RequireApiScope("SyncDeployment", ApiScopes.AppsWrite);
 
         // A restart targets one Kubernetes Deployment, not the whole EntKube deployment,
         // so the workload name is required rather than guessed. Guessing here would mean
@@ -321,7 +321,7 @@ public static class PublicApiEndpoints
             return result.IsSuccess
                 ? TypedResults.Ok(OkResponse.Succeeded)
                 : TypedResults.Problem(result.Error ?? "Restart failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
-        }).RequireApiScope(ApiScopes.AppsWrite);
+        }).RequireApiScope("RestartDeployment", ApiScopes.AppsWrite);
 
         // ── Operations ──
 
@@ -385,7 +385,7 @@ public static class PublicApiEndpoints
             AppSecretSyncResponse body = AppSecretSyncResponse.From(result);
 
             return SecretSyncAnswer(body);
-        }).RequireApiScope(ApiScopes.AppsWrite)
+        }).RequireApiScope("SyncAppSecrets", ApiScopes.AppsWrite)
           // ⚠️ THE ONE PLACE ON THIS API WHERE A RESPONSE IS DECLARED AS WELL AS RETURNED, and
           // the exception to the "returned, not declared" rule on PublicApiResponses — written
           // here rather than left to contradict it silently.
@@ -414,7 +414,7 @@ public static class PublicApiEndpoints
             // not convert to the declared Ok<IEnumerable<T>>.
             return TypedResults.Ok<IEnumerable<AdvisorFindingResponse>>(
                 [.. findings.Select(AdvisorFindingResponse.From)]);
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListAdvisorFindings", ApiScopes.OpsRead);
 
         api.MapGet("/incidents",
             async Task<Ok<IEnumerable<IncidentResponse>>> (
@@ -435,7 +435,7 @@ public static class PublicApiEndpoints
             // enumerates exactly where the untyped one did.
             return TypedResults.Ok<IEnumerable<IncidentResponse>>(
                 [.. incidents.Select(IncidentResponse.From)]);
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListIncidents", ApiScopes.OpsRead);
 
         // A status the enum does not name answers 400 here rather than reaching Enum.Parse in the
         // contract. Numeric spellings are refused too, because TryParse would accept "2".
@@ -459,7 +459,7 @@ public static class PublicApiEndpoints
                     e.Id, e.Kind, e.Status, e.Rating, e.Message, e.ContactEmail, e.Site, e.PagePath,
                     e.HasScreenshot, e.TicketId, e.CreatedAt))
                 .ToList());
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListFeedback", ApiScopes.OpsRead);
 
         // A GET, because a query changes nothing. The cluster is asked of Fleet first: the log layer
         // takes a tenant but does not refuse a cluster outside it, so this is the tenant check.
@@ -497,7 +497,7 @@ public static class PublicApiEndpoints
             return outcome.Table is { } table
                 ? TypedResults.Ok(new LogQueryResponse(table.Columns, table.Rows, table.LinesScanned, table.Partial))
                 : TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
-        }).RequireApiScope(ApiScopes.LogsRead);
+        }).RequireApiScope("QueryLogs", ApiScopes.LogsRead);
 
         // As on /feedback: an unknown status answers 400 here rather than reaching Enum.Parse.
         api.MapGet("/error-issues", async Task<Results<Ok<IEnumerable<ErrorIssueResponse>>, BadRequest<string>>> (
@@ -520,7 +520,7 @@ public static class PublicApiEndpoints
                     i.Id, i.Source, i.Scope, i.Namespace, i.Workload, i.Title, i.SampleMessage, i.Occurrences,
                     i.CountIsPartial, i.Status, i.Regressions, i.FirstSeenAt, i.LastSeenAt))
                 .ToList());
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListErrorIssues", ApiScopes.OpsRead);
 
         api.MapGet("/slos", async Task<Ok<IEnumerable<SloResponse>>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
@@ -534,7 +534,7 @@ public static class PublicApiEndpoints
                     s.Id, s.Name, s.Kind, s.TargetPercent, s.WindowDays, s.Good, s.Total, s.AttainedPercent,
                     s.BudgetSpentFraction, s.BurnRate, s.IsBreached))
                 .ToList());
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListSlos", ApiScopes.OpsRead);
 
         api.MapGet("/synthetic-checks", async Task<Ok<IEnumerable<SyntheticCheckResponse>>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
@@ -549,7 +549,7 @@ public static class PublicApiEndpoints
                     c.Id, c.Name, c.Url, c.IsEnabled, c.State, c.ConsecutiveFailures, c.UptimePercent,
                     c.LastStatusCode, c.LastDurationMs, c.LastFailure, c.LastRunAt))
                 .ToList());
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListSyntheticChecks", ApiScopes.OpsRead);
 
         // ⚠️ The API could not answer "are we meeting the SLAs". A grep for budget, availability,
         //    uptime, sla and maintenance across this entire file returned nothing — the figure a
@@ -569,7 +569,7 @@ public static class PublicApiEndpoints
             // they replaced — including that atRisk's lifted `> 1.0` leaves a null burn rate out
             // of BOTH counters.
             return TypedResults.Ok(ErrorBudgetReportResponse.From(budgets));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListErrorBudgets", ApiScopes.OpsRead);
 
         api.MapGet("/upgrades",
             async Task<Ok<UpgradeReportResponse>> (
@@ -584,7 +584,7 @@ public static class PublicApiEndpoints
                 await catalog.GetUpgradeReportAsync(tenantId, DateTime.UtcNow, ct);
 
             return TypedResults.Ok(UpgradeReportResponse.From(report));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListUpgrades", ApiScopes.OpsRead);
 
         api.MapGet("/drift",
             Results<Ok<DriftReportResponse>, ProblemHttpResult> (
@@ -603,7 +603,7 @@ public static class PublicApiEndpoints
             }
 
             return TypedResults.Ok(DriftReportResponse.FromReport(report));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListDrift", ApiScopes.OpsRead);
 
         api.MapGet("/supply-chain",
             Results<Ok<SupplyChainReportResponse>, ProblemHttpResult> (
@@ -620,7 +620,7 @@ public static class PublicApiEndpoints
             }
 
             return TypedResults.Ok(SupplyChainReportResponse.FromReport(report));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListSupplyChainFindings", ApiScopes.OpsRead);
 
         api.MapGet("/cost",
             Results<Ok<CostRunRateResponse>, ProblemHttpResult> (
@@ -640,7 +640,7 @@ public static class PublicApiEndpoints
             // renames each one carries — lives on CostRunRateResponse so the mapping can be
             // asserted against the anonymous object it replaced.
             return TypedResults.Ok(CostRunRateResponse.From(report));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("GetCostReport", ApiScopes.OpsRead);
 
         // Cost history — what was actually incurred, as opposed to /cost, which is a
         // projection of what today would cost over a month. This is the endpoint a
@@ -707,7 +707,7 @@ public static class PublicApiEndpoints
             // The shape, and the renames it carries, now live on CostHistoryResponse so the
             // mapping can be asserted against the anonymous object it replaced.
             return TypedResults.Ok(CostHistoryResponse.FromReport(report));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("GetCostHistory", ApiScopes.OpsRead);
 
         api.MapGet("/cost/months",
             async Task<Results<Ok<IEnumerable<CostMonthResponse>>, ProblemHttpResult>> (
@@ -727,7 +727,7 @@ public static class PublicApiEndpoints
                     tenantId, Math.Clamp(months ?? 12, 1, 36), DateTime.UtcNow, customerId: null, ct);
 
             return TypedResults.Ok(all.Select(CostMonthResponse.From));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListCostMonths", ApiScopes.OpsRead);
 
         api.MapGet("/rollouts", async Task<Ok<IEnumerable<RolloutResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
@@ -743,7 +743,7 @@ public static class PublicApiEndpoints
             // The shape, and the reason `status` stays a string, live on RolloutResponse so
             // the mapping can be asserted against the anonymous object it replaced.
             return TypedResults.Ok(rollouts.Select(RolloutResponse.From));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("ListRollouts", ApiScopes.OpsRead);
 
         api.MapGet("/disaster-recovery",
             Results<Ok<IEnumerable<DrStatusResponse>>, ProblemHttpResult> (
@@ -768,7 +768,7 @@ public static class PublicApiEndpoints
             // The shape, the string severities and the restorable/lastUsableBackupAt asymmetry
             // live on DrStatusResponse.
             return TypedResults.Ok(statuses.Select(s => DrStatusResponse.From(s, now)));
-        }).RequireApiScope(ApiScopes.OpsRead);
+        }).RequireApiScope("GetDisasterRecoveryPosture", ApiScopes.OpsRead);
 
         // ── Configuration (infrastructure-as-code) ──
         //
@@ -783,7 +783,7 @@ public static class PublicApiEndpoints
 
             return TypedResults.Ok(
                 (await cost.ListRatesAsync(tenantId, ct)).Select(ToCostRateDto));
-        }).RequireApiScope(ApiScopes.ConfigRead);
+        }).RequireApiScope("ListCostRates", ApiScopes.ConfigRead);
 
         api.MapGet("/cost-rates/{clusterId:guid}",
             async Task<Results<Ok<ClusterRateResponse>, NotFound>> (
@@ -803,7 +803,7 @@ public static class PublicApiEndpoints
             return rate is null
                 ? TypedResults.NotFound()
                 : TypedResults.Ok(ToCostRateDto(rate));
-        }).RequireApiScope(ApiScopes.ConfigRead);
+        }).RequireApiScope("GetCostRate", ApiScopes.ConfigRead);
 
         api.MapPut("/cost-rates/{clusterId:guid}",
             async Task<Results<Ok<ClusterRateResponse>, NotFound>> (
@@ -837,7 +837,7 @@ public static class PublicApiEndpoints
             return saved is null
                 ? TypedResults.NotFound()
                 : TypedResults.Ok(ToCostRateDto(saved));
-        }).RequireApiScope(ApiScopes.ConfigWrite);
+        }).RequireApiScope("SetCostRate", ApiScopes.ConfigWrite);
 
         api.MapDelete("/cost-rates/{clusterId:guid}",
             async Task<Results<NoContent, NotFound>> (
@@ -853,7 +853,7 @@ public static class PublicApiEndpoints
             // schema; it has nothing to describe, which is why the ratchet counts it apart from
             // the genuinely undescribed ones.
             return deleted ? TypedResults.NoContent() : TypedResults.NotFound();
-        }).RequireApiScope(ApiScopes.ConfigWrite);
+        }).RequireApiScope("DeleteCostRate", ApiScopes.ConfigWrite);
 
         // IAdvisorApi.AcknowledgeAsync has always existed; this route reached past it to the
         // service that backs it, which is how a contract ends up with no consumers while the
@@ -901,7 +901,7 @@ public static class PublicApiEndpoints
             // NotFound arm of the declared union now puts the same 404 in the document. Keeping
             // both would be the two-copies-of-one-fact the class comment on PublicApiResponses
             // warns about, and the declared one cannot drift out of step with the handler.
-        }).RequireApiScope(ApiScopes.OpsWrite);
+        }).RequireApiScope("AcknowledgeAdvisorFinding", ApiScopes.OpsWrite);
     }
 
     /// <summary>

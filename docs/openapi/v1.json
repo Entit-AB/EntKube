@@ -12,6 +12,7 @@
           "EntKube.Web"
         ],
         "description": "Requires any live API token.",
+        "operationId": "GetWhoami",
         "responses": {
           "200": {
             "description": "OK",
@@ -45,6 +46,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `fleet:read` scope.",
+        "operationId": "ListClusters",
         "responses": {
           "200": {
             "description": "OK",
@@ -91,6 +93,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `fleet:read` scope.",
+        "operationId": "ListClusterComponents",
         "parameters": [
           {
             "name": "clusterId",
@@ -151,6 +154,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `fleet:read` scope.",
+        "operationId": "ListVirtualMachines",
         "parameters": [
           {
             "name": "clusterId",
@@ -208,6 +212,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "StartVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -281,6 +286,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "StopVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -354,6 +360,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "RestartVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -427,6 +434,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "PauseVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -500,6 +508,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "UnpauseVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -573,6 +582,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `vms:write` scope.",
+        "operationId": "MigrateVirtualMachine",
         "parameters": [
           {
             "name": "clusterId",
@@ -646,6 +656,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `apps:read` scope.",
+        "operationId": "ListApps",
         "responses": {
           "200": {
             "description": "OK",
@@ -692,6 +703,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `apps:read` scope.",
+        "operationId": "ListDeployments",
         "parameters": [
           {
             "name": "appId",
@@ -748,6 +760,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `apps:write` scope.",
+        "operationId": "SyncDeployment",
         "parameters": [
           {
             "name": "deploymentId",
@@ -805,6 +818,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `apps:write` scope.",
+        "operationId": "RestartDeployment",
         "parameters": [
           {
             "name": "deploymentId",
@@ -870,6 +884,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `apps:write` scope.",
+        "operationId": "SyncAppSecrets",
         "parameters": [
           {
             "name": "appId",
@@ -945,6 +960,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListAdvisorFindings",
         "responses": {
           "200": {
             "description": "OK",
@@ -991,6 +1007,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListIncidents",
         "parameters": [
           {
             "name": "open",
@@ -1046,6 +1063,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListFeedback",
         "parameters": [
           {
             "name": "status",
@@ -1111,6 +1129,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `logs:read` scope.",
+        "operationId": "QueryLogs",
         "parameters": [
           {
             "name": "clusterId",
@@ -1198,6 +1217,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListErrorIssues",
         "parameters": [
           {
             "name": "status",
@@ -1263,6 +1283,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListSlos",
         "responses": {
           "200": {
             "description": "OK",
@@ -1309,6 +1330,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListSyntheticChecks",
         "responses": {
           "200": {
             "description": "OK",
@@ -1355,6 +1377,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListErrorBudgets",
         "responses": {
           "200": {
             "description": "OK",
@@ -1398,6 +1421,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListUpgrades",
         "responses": {
           "200": {
             "description": "OK",
@@ -1441,6 +1465,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListDrift",
         "responses": {
           "200": {
             "description": "OK",
@@ -1484,6 +1509,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListSupplyChainFindings",
         "responses": {
           "200": {
             "description": "OK",
@@ -1527,6 +1553,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "GetCostReport",
         "responses": {
           "200": {
             "description": "OK",
@@ -1570,6 +1597,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "GetCostHistory",
         "parameters": [
           {
             "name": "from",
@@ -1660,6 +1688,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListCostMonths",
         "parameters": [
           {
             "name": "months",
@@ -1720,6 +1749,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "ListRollouts",
         "responses": {
           "200": {
             "description": "OK",
@@ -1766,6 +1796,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:read` scope.",
+        "operationId": "GetDisasterRecoveryPosture",
         "responses": {
           "200": {
             "description": "OK",
@@ -1812,6 +1843,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `config:read` scope.",
+        "operationId": "ListCostRates",
         "responses": {
           "200": {
             "description": "OK",
@@ -1858,6 +1890,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `config:read` scope.",
+        "operationId": "GetCostRate",
         "parameters": [
           {
             "name": "clusterId",
@@ -1913,6 +1946,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `config:write` scope.",
+        "operationId": "SetCostRate",
         "parameters": [
           {
             "name": "clusterId",
@@ -1978,6 +2012,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `config:write` scope.",
+        "operationId": "DeleteCostRate",
         "parameters": [
           {
             "name": "clusterId",
@@ -2028,6 +2063,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `ops:write` scope.",
+        "operationId": "AcknowledgeAdvisorFinding",
         "parameters": [
           {
             "name": "findingId",
@@ -2084,6 +2120,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimGetServiceProviderConfig",
         "responses": {
           "200": {
             "description": "OK",
@@ -2127,6 +2164,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimListUsers",
         "parameters": [
           {
             "name": "filter",
@@ -2201,6 +2239,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimCreateUser",
         "responses": {
           "201": {
             "description": "Created",
@@ -2244,6 +2283,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimGetUser",
         "parameters": [
           {
             "name": "id",
@@ -2295,6 +2335,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimReplaceUser",
         "parameters": [
           {
             "name": "id",
@@ -2346,6 +2387,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimPatchUser",
         "parameters": [
           {
             "name": "id",
@@ -2397,6 +2439,7 @@
           "EntKube.Web"
         ],
         "description": "Requires the `scim:provision` scope.",
+        "operationId": "ScimDeleteUser",
         "parameters": [
           {
             "name": "id",

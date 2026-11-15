@@ -29,7 +29,7 @@ public static class ScimEndpoints
         scim.MapGet("/ServiceProviderConfig",
             ScimOk<ScimServiceProviderConfigResponse> () =>
                 ScimOk<ScimServiceProviderConfigResponse>.Success(ServiceProviderConfigBody()))
-            .RequireApiScope(ApiScopes.ScimProvision);
+            .RequireApiScope("ScimGetServiceProviderConfig", ApiScopes.ScimProvision);
 
         scim.MapGet("/Users", async Task<ScimOk<ScimListResponse>> (
             HttpContext ctx, ScimUserService users, string? filter,
@@ -37,12 +37,12 @@ public static class ScimEndpoints
         {
             ScimResult result = await users.ListAsync(filter, startIndex ?? 1, count ?? 100, ct);
             return Ok<ScimListResponse>(result);
-        }).RequireApiScope(ApiScopes.ScimProvision);
+        }).RequireApiScope("ScimListUsers", ApiScopes.ScimProvision);
 
         scim.MapGet("/Users/{id}", async Task<ScimOk<ScimUserResponse>> (
             string id, ScimUserService users, CancellationToken ct) =>
             Ok<ScimUserResponse>(await users.GetAsync(id, ct)))
-            .RequireApiScope(ApiScopes.ScimProvision);
+            .RequireApiScope("ScimGetUser", ApiScopes.ScimProvision);
 
         scim.MapPost("/Users", async Task<ScimCreated<ScimUserResponse>> (
             HttpContext ctx, ScimUserService users, CancellationToken ct) =>
@@ -51,7 +51,7 @@ public static class ScimEndpoints
             return Created<ScimUserResponse>(body is null
                 ? ScimResult.BadRequest("A JSON body is required.")
                 : await users.CreateAsync(body, ct));
-        }).RequireApiScope(ApiScopes.ScimProvision);
+        }).RequireApiScope("ScimCreateUser", ApiScopes.ScimProvision);
 
         scim.MapPut("/Users/{id}", async Task<ScimOk<ScimUserResponse>> (
             string id, HttpContext ctx, ScimUserService users, CancellationToken ct) =>
@@ -60,7 +60,7 @@ public static class ScimEndpoints
             return Ok<ScimUserResponse>(body is null
                 ? ScimResult.BadRequest("A JSON body is required.")
                 : await users.ReplaceAsync(id, body, ct));
-        }).RequireApiScope(ApiScopes.ScimProvision);
+        }).RequireApiScope("ScimReplaceUser", ApiScopes.ScimProvision);
 
         // The deprovisioning path in practice: Entra sends replace active=false here
         // rather than issuing a DELETE.
@@ -71,12 +71,12 @@ public static class ScimEndpoints
             return Ok<ScimUserResponse>(body is null
                 ? ScimResult.BadRequest("A JSON body is required.")
                 : await users.PatchAsync(id, body, ct));
-        }).RequireApiScope(ApiScopes.ScimProvision);
+        }).RequireApiScope("ScimPatchUser", ApiScopes.ScimProvision);
 
         scim.MapDelete("/Users/{id}", async Task<ScimNoContent> (
             string id, ScimUserService users, CancellationToken ct) =>
             NoContent(await users.DeleteAsync(id, ct)))
-            .RequireApiScope(ApiScopes.ScimProvision);
+            .RequireApiScope("ScimDeleteUser", ApiScopes.ScimProvision);
     }
 
     /// <summary>

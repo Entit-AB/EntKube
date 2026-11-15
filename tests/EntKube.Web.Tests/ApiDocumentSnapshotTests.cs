@@ -53,6 +53,45 @@ public class ApiDocumentSnapshotTests(GeneratedOpenApiDocumentFixture fixture)
         return text.ToString().TrimEnd() + "\n";
     }
 
+    /// <summary>
+    /// Every operation names itself, and no two share a name.
+    ///
+    /// <para><b>⚠️ This is not implied by the compiler check.</b> <c>RequireApiScope</c> requires
+    /// an operation name, and ASP.NET Core refuses two endpoints sharing one at startup — so
+    /// every route HAS a name. That is a different fact from the name reaching the document.
+    /// Measured here because it did not: with all forty-three routes named through
+    /// <c>WithName</c>, the generated document came back with <b>0 of 43</b> operationIds, and
+    /// <c>PublicApiOpenApi</c> now sets them explicitly. Nothing about the compiler check would
+    /// have noticed.</para>
+    ///
+    /// <para>Without an operationId a generator invents method names from the method and path, so
+    /// a path edit silently renames a client method and the name a caller binds to never appears
+    /// in review at all.</para>
+    /// </summary>
+    [Fact]
+    public void Every_operation_names_itself_and_no_two_share_a_name()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        List<(string Method, string Path, string? Id)> operations =
+            [.. from path in fixture.Document!.Paths ?? []
+                from operation in path.Value.Operations ?? []
+                select (operation.Key.Method.ToUpperInvariant(), path.Key, operation.Value.OperationId)];
+
+        operations.Should().NotBeEmpty("otherwise this says nothing");
+
+        List<(string Method, string Path, string? Id)> anonymous =
+            [.. operations.Where(o => string.IsNullOrWhiteSpace(o.Id))];
+
+        anonymous.Should().BeEmpty(
+            "every operation needs an operationId or a generated client's method name is invented "
+            + "from the path: " + string.Join("; ", anonymous.Select(o => $"{o.Method} {o.Path}")));
+
+        operations.Select(o => o.Id).Should().OnlyHaveUniqueItems(
+            "an operationId is a method name on every generated client, so two operations sharing "
+            + "one produce a client that cannot compile");
+    }
+
     [Fact]
     public void The_committed_document_is_what_the_application_generates()
     {
