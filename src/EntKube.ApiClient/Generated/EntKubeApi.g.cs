@@ -1053,6 +1053,22 @@ public sealed record ScimEmailResponse
     public bool Primary { get; init; }
 }
 
+/// <summary>The <c>ScimErrorResponse</c> schema, as the document defines it.</summary>
+public sealed record ScimErrorResponse
+{
+    [JsonPropertyName("schemas")]
+    public IReadOnlyList<string?>? Schemas { get; init; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
+
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+
+    [JsonPropertyName("scimType")]
+    public string? ScimType { get; init; }
+}
+
 /// <summary>The <c>ScimFilterSupportResponse</c> schema, as the document defines it.</summary>
 public sealed record ScimFilterSupportResponse
 {

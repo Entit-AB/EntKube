@@ -31,6 +31,19 @@ public class ApiClientGeneratedTests
         string generated = ApiClientGenerator.Generate(
             File.ReadAllText(ApiDocumentSnapshotTests.Path_));
 
+        // ⚠️ Not both at once. This test's INPUT is the other's OUTPUT, and xUnit does not order
+        // them — so updating both in one run generated the client from the document as it stood
+        // BEFORE the snapshot test rewrote it, and committed a client missing a schema the
+        // document had just gained. Refusing is the only way that is not silent.
+        if (Environment.GetEnvironmentVariable("ENTKUBE_UPDATE_OPENAPI") == "1"
+            && Environment.GetEnvironmentVariable("ENTKUBE_UPDATE_API_CLIENT") == "1")
+        {
+            Assert.Fail(
+                "Regenerate the document first, then the client: ENTKUBE_UPDATE_OPENAPI=1, then "
+                + "ENTKUBE_UPDATE_API_CLIENT=1. Setting both in one run generates the client from "
+                + "whichever version of the document happened to be on disk when this test ran.");
+        }
+
         if (Environment.GetEnvironmentVariable("ENTKUBE_UPDATE_API_CLIENT") == "1")
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path_)!);
