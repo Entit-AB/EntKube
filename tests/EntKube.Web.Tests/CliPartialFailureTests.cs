@@ -46,8 +46,11 @@ public class CliPartialFailureTests
     /// error, which is what makes the <c>Replace</c> in the 200 cases below a deliberate lie about
     /// the body rather than a second way of building one.</para>
     /// </summary>
+    // ⚠️ Qualified: the generated client now declares a response type of the same name, read out
+    // of the document that this record produces. This is the SERVER's record — the generated one
+    // is a DTO with no factory.
     private static readonly string PartialBody = JsonSerializer.Serialize(
-        AppSecretSyncResponse.From(new EntKube.Contracts.Secrets.AppSecretSyncResult(
+        EntKube.Web.Services.PublicApi.AppSecretSyncResponse.From(new EntKube.Contracts.Secrets.AppSecretSyncResult(
             Output: "2 of 3 delivered",
             Bindings:
             [

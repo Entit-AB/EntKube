@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace EntKube.ApiClient;
@@ -32,6 +33,63 @@ public sealed record ApiResult(bool Success, string Body, int StatusCode)
     public bool Partial => StatusCode == MultiStatus;
 
     public static ApiResult Failed(string message, int status = 0) => new(false, message, status);
+}
+
+/// <summary>
+/// A typed response: the outcome, and the deserialised body when there is one.
+///
+/// <para>⚠️ <see cref="Body"/> is kept beside <see cref="Value"/> rather than replaced by it.
+/// The MCP server hands the raw body to a model to read, so dropping it would force that caller
+/// to re-serialise what it had already received.</para>
+/// </summary>
+public sealed record ApiResponse(bool Success, int StatusCode, string Body)
+{
+    /// <inheritdoc cref="ApiResult.Partial"/>
+    public bool Partial => StatusCode == ApiResult.MultiStatus;
+
+    public static ApiResponse From(ApiResult result) =>
+        new(result.Success, result.StatusCode, result.Body);
+}
+
+/// <summary>
+/// A typed response carrying the body the document says the operation answers with.
+/// </summary>
+/// <typeparam name="T">The generated response type for this operation.</typeparam>
+public sealed record ApiResponse<T>(bool Success, int StatusCode, string Body, T? Value)
+{
+    /// <inheritdoc cref="ApiResult.Partial"/>
+    public bool Partial => StatusCode == ApiResult.MultiStatus;
+
+    /// <summary>
+    /// ⚠️ Every generated property carries an explicit <c>[JsonPropertyName]</c> read out of the
+    /// document, so no naming policy is involved and none can be changed under the client. That
+    /// is what keeps SCIM's capital-R <c>Resources</c> correct here without a special case.
+    /// </summary>
+    private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
+
+    public static ApiResponse<T> From(ApiResult result)
+    {
+        if (!result.Success)
+        {
+            return new(false, result.StatusCode, result.Body, default);
+        }
+
+        try
+        {
+            return new(true, result.StatusCode, result.Body,
+                JsonSerializer.Deserialize<T>(result.Body, Options));
+        }
+        catch (JsonException ex)
+        {
+            // ⚠️ NOT a success with a null value. A 200 whose body does not match the schema is
+            // the API contradicting its own document, and a caller that read Value as null would
+            // treat it as "nothing there" — an empty list of clusters rather than a broken
+            // contract. The body is kept so the mismatch can be read.
+            return new(false, result.StatusCode,
+                $"EntKube answered {result.StatusCode} with a body this client could not read as "
+                + $"{typeof(T).Name}: {ex.Message}\n\n{result.Body}", default);
+        }
+    }
 }
 
 /// <summary>
@@ -82,8 +140,13 @@ public sealed class EntKubeApiClient : IDisposable
         SendAsync(HttpMethod.Post, path, ct);
 
     /// <summary>
-    /// A bodyless DELETE. There is deliberately no <c>PutAsync</c> here, because every PUT on the
-    /// public API carries a JSON body and this client cannot send one.
+    /// A bodyless DELETE.
+    ///
+    /// <para>⚠️ This used to say there was "deliberately no <c>PutAsync</c> here, because every
+    /// PUT on the public API carries a JSON body and this client cannot send one". The second
+    /// half stopped being true when <see cref="SendJsonAsync"/> was added for the generated
+    /// client, so the first half is no longer a decision — it is just the absence of a wrapper.
+    /// The paragraph below is kept because what it describes is still exactly true.</para>
     ///
     /// <para>⚠️ <b>The reason first written here was wrong, and wrong in the reassuring
     /// direction.</b> It said a bodyless PUT would be read as "no fields supplied", turning a
@@ -99,11 +162,29 @@ public sealed class EntKubeApiClient : IDisposable
     public Task<ApiResult> DeleteAsync(string path, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Delete, path, ct);
 
-    private async Task<ApiResult> SendAsync(HttpMethod method, string path, CancellationToken ct)
+    /// <summary>
+    /// Sends <paramref name="body"/> as JSON. Added for the generated client, which has to be
+    /// able to reach every operation the document describes — including the one PUT that carries
+    /// a body.
+    /// </summary>
+    public Task<ApiResult> SendJsonAsync(
+        HttpMethod method, string path, object payload, CancellationToken ct = default) =>
+        SendAsync(method, path, ct, payload);
+
+    private async Task<ApiResult> SendAsync(
+        HttpMethod method, string path, CancellationToken ct, object? payload = null)
     {
         try
         {
             using HttpRequestMessage request = new(method, path.TrimStart('/'));
+
+            if (payload is not null)
+            {
+                request.Content = new StringContent(
+                    JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                    System.Text.Encoding.UTF8,
+                    "application/json");
+            }
             using HttpResponseMessage response = await http.SendAsync(request, ct);
             string body = await response.Content.ReadAsStringAsync(ct);
 
