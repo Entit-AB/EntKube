@@ -301,6 +301,91 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
     }
 
     /// <summary>
+    /// The refusals only particular routes can answer with.
+    ///
+    /// <para>⚠️ <b>A <c>ProblemHttpResult</c> in a handler's <c>Results&lt;…&gt;</c> union
+    /// contributes NOTHING to the document.</b> So eighteen statuses across sixteen routes were
+    /// reachable and undescribed: the <c>503</c> six sweep-backed reports answer before their
+    /// first sweep has completed, the <c>422</c> eight action routes answer when the cluster
+    /// refuses, and two <c>400</c>s. Each of those routes was described as only ever answering
+    /// 200, 401 or 403, so a client generated from the document would deserialise a
+    /// <c>ProblemDetails</c> into whatever the 200 was meant to be — the same defect the central
+    /// 401 and 403 declarations were added to fix, one level further in.</para>
+    ///
+    /// <para>Pinned as a table rather than derived, because the alternative is scanning the
+    /// handler source for status codes and that is what produced the wrong answer while this was
+    /// being measured: a shared helper's <c>422</c> was attributed to the route registered above
+    /// it, and <c>SyncAppSecrets</c>'s <c>207</c> to the route before that.</para>
+    ///
+    /// <para>⚠️ A <c>503</c> here is not an error in the usual sense — it is "no sweep has
+    /// completed yet", which a client should retry rather than report. It has to be in the
+    /// document for a client to tell it apart from a failure.</para>
+    /// </summary>
+    [Fact]
+    public void The_routes_that_can_refuse_for_their_own_reasons_say_so()
+    {
+        Dictionary<string, string[]> expected = new(StringComparer.Ordinal)
+        {
+            ["GET /api/v1/cost"] = ["503"],
+            ["GET /api/v1/cost/history"] = ["400", "503"],
+            ["GET /api/v1/cost/months"] = ["503"],
+            ["GET /api/v1/disaster-recovery"] = ["503"],
+            ["GET /api/v1/drift"] = ["503"],
+            ["GET /api/v1/supply-chain"] = ["503"],
+            ["GET /api/v1/logs/query"] = ["503"],
+            ["GET /api/v1/clusters/{clusterId}/virtual-machines"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/migrate"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/pause"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/restart"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/start"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/stop"] = ["422"],
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/unpause"] = ["422"],
+            ["POST /api/v1/deployments/{deploymentId}/restart"] = ["400", "422"],
+            ["POST /api/v1/deployments/{deploymentId}/sync"] = ["422"],
+            ["POST /api/v1/apps/{appId}/secrets/sync"] = ["207"],
+        };
+
+        Dictionary<string, Described> byOperation = Describe()
+            .ToDictionary(d => $"{d.Method} {d.Path}", d => d);
+
+        List<string> problems = [];
+
+        foreach ((string operation, string[] statuses) in expected)
+        {
+            if (!byOperation.TryGetValue(operation, out Described? described))
+            {
+                problems.Add($"{operation}: not in the document at all");
+                continue;
+            }
+
+            foreach (string status in statuses)
+            {
+                if (!described.Statuses.Contains(status))
+                {
+                    problems.Add($"{operation}: can answer {status} and does not say so");
+                }
+            }
+        }
+
+        problems.Should().BeEmpty(string.Join("; ", problems));
+
+        // ⚠️ And the other direction. An operation that advertises a refusal it cannot produce
+        // sends a client writing dead error handling, which is as wrong as hiding one — the 403
+        // rule above is derived for exactly this reason.
+        List<string> overclaimed =
+            [.. from described in Describe()
+                let key = $"{described.Method} {described.Path}"
+                from status in described.Statuses
+                where status is "422" or "503" or "207"
+                where !expected.TryGetValue(key, out string[]? allowed) || !allowed.Contains(status)
+                select $"{key} claims {status}"];
+
+        overclaimed.Should().BeEmpty(
+            "a route advertising a refusal it cannot answer is as wrong as one hiding a refusal "
+            + "it can: " + string.Join("; ", overclaimed));
+    }
+
+    /// <summary>
     /// ⚠️ The measure for the count above. A scan that classified an operation into none of the
     /// three buckets — or into two — would make the banked number mean nothing, and it would
     /// drift silently because only one of the three is asserted.

@@ -913,6 +913,59 @@ public class ScimDocumentedResponseTests(GeneratedOpenApiDocumentFixture fixture
     }
 
     /// <summary>
+    /// A SCIM route's own refusals are declared as its own envelope — and the two the token
+    /// filter produces are not.
+    ///
+    /// <para>⚠️ <b>This is the distinction that makes the document honest.</b> A SCIM route
+    /// answers <c>400</c>, <c>404</c> and <c>409</c> with <see cref="ScimErrorResponse"/> at
+    /// <c>application/scim+json</c>, but its <c>401</c> and <c>403</c> come from
+    /// <c>ApiTokenAuthFilter</c>, which returns <c>Results.Problem</c> — so for those two it
+    /// really does answer <c>application/problem+json</c>. Declaring every refusal the same way
+    /// would be wrong in one direction or the other whichever way it was done, and
+    /// <c>ProducesProblem</c> on a SCIM route is the easy mistake: it compiles, it looks right,
+    /// and it tells a generated client to parse a <c>ProblemDetails</c> out of a SCIM
+    /// envelope.</para>
+    /// </summary>
+    [Fact]
+    public void A_scim_refusal_is_its_own_envelope_and_the_tokens_are_not()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        List<(string Method, string Path, string Code, Microsoft.OpenApi.IOpenApiResponse Response)> refusals =
+            [.. ScimResponses(fixture.Document!)
+                .Where(r => !r.Code.StartsWith("2", StringComparison.Ordinal))];
+
+        refusals.Should().NotBeEmpty("otherwise SCIM declares no refusals at all");
+
+        List<string> wrong = [];
+
+        foreach ((string method, string path, string code, Microsoft.OpenApi.IOpenApiResponse response) in refusals)
+        {
+            string[] media = [.. response.Content?.Keys ?? []];
+
+            string[] want = code is "401" or "403"
+                ? ["application/problem+json"]
+                : [ScimJson];
+
+            if (!media.SequenceEqual(want))
+            {
+                wrong.Add($"{method} {path} {code}: {string.Join("+", media)} (wanted {want[0]})");
+            }
+        }
+
+        wrong.Should().BeEmpty(
+            "a SCIM route's own refusal is a SCIM envelope; only the token filter's two are "
+            + "problem+json: " + string.Join("; ", wrong));
+
+        // ⚠️ And they are actually there. Every one of these was undeclared until the document
+        // was read for them — the handlers returned 404 and 409 while the document said the route
+        // could only answer 200, 401 or 403.
+        refusals.Select(r => r.Code).Distinct().Order().Should().Equal(
+            ["400", "401", "403", "404", "409"],
+            "these are the five a SCIM route can refuse with");
+    }
+
+    /// <summary>
     /// ⚠️ And the 204 declares no body at all. Declaring one — even an empty schema — is how a
     /// deletion gets counted as "describes a success body" without describing anything, which is
     /// the loophole <c>BodylessSuccesses</c> is pinned to keep shut.

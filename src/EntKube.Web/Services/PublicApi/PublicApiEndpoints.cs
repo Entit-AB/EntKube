@@ -131,7 +131,7 @@ public static class PublicApiEndpoints
 
             return TypedResults.Ok(new VirtualMachineListResponse(
                 [.. list.Machines.Select(VirtualMachineResponse.From)], list.Warnings));
-        }).RequireApiScope("ListVirtualMachines", ApiScopes.FleetRead);
+        }).RequireApiScope("ListVirtualMachines", ApiScopes.FleetRead, StatusCodes.Status422UnprocessableEntity);
 
         // Six routes rather than one with an {action} parameter: each is its own operation in the
         // document and its own line in the scope's grant, and the CLI's six commands each build one.
@@ -141,42 +141,42 @@ public static class PublicApiEndpoints
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Start, fleet, gate, ct))
-            .RequireApiScope("StartVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("StartVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/stop",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Stop, fleet, gate, ct))
-            .RequireApiScope("StopVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("StopVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/restart",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Restart, fleet, gate, ct))
-            .RequireApiScope("RestartVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("RestartVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/pause",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Pause, fleet, gate, ct))
-            .RequireApiScope("PauseVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("PauseVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/unpause",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Unpause, fleet, gate, ct))
-            .RequireApiScope("UnpauseVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("UnpauseVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/migrate",
             (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
              EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
             ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
                 EntKube.Contracts.Fleet.VirtualMachineAction.Migrate, fleet, gate, ct))
-            .RequireApiScope("MigrateVirtualMachine", ApiScopes.VmsWrite);
+            .RequireApiScope("MigrateVirtualMachine", ApiScopes.VmsWrite, StatusCodes.Status422UnprocessableEntity);
 
         // ── Apps and deployments ──
 
@@ -278,7 +278,7 @@ public static class PublicApiEndpoints
             return result.IsSuccess
                 ? TypedResults.Ok(DeploymentSyncResponse.From(result))
                 : TypedResults.Problem(result.Error ?? "Sync failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
-        }).RequireApiScope("SyncDeployment", ApiScopes.AppsWrite);
+        }).RequireApiScope("SyncDeployment", ApiScopes.AppsWrite, StatusCodes.Status422UnprocessableEntity);
 
         // A restart targets one Kubernetes Deployment, not the whole EntKube deployment,
         // so the workload name is required rather than guessed. Guessing here would mean
@@ -321,7 +321,7 @@ public static class PublicApiEndpoints
             return result.IsSuccess
                 ? TypedResults.Ok(OkResponse.Succeeded)
                 : TypedResults.Problem(result.Error ?? "Restart failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
-        }).RequireApiScope("RestartDeployment", ApiScopes.AppsWrite);
+        }).RequireApiScope("RestartDeployment", ApiScopes.AppsWrite, StatusCodes.Status400BadRequest, StatusCodes.Status422UnprocessableEntity);
 
         // ── Operations ──
 
@@ -497,7 +497,7 @@ public static class PublicApiEndpoints
             return outcome.Table is { } table
                 ? TypedResults.Ok(new LogQueryResponse(table.Columns, table.Rows, table.LinesScanned, table.Partial))
                 : TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
-        }).RequireApiScope("QueryLogs", ApiScopes.LogsRead);
+        }).RequireApiScope("QueryLogs", ApiScopes.LogsRead, StatusCodes.Status503ServiceUnavailable);
 
         // As on /feedback: an unknown status answers 400 here rather than reaching Enum.Parse.
         api.MapGet("/error-issues", async Task<Results<Ok<IEnumerable<ErrorIssueResponse>>, BadRequest<string>>> (
@@ -603,7 +603,7 @@ public static class PublicApiEndpoints
             }
 
             return TypedResults.Ok(DriftReportResponse.FromReport(report));
-        }).RequireApiScope("ListDrift", ApiScopes.OpsRead);
+        }).RequireApiScope("ListDrift", ApiScopes.OpsRead, StatusCodes.Status503ServiceUnavailable);
 
         api.MapGet("/supply-chain",
             Results<Ok<SupplyChainReportResponse>, ProblemHttpResult> (
@@ -620,7 +620,7 @@ public static class PublicApiEndpoints
             }
 
             return TypedResults.Ok(SupplyChainReportResponse.FromReport(report));
-        }).RequireApiScope("ListSupplyChainFindings", ApiScopes.OpsRead);
+        }).RequireApiScope("ListSupplyChainFindings", ApiScopes.OpsRead, StatusCodes.Status503ServiceUnavailable);
 
         api.MapGet("/cost",
             Results<Ok<CostRunRateResponse>, ProblemHttpResult> (
@@ -640,7 +640,7 @@ public static class PublicApiEndpoints
             // renames each one carries — lives on CostRunRateResponse so the mapping can be
             // asserted against the anonymous object it replaced.
             return TypedResults.Ok(CostRunRateResponse.From(report));
-        }).RequireApiScope("GetCostReport", ApiScopes.OpsRead);
+        }).RequireApiScope("GetCostReport", ApiScopes.OpsRead, StatusCodes.Status503ServiceUnavailable);
 
         // Cost history — what was actually incurred, as opposed to /cost, which is a
         // projection of what today would cost over a month. This is the endpoint a
@@ -707,7 +707,7 @@ public static class PublicApiEndpoints
             // The shape, and the renames it carries, now live on CostHistoryResponse so the
             // mapping can be asserted against the anonymous object it replaced.
             return TypedResults.Ok(CostHistoryResponse.FromReport(report));
-        }).RequireApiScope("GetCostHistory", ApiScopes.OpsRead);
+        }).RequireApiScope("GetCostHistory", ApiScopes.OpsRead, StatusCodes.Status400BadRequest, StatusCodes.Status503ServiceUnavailable);
 
         api.MapGet("/cost/months",
             async Task<Results<Ok<IEnumerable<CostMonthResponse>>, ProblemHttpResult>> (
@@ -727,7 +727,7 @@ public static class PublicApiEndpoints
                     tenantId, Math.Clamp(months ?? 12, 1, 36), DateTime.UtcNow, customerId: null, ct);
 
             return TypedResults.Ok(all.Select(CostMonthResponse.From));
-        }).RequireApiScope("ListCostMonths", ApiScopes.OpsRead);
+        }).RequireApiScope("ListCostMonths", ApiScopes.OpsRead, StatusCodes.Status503ServiceUnavailable);
 
         api.MapGet("/rollouts", async Task<Ok<IEnumerable<RolloutResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
@@ -768,7 +768,7 @@ public static class PublicApiEndpoints
             // The shape, the string severities and the restorable/lastUsableBackupAt asymmetry
             // live on DrStatusResponse.
             return TypedResults.Ok(statuses.Select(s => DrStatusResponse.From(s, now)));
-        }).RequireApiScope("GetDisasterRecoveryPosture", ApiScopes.OpsRead);
+        }).RequireApiScope("GetDisasterRecoveryPosture", ApiScopes.OpsRead, StatusCodes.Status503ServiceUnavailable);
 
         // ── Configuration (infrastructure-as-code) ──
         //

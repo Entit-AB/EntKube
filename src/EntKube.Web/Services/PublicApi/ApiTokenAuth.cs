@@ -122,8 +122,24 @@ public static class ApiTokenAuthExtensions
     /// sharing a name. That is a stronger guarantee than this repository could write for itself,
     /// and it is why the name is passed to <c>WithName</c> rather than only into metadata.</para>
     /// </param>
+    /// <param name="problems">
+    /// The statuses THIS route can refuse with, beyond the 401 and 403 every route shares.
+    ///
+    /// <para>⚠️ Eighteen of these were undeclared across sixteen routes — measured, not guessed:
+    /// the 503 that six sweep-backed reports answer before their first sweep completes, the 422
+    /// eight action routes answer when the cluster refuses, and two 400s. A
+    /// <c>ProblemHttpResult</c> in a handler's <c>Results&lt;…&gt;</c> union contributes NOTHING
+    /// to the generated document, so each of those routes was described as only ever answering
+    /// 200, 401 or 403. A generated client built from that would deserialise a
+    /// <c>ProblemDetails</c> into whatever the 200 was meant to be — which is the same defect the
+    /// 401 and 403 declarations below were added to fix, one level further in.</para>
+    ///
+    /// <para>Declared here rather than at each route's own <c>.ProducesProblem</c> for the reason
+    /// everything else in this method is: it is the one call every operation already makes, so the
+    /// name, the scope and the refusals are read in one place and reviewed together.</para>
+    /// </param>
     public static TBuilder RequireApiScope<TBuilder>(
-        this TBuilder builder, string operationName, string? scope = null)
+        this TBuilder builder, string operationName, string? scope = null, params int[] problems)
         where TBuilder : IEndpointConventionBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationName);
@@ -178,6 +194,12 @@ public static class ApiTokenAuthExtensions
         if (filter.RequiredScope is not null)
         {
             builder = builder.ProducesProblem(StatusCodes.Status403Forbidden);
+        }
+
+        // And the ones only this route can answer.
+        foreach (int problem in problems.Distinct().Order())
+        {
+            builder = builder.ProducesProblem(problem);
         }
 
         return builder;
