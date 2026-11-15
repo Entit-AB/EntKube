@@ -457,5 +457,63 @@ public class LastAppliedAnnotationRedactionTests
 
         SecretRedaction.Scrub(stringData)!.Should().NotContain(Password);
     }
+
+    /// <summary>
+    /// ⚠️ <b>What goes to the dialog is still a document.</b> Redaction replaces values; it must
+    /// not change the shape around them.
+    ///
+    /// <para>This is the assertion that was missing. The first version of the annotation fix
+    /// replaced everything after the annotation's colon to the end of the line — which on a
+    /// single-line JSON document is the entire rest of the document. The output was truncated
+    /// invalid JSON, and <see cref="The_value_does_not_survive_an_escaped_annotation"/> PASSED,
+    /// because the value it was looking for had been destroyed along with everything after it. A
+    /// redaction test that only asks "is the secret gone" cannot tell redaction from
+    /// deletion.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("""{"kind":"Secret","metadata":{"annotations":{"kubectl.kubernetes.io/last-applied-configuration":"{\"data\":{\"P\":\"aHVudGVyMg==\"}}"}},"data":{"P":"aHVudGVyMg=="}}""")]
+    [InlineData("""{"kind":"Secret","stringData":{"CONFIG":"{\"nested\":true}","P":"aHVudGVyMg=="}}""")]
+    [InlineData("""{"items":[{"kind":"Secret","data":{"P":"aHVudGVyMg=="}}]}""")]
+    public void The_scrubbed_document_is_still_valid_json(string raw)
+    {
+        string? scrubbed = SecretRedaction.Scrub(raw);
+
+        scrubbed.Should().NotBeNull();
+
+        Action parse = () => System.Text.Json.Nodes.JsonNode.Parse(scrubbed!);
+
+        parse.Should().NotThrow(
+            "the dialog shows this to an operator; a redaction that truncates the document hides "
+            + "the secret by destroying the page");
+
+        scrubbed!.Should().NotContain(Password, "and the secret is still gone");
+    }
+
+    /// <summary>
+    /// ⚠️ The shape only the annotation rule can save: <b>YAML</b>, so the parser never sees it,
+    /// carrying an annotation whose inner <c>stringData</c> holds a value with a brace — so the
+    /// regex fallback's <c>[^{}]*</c> bound ends before the password.
+    ///
+    /// <para>Without this, every assertion about the annotation passes on the regex's side effect
+    /// of reaching into a YAML scalar, and <c>ScrubLastApplied</c> is code nothing requires.</para>
+    /// </summary>
+    [Fact]
+    public void A_yaml_annotation_whose_inner_value_has_a_brace_is_still_redacted()
+    {
+        const string yaml = """
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: app-secrets
+              annotations:
+                kubectl.kubernetes.io/last-applied-configuration: '{"kind":"Secret","stringData":{"CONFIG":"{\"nested\":true}","DB_PASSWORD":"aHVudGVyMg=="}}'
+            type: Opaque
+            """;
+
+        SecretRedaction.Scrub(yaml)!.Should().NotContain(
+            Password,
+            "the regex cannot bound an object whose value contains a brace, so the annotation's "
+            + "whole value has to go");
+    }
 }
 

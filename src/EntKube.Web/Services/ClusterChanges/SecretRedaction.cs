@@ -59,14 +59,25 @@ public static class SecretRedaction
     {
         if (string.IsNullOrEmpty(text)) return text;
 
-        // ⚠️ The annotation first, because it is a second copy of the whole object and it is not
-        // in a data block, so nothing below would look at it.
-        text = ScrubLastApplied(text);
+        // ⚠️ A JSON document goes through the parser and NOTHING ELSE. It already handles both
+        // things the line passes are for — every data and stringData object at any depth, and the
+        // last-applied annotation — and it cannot corrupt what it rewrites.
+        //
+        // The line rule must not touch JSON, and the first version of this did: it replaced
+        // everything after the annotation's colon to the end of the line, which on a single-line
+        // JSON document is the whole rest of the document. The dialog got truncated, invalid JSON
+        // — and the test for the annotation PASSED, because the value it was looking for had been
+        // destroyed along with everything after it. See
+        // LastAppliedAnnotationRedactionTests.The_scrubbed_document_is_still_valid_json.
+        if (TryScrubJsonDocument(text, out string? parsed))
+        {
+            return parsed!;
+        }
 
-        // JSON next: a patch body is one line of JSON, and the line-oriented pass below cannot
-        // see into it. Through a real parser when the text IS JSON — the regex fallback could not
-        // bound an object whose value contains a brace, and exposed the following key.
-        text = TryScrubJsonDocument(text, out string? parsed) ? parsed! : ScrubJsonData(text);
+        // Not a JSON document: YAML or diff text, where an annotation occupies one line and the
+        // rest of the line is its value.
+        text = ScrubLastApplied(text);
+        text = ScrubJsonData(text);
 
         if (!text.Contains("data:", StringComparison.Ordinal)
             && !text.Contains("stringData:", StringComparison.Ordinal))
