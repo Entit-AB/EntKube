@@ -726,4 +726,309 @@ public class MongoServiceTests : IDisposable
         suspended.Problem.Should().Contain("suspended");
         suspended.IsHealthy.Should().BeFalse();
     }
+
+    // ──────── Live storage ────────
+    //
+    // Reported from production: volumes grown after a disk filled, while EntKube kept the size it
+    // stored at create time. The StatefulSet was created with a 50Gi data-volume template, which
+    // Kubernetes never lets change, and its three data claims were grown to 300Gi directly.
+
+    private async Task<(Tenant Tenant, MongoCluster Mongo)> SeedRecordedAsync(string storedSize)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        MongoCluster mongo = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "my-mongo",
+            Namespace = "databases",
+            Members = 3,
+            StorageSize = storedSize,
+            MongoVersion = "7.0",
+            StorageLinkId = storageLink.Id,
+            Status = MongoClusterStatus.Running,
+        };
+        db.MongoClusters.Add(mongo);
+        await db.SaveChangesAsync();
+
+        return (tenant, mongo);
+    }
+
+    /// <summary>
+    /// A 50Gi template, three data claims at 300Gi, three small logs claims, and a neighbouring
+    /// cluster whose claim names start the same way.
+    /// </summary>
+    private void LiveClaimsAre300GiOnA50GiTemplate(bool allowVolumeExpansion = true, bool reachable = true)
+    {
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string resource, string _, string _, string _, CancellationToken _) =>
+            {
+                if (!reachable)
+                {
+                    throw new InvalidOperationException("Unable to connect to the server");
+                }
+
+                static string Claim(string name, string size) => System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    metadata = new { name },
+                    spec = new
+                    {
+                        resources = new { requests = new { storage = size } },
+                        volumeName = $"pv-{name}",
+                        storageClassName = "csi-cinder",
+                    },
+                    status = new { capacity = new { storage = size } },
+                });
+
+                return resource switch
+                {
+                    "statefulset/my-mongo" => """
+                        {"spec":{"volumeClaimTemplates":[
+                          {"metadata":{"name":"data-volume"},
+                           "spec":{"resources":{"requests":{"storage":"50Gi"}},"storageClassName":"csi-cinder"}},
+                          {"metadata":{"name":"logs-volume"},
+                           "spec":{"resources":{"requests":{"storage":"2G"}}}}]}}
+                        """,
+                    "persistentvolumeclaims" => "{\"items\":["
+                        + string.Join(",",
+                            Claim("data-volume-my-mongo-0", "300Gi"),
+                            Claim("data-volume-my-mongo-1", "300Gi"),
+                            Claim("data-volume-my-mongo-2", "300Gi"),
+                            Claim("logs-volume-my-mongo-0", "2G"),
+                            Claim("data-volume-my-mongo-archive-0", "1Ti"))
+                        + "]}",
+                    "storageclass/csi-cinder" => allowVolumeExpansion
+                        ? """{"metadata":{"name":"csi-cinder"},"allowVolumeExpansion":true}"""
+                        : """{"metadata":{"name":"csi-cinder"}}""",
+                    _ when resource.StartsWith("persistentvolume/", StringComparison.Ordinal) =>
+                        """{"spec":{"capacity":{"storage":"300Gi"}}}""",
+                    _ => "{}",
+                };
+            });
+    }
+
+    private List<string> CaptureMongoApplies()
+    {
+        List<string> applied = [];
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .ReturnsAsync(string.Empty);
+        return applied;
+    }
+
+    private List<(string Resource, string Name, string Patch)> CaptureMongoPatches()
+    {
+        List<(string, string, string)> patched = [];
+        k8sFactory.Setup(f => f.PatchJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, string, CancellationToken>(
+                (resource, name, _, patch, _, _) => patched.Add((resource, name, patch)))
+            .Returns(Task.CompletedTask);
+        return patched;
+    }
+
+    private async Task<MongoCluster> StoredAsync(Guid id)
+    {
+        using ApplicationDbContext check = testDb.CreateContext();
+        return await check.MongoClusters.AsNoTracking().FirstAsync(c => c.Id == id);
+    }
+
+    /// <summary>
+    /// The StatefulSet's claim templates are immutable. A manifest carrying any other size breaks
+    /// every later StatefulSet update. That holds when the stored size is stale (50Gi against
+    /// 300Gi claims) and when an earlier claim resize raised it (300Gi against a 50Gi template).
+    /// </summary>
+    [Theory]
+    [InlineData("50Gi")]
+    [InlineData("300Gi")]
+    public async Task UpgradeClusterAsync_KeepsTheStatefulSetsTemplateSize(string storedSize)
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync(storedSize);
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+
+        await sut.UpgradeClusterAsync(tenant.Id, mongo.Id, "8.0");
+
+        applied.Single(m => m.Contains("kind: MongoDBCommunity"))
+            .Should().Contain("storage: 50Gi").And.NotContain("storage: 300Gi");
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("300Gi", "the record says what the data has");
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_CpuOnly_KeepsTheStatefulSetsTemplateSize()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("300Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+
+        await sut.ResizeClusterAsync(tenant.Id, mongo.Id, null, "500m", null, null, null);
+
+        applied.Should().ContainSingle().Which.Should().Contain("storage: 50Gi").And.NotContain("storage: 300Gi");
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_GrowsEveryLiveDataClaim_AndNothingElse()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        await sut.ResizeClusterAsync(tenant.Id, mongo.Id, "400Gi", null, null, null, null);
+
+        patched.Select(p => p.Name).Should().BeEquivalentTo(
+            ["data-volume-my-mongo-0", "data-volume-my-mongo-1", "data-volume-my-mongo-2"],
+            "the logs volume and the neighbouring my-mongo-archive cluster are not this cluster's data");
+        patched.Should().OnlyContain(p => p.Resource == "pvc"
+            && p.Patch == """{"spec":{"resources":{"requests":{"storage":"400Gi"}}}}""");
+        applied.Should().BeEmpty("growing storage re-applies nothing");
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("400Gi");
+    }
+
+    /// <summary>
+    /// 200Gi is larger than the stale 50Gi record, so the old text comparison let it through and
+    /// Kubernetes refused to shrink the claims mid-way. It is judged against the live 300Gi now,
+    /// and refused before the CPU change that came with it is written or applied.
+    /// </summary>
+    [Fact]
+    public async Task ResizeClusterAsync_RefusesToShrinkAgainstTheLiveSize_BeforeWritingAnything()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ResizeClusterAsync(tenant.Id, mongo.Id, "200Gi", "500m", null, null, null));
+
+        ex.Message.Should().Contain("can only grow").And.Contain("300Gi");
+        applied.Should().BeEmpty();
+        patched.Should().BeEmpty();
+        (await StoredAsync(mongo.Id)).CpuRequest.Should().BeNull("the refusal came before the CPU change");
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_ToTheLiveSize_ChangesNothing()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        await sut.ResizeClusterAsync(tenant.Id, mongo.Id, "300Gi", null, null, null, null);
+
+        applied.Should().BeEmpty();
+        patched.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_RefusesWhenTheStorageClassCannotExpand()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("300Gi");
+        LiveClaimsAre300GiOnA50GiTemplate(allowVolumeExpansion: false);
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ResizeClusterAsync(tenant.Id, mongo.Id, "400Gi", null, null, null, null));
+
+        ex.Message.Should().Contain("does not allow volume expansion");
+        patched.Should().BeEmpty();
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("300Gi");
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_RefusesToGrowBlind()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate(reachable: false);
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ResizeClusterAsync(tenant.Id, mongo.Id, "100Gi", null, null, null, null));
+
+        ex.Message.Should().Contain("Could not read the data volumes");
+        patched.Should().BeEmpty();
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("50Gi", "an unread size is no reason to guess");
+    }
+
+    [Fact]
+    public async Task ResizeClusterAsync_RefusesSomethingThatIsNotASize()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ResizeClusterAsync(tenant.Id, mongo.Id, "400Gi\"}}", null, null, null, null));
+
+        ex.Message.Should().Contain("is not a storage size");
+        patched.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetClusterDetailAsync_ShowsAndRecordsTheLiveSize_WithoutChangingTheCluster()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+        List<(string Resource, string Name, string Patch)> patched = CaptureMongoPatches();
+
+        MongoClusterDetail? detail = await sut.GetClusterDetailAsync(tenant.Id, mongo.Id);
+
+        detail!.Storage.Should().NotBeNull();
+        detail.Storage!.EffectiveSize.Should().Be("300Gi");
+        detail.Storage.TemplateSize.Should().Be("50Gi");
+        detail.Storage.TemplateSource.Should().Be("StatefulSet");
+        detail.Storage.AllowVolumeExpansion.Should().BeTrue();
+        detail.Storage.DataVolumes.Should().HaveCount(3);
+        detail.Storage.Volumes.Should().OnlyContain(v => v.VolumeCapacity == "300Gi");
+        detail.Cluster.StorageSize.Should().Be("300Gi");
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("300Gi");
+        applied.Where(m => m.Contains("MongoDBCommunity")).Should().BeEmpty("opening a panel is a read");
+        patched.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RestoreToNewClusterAsync_SizesTheCopyFromTheLiveSource()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate();
+        List<string> applied = CaptureMongoApplies();
+
+        MongoBackup backup = new()
+        {
+            Id = Guid.NewGuid(),
+            MongoClusterId = mongo.Id,
+            Name = "my-mongo-20261116-020000",
+            Type = MongoBackupType.OnDemand,
+            Status = MongoBackupStatus.Completed,
+        };
+        db.MongoBackups.Add(backup);
+        await db.SaveChangesAsync();
+
+        MongoCluster copy = await sut.RestoreToNewClusterAsync(tenant.Id, mongo.Id, backup.Id, "my-mongo-copy");
+
+        copy.StorageSize.Should().Be("300Gi", "a copy on 50Gi volumes could not hold 300Gi of data");
+        applied.Single(m => m.Contains("kind: MongoDBCommunity") && m.Contains("name: my-mongo-copy"))
+            .Should().Contain("storage: 300Gi");
+    }
+
+    [Fact]
+    public async Task AnUnreadableCluster_KeepsTheStoredSize()
+    {
+        (Tenant tenant, MongoCluster mongo) = await SeedRecordedAsync("50Gi");
+        LiveClaimsAre300GiOnA50GiTemplate(reachable: false);
+        CaptureMongoApplies();
+
+        MongoClusterDetail? detail = await sut.GetClusterDetailAsync(tenant.Id, mongo.Id);
+
+        detail!.Storage.Should().BeNull();
+        (await StoredAsync(mongo.Id)).StorageSize.Should().Be("50Gi");
+    }
 }
