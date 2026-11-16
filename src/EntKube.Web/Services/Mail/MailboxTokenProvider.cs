@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using EntKube.Web.Data;
 
 namespace EntKube.Web.Services.Mail;
 
@@ -20,6 +21,53 @@ public class MailboxTokenProvider(
     IHttpClientFactory httpFactory,
     ILogger<MailboxTokenProvider> logger)
 {
+    /// <summary>
+    /// The bearer token for a mailbox whose directory is OIDC, from that mailbox's own client
+    /// credentials.
+    ///
+    /// <para>⚠️ <b>Two callers read this credential and they disagreed.</b> The poller read
+    /// <c>OAUTH_CLIENT_SECRET</c>; the submission path in <c>SmtpSettings</c> read
+    /// <c>PASSWORD</c> — the mailbox's IMAP password — and sent it to the token endpoint as a
+    /// client secret. An OIDC directory accepts only bearer tokens, so there was no password
+    /// fallback to mask it: outbound support mail could not authenticate at all, while fetching
+    /// worked perfectly.</para>
+    ///
+    /// <para>⚠️ <b>This is not yet the only place, and saying so matters more than the tidiness
+    /// would.</b> <c>SupportMailboxService</c> still acquires its own token inline, because it
+    /// reports two distinct failures to the operator — no service account, and no secret for one
+    /// — and routing it through here would flatten both into a null. What IS single is the vault
+    /// accessor: both callers now read <c>GetSupportMailboxOAuthSecretAsync</c>, which is the one
+    /// place the secret's NAME appears. The remaining duplication is the token request, not the
+    /// credential.</para>
+    ///
+    /// <para><paramref name="fallbackScopes"/> is a parameter rather than a default here because
+    /// the two call sites disagreed about that too — the poller fell back to <c>""</c> and the
+    /// submission path to <c>"openid email"</c>. That is a real difference in what is requested
+    /// and not one to settle silently while fixing the secret, so each caller still passes its
+    /// own and the disagreement is visible rather than averaged.</para>
+    /// </summary>
+    public async Task<string?> ForMailboxAsync(
+        VaultService vault, SupportMailbox mailbox, string fallbackScopes, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(mailbox.OAuthClientId)
+            || string.IsNullOrWhiteSpace(mailbox.OAuthTokenEndpoint))
+        {
+            return null;
+        }
+
+        // ⚠️ The OAuth secret, not the mailbox password. They are two different vault entries —
+        // VaultService.SupportMailboxOAuthSecretName and SupportMailboxPasswordName — and the
+        // token endpoint rejects the wrong one as an invalid client.
+        string? clientSecret = await vault.GetSupportMailboxOAuthSecretAsync(
+            mailbox.TenantId, mailbox.Id, ct);
+
+        return string.IsNullOrEmpty(clientSecret)
+            ? null
+            : await GetAsync(
+                mailbox.Id, mailbox.OAuthTokenEndpoint!, mailbox.OAuthClientId!, clientSecret,
+                mailbox.OAuthScopes ?? fallbackScopes, ct);
+    }
+
     /// <summary>
     /// Tokens live minutes and a poll happens every few of them, so a cache turns one token request
     /// per poll into one per token lifetime. Keyed by mailbox, because two mailboxes are two clients.

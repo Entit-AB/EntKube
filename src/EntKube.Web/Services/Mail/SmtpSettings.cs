@@ -254,13 +254,8 @@ public class SmtpSettingsResolver(
             return null;
         }
 
-        string? secret = await vault.GetSupportMailboxPasswordAsync(
-            mailbox.TenantId, mailbox.Id, ct);
-
-        return string.IsNullOrEmpty(secret)
-            ? null
-            : await tokens.GetAsync(
-                mailbox.Id, mailbox.OAuthTokenEndpoint, mailbox.OAuthClientId, secret,
-                mailbox.OAuthScopes ?? "openid email", ct);
+        // ⚠️ This used to read GetSupportMailboxPasswordAsync — the mailbox's IMAP password —
+        // and send it as the client secret. See MailboxTokenProvider.ForMailboxAsync.
+        return await tokens.ForMailboxAsync(vault, mailbox, "openid email", ct);
     }
 }
