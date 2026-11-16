@@ -23,6 +23,14 @@ namespace EntKube.Web.Tests;
 /// agent's end of the same conversation is pinned by <see cref="AgentCapabilityTests"/> as a pure
 /// decision; the socket wiring that connects the two is one line in <c>AgentClient</c> and is
 /// covered only by the live round trip in <c>EgressAgentLinkTests</c>.</para>
+///
+/// <para>⚠️ One guard is deliberately uncovered, and measured as such: <c>AgentClient</c> refuses
+/// to answer a <c>Lease</c> from a server that declared tunnel-only. <c>AgentClient.RunAsync</c>
+/// constructs its own <c>ClientWebSocket</c> inline and <c>ReceiveLoopAsync</c> takes the concrete
+/// type, so there is no seam to drive it through, and reaching it would mean a second live Kestrel
+/// harness for one <c>if</c>. The rule it consults — <c>RequiredVersion(LeaseAck) == 2</c> — is
+/// pinned in <see cref="AgentTaskFrameTests"/>; that the agent consults it is not. Stated rather
+/// than implied, because a mutation run will show it escaping.</para>
 /// </summary>
 public class AgentLeaseDispatchTests
 {
@@ -268,6 +276,51 @@ public class AgentLeaseDispatchTests
 
         (await dispatch.Should().ThrowAsync<ArgumentOutOfRangeException>())
             .WithMessage("*deadline*");
+    }
+
+    // ──────── Running out of patience ────────
+
+    [Fact]
+    public void An_agent_that_never_acknowledged_is_not_reported_as_having_run_out_of_time()
+    {
+        // The bug this replaced: one catch served both of RunLeaseAsync's waits and reported the
+        // second one's budget for either, so a lease the agent never acknowledged inside 30s came
+        // back as "sent no verdict within 70s" — a duration that had not elapsed, describing a
+        // wait that had not happened, and pointing an operator at the agent's work rather than at
+        // the agent's silence.
+        ResultPayload silent = AgentConnection.DescribeTimeout(
+            Guid.Empty, Guid.Empty, acknowledged: false,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(70));
+
+        silent.Outcome.Should().Be(LeaseOutcome.Failed);
+        silent.Reason.Should().Contain("did not acknowledge").And.Contain("30s");
+        silent.Reason.Should().NotContain("70", "that budget was never spent");
+    }
+
+    [Fact]
+    public void An_agent_that_accepted_and_went_quiet_is_reported_against_its_own_deadline()
+    {
+        ResultPayload quiet = AgentConnection.DescribeTimeout(
+            Guid.Empty, Guid.Empty, acknowledged: true,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(70));
+
+        quiet.Outcome.Should().Be(LeaseOutcome.Expired);
+        quiet.Reason.Should().Contain("accepted").And.Contain("70s");
+    }
+
+    [Fact]
+    public void The_two_timeouts_are_different_answers()
+    {
+        // Asserted against each other as well as individually: a change that collapsed both
+        // branches into one answer would still pass the two tests above if their expectations
+        // happened to drift together.
+        ResultPayload silent = AgentConnection.DescribeTimeout(
+            Guid.Empty, Guid.Empty, false, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2));
+        ResultPayload quiet = AgentConnection.DescribeTimeout(
+            Guid.Empty, Guid.Empty, true, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2));
+
+        silent.Outcome.Should().NotBe(quiet.Outcome);
+        silent.Reason.Should().NotBe(quiet.Reason);
     }
 
     /// <summary>One <see cref="AgentConnection"/> over a socket the test drives by hand.</summary>

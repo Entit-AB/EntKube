@@ -212,6 +212,10 @@ public sealed class AgentConnection : IAsyncDisposable
         PendingLease pending = new(onProgress);
         leases[leaseId] = pending;
 
+        // Which of the two waits below timed out is not something the exception can say, and the
+        // two mean different things to whoever reads the answer. See DescribeTimeout.
+        bool acknowledged = false;
+
         using CancellationTokenSource linked =
             CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
 
@@ -233,15 +237,15 @@ public sealed class AgentConnection : IAsyncDisposable
                     leaseId, LeaseOutcome.Refused, ack.Reason ?? "the agent gave no reason");
             }
 
+            acknowledged = true;
+
             return await pending.Result.Task.WaitAsync(deadline + ResultGrace, linked.Token);
         }
         catch (TimeoutException)
         {
-            await TryCancelAsync(leaseId, "the deadline passed with no result");
+            await TryCancelAsync(leaseId, acknowledged ? "the deadline passed with no result" : "no answer");
 
-            return new ResultPayload(
-                leaseId, LeaseOutcome.Expired,
-                $"Agent {AgentId} sent no verdict within {(deadline + ResultGrace).TotalSeconds:0}s.");
+            return DescribeTimeout(leaseId, AgentId, acknowledged, AckTimeout, deadline + ResultGrace);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -259,6 +263,35 @@ public sealed class AgentConnection : IAsyncDisposable
             leases.TryRemove(leaseId, out _);
         }
     }
+
+    /// <summary>
+    /// What to report when a dispatch runs out of patience. A pure decision, because it had been
+    /// wrong: one <c>catch (TimeoutException)</c> served both of <see cref="RunLeaseAsync"/>'s
+    /// waits and reported the second one's budget for either, so an agent that never acknowledged
+    /// inside 30s produced "sent no verdict within 70s" — a number that had not elapsed, about a
+    /// wait that had not happened.
+    ///
+    /// <para>They are also different failures. No acknowledgment means the agent never took the
+    /// work: the likeliest causes are a build that predates the capability, or a link whose send
+    /// queue is saturated by tunnel traffic. No result means it took the work and did not finish,
+    /// which is the agent's problem rather than the dispatch's. An operator who is handed the
+    /// second diagnosis for the first failure looks in the wrong place.</para>
+    ///
+    /// <para>Pure so the distinction can be tested without waiting out either budget on a machine
+    /// whose wall clock jumps when it sleeps. The one line in <see cref="RunLeaseAsync"/> that
+    /// chooses which case applies is not separately covered.</para>
+    /// </summary>
+    public static ResultPayload DescribeTimeout(
+        Guid leaseId, Guid agentId, bool acknowledged, TimeSpan ackTimeout, TimeSpan resultWait)
+        => acknowledged
+            ? new ResultPayload(
+                leaseId, LeaseOutcome.Expired,
+                $"Agent {agentId} accepted this lease and sent no verdict within "
+                + $"{resultWait.TotalSeconds:0}s.")
+            : new ResultPayload(
+                leaseId, LeaseOutcome.Failed,
+                $"Agent {agentId} did not acknowledge this lease within {ackTimeout.TotalSeconds:0}s, "
+                + "so it never took the work. It may be an older build, or its link may be busy.");
 
     /// <summary>
     /// Reads frames until the link closes. Runs for the lifetime of the agent's

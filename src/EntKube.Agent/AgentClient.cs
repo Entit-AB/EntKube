@@ -310,6 +310,20 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
             return;
         }
 
+        // The invariant this whole change rests on runs in both directions: never send a frame the
+        // peer has not said it understands. The agent held it when declaring its capabilities and
+        // not here, where a server that dispatched a lease while declaring tunnel-only would have
+        // been answered with a task frame anyway. That server would be wrong — and surviving a
+        // wrong peer is the entire reason the version is negotiated rather than assumed.
+        int required = AgentProtocol.RequiredVersion(AgentFrameType.LeaseAck);
+
+        if (serverVersion < required)
+        {
+            log($"Ignoring lease {lease.LeaseId}: EntKube declared protocol {serverVersion}, so "
+                + $"answering it would mean sending a frame it did not say it understands.");
+            return;
+        }
+
         LeaseAckPayload ack = AgentCapabilities.Decide(lease);
         await SendAsync(AgentTaskFrames.Encode(AgentFrameType.LeaseAck, ack), ct);
 
