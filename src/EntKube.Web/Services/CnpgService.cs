@@ -40,6 +40,192 @@ public class CnpgService(
                "The cluster has no stored kubeconfig, or does not belong to this tenant, "
                + "so nothing can be applied to it.");
 
+    // ──────── Live storage ────────
+
+    /// <summary>
+    /// Reads the storage a CNPG cluster has right now: the Cluster resource's
+    /// <c>spec.storage</c>, every claim labelled with the cluster, each claim's bound volume and
+    /// the storage class. Each read is best-effort; the snapshot says what it managed to see.
+    /// Returns null only when neither the Cluster resource nor any claim could be read.
+    /// </summary>
+    /// <param name="clusterJson">The Cluster resource, when the caller has already fetched it.</param>
+    private static async Task<CnpgStorageSnapshot?> ReadLiveStorageAsync(
+        Clusters.IClusterClient client, CnpgCluster cnpg, string? clusterJson, CancellationToken ct)
+    {
+        CnpgStorageSnapshot snapshot = new();
+
+        try
+        {
+            clusterJson ??= await client.GetJsonAsync(
+                $"cluster.postgresql.cnpg.io/{cnpg.Name}", cnpg.Namespace, ct: ct);
+            CnpgStorage.ReadClusterSpec(clusterJson, snapshot);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The Cluster resource may be gone (mid-restore) or unreadable; the claims may not be.
+        }
+
+        try
+        {
+            snapshot.Volumes = CnpgStorage.ReadClaims(await client.GetJsonAsync(
+                "persistentvolumeclaims", cnpg.Namespace, $"cnpg.io/cluster={cnpg.Name}", ct));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
+
+        if (!snapshot.ClusterRead && snapshot.Volumes.Count == 0)
+        {
+            return null;
+        }
+
+        // PersistentVolumes and StorageClasses are cluster-scoped, and a namespace-scoped
+        // kubeconfig may not read them. They are shown when they can be, never required.
+        for (int i = 0; i < snapshot.Volumes.Count; i++)
+        {
+            CnpgVolumeInfo volume = snapshot.Volumes[i];
+
+            if (volume.VolumeName is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                string? capacity = CnpgStorage.ReadVolumeCapacity(await client.GetJsonAsync(
+                    $"persistentvolume/{volume.VolumeName}", "", ct: ct));
+                snapshot.Volumes[i] = volume with { VolumeCapacity = capacity };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+            }
+        }
+
+        snapshot.StorageClass ??= snapshot.Volumes.FirstOrDefault(v => v.IsData)?.StorageClass;
+
+        if (snapshot.StorageClass is not null)
+        {
+            try
+            {
+                snapshot.AllowVolumeExpansion = CnpgStorage.ReadAllowVolumeExpansion(
+                    await client.GetJsonAsync($"storageclass/{snapshot.StorageClass}", "", ct: ct));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Brings the stored <see cref="CnpgCluster.StorageSize"/> into line with the cluster before
+    /// anything is built from it, and saves the correction.
+    ///
+    /// <para><b>Every path that builds a Cluster manifest calls this first.</b> The manifest
+    /// carries <c>spec.storage.size</c>, CNPG refuses a manifest that shrinks it, and volumes
+    /// grown outside EntKube left the stored value behind — so a 300Gi cluster recorded as 50Gi
+    /// could not be backed up, upgraded or re-applied.</para>
+    ///
+    /// <para>When the cluster cannot be read the stored value stands: the action will usually
+    /// fail on the same unreachable cluster anyway, and an unread size is no reason to guess.</para>
+    /// </summary>
+    /// <param name="db">The context <paramref name="cnpg"/> is tracked by.</param>
+    private async Task<CnpgStorageSnapshot?> AlignStorageSizeAsync(
+        DataServicesDbContext db, CnpgCluster cnpg, Clusters.IClusterClient client,
+        CancellationToken ct, string? clusterJson = null)
+    {
+        CnpgStorageSnapshot? snapshot = await ReadLiveStorageAsync(client, cnpg, clusterJson, ct);
+        string? live = snapshot?.EffectiveSize;
+
+        if (live is not null && !string.Equals(live, cnpg.StorageSize, StringComparison.Ordinal))
+        {
+            cnpg.StorageSize = live;
+            await db.SaveChangesAsync(ct);
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Grows a CNPG cluster's data volumes to <paramref name="newSize"/>.
+    ///
+    /// <para>Only <c>spec.storage.size</c> is patched — nothing else about the cluster is
+    /// rewritten, which matters for clusters registered from an existing deployment. CNPG then
+    /// resizes each instance's claim online (<c>resizeInUseVolumes</c>), provided the storage
+    /// class allows expansion.</para>
+    ///
+    /// <para>Refused, before anything is written, when the size is not larger than what the
+    /// cluster has now (volumes cannot shrink), when the current size cannot be read (no
+    /// resizing blind), when CNPG is told not to resize volumes in use, or when the storage
+    /// class does not allow expansion.</para>
+    /// </summary>
+    public async Task<CnpgStorageSnapshot> ExpandStorageAsync(
+        Guid tenantId, Guid cnpgClusterId, string newSize, CancellationToken ct = default)
+    {
+        string requested = newSize?.Trim() ?? "";
+
+        if (!CnpgStorage.IsValidSize(requested))
+        {
+            throw new InvalidOperationException(
+                $"'{requested}' is not a storage size. Use a Kubernetes quantity such as 400Gi or 1Ti.");
+        }
+
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        CnpgCluster cnpg = await db.CnpgClusters
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("CNPG cluster not found.");
+
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+        CnpgStorageSnapshot? snapshot = await AlignStorageSizeAsync(db, cnpg, client, ct);
+
+        if (snapshot is null || !snapshot.ClusterRead)
+        {
+            throw new InvalidOperationException(
+                $"Could not read the Cluster resource {cnpg.Name} in {cnpg.Namespace}, so its current "
+                + "size is unknown. Nothing was changed.");
+        }
+
+        string current = snapshot.EffectiveSize ?? cnpg.StorageSize;
+
+        if (CnpgStorage.ToBytes(requested) <= CnpgStorage.ToBytes(current))
+        {
+            throw new InvalidOperationException(
+                $"Storage can only grow: {requested} is not larger than the current {current}.");
+        }
+
+        if (!snapshot.ResizeInUseVolumes)
+        {
+            throw new InvalidOperationException(
+                $"{cnpg.Name} sets spec.storage.resizeInUseVolumes: false, so CNPG would not resize "
+                + "the existing volumes. Nothing was changed.");
+        }
+
+        if (snapshot.AllowVolumeExpansion == false)
+        {
+            throw new InvalidOperationException(
+                $"Storage class '{snapshot.StorageClass}' does not allow volume expansion "
+                + "(allowVolumeExpansion is not true). Nothing was changed.");
+        }
+
+        using (gate.BeginOperation(
+                   $"expand the storage of {cnpg.Name} in {cnpg.Namespace} from {current} to {requested}"))
+        {
+            await client.PatchJsonAsync(
+                "cluster.postgresql.cnpg.io", cnpg.Name, cnpg.Namespace,
+                CnpgStorage.BuildResizePatch(requested), ct);
+        }
+
+        // Recorded only once the cluster has accepted it, so a refused patch leaves the record
+        // matching the cluster.
+        cnpg.StorageSize = requested;
+        await db.SaveChangesAsync(ct);
+
+        snapshot.SpecSize = requested;
+        return snapshot;
+    }
+
     // ──────── Cluster Lifecycle ────────
 
     /// <summary>
@@ -477,6 +663,11 @@ public class CnpgService(
                 "Use point-in-time restore to create a new cluster with the target version.");
         }
 
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+
+        // The manifest carries spec.storage.size; a stale stored size would ask CNPG to shrink.
+        await AlignStorageSizeAsync(db, cnpg, client, ct);
+
         cnpg.PostgresVersion = targetVersion;
         cnpg.Status = CnpgClusterStatus.Upgrading;
         await db.SaveChangesAsync(ct);
@@ -488,7 +679,7 @@ public class CnpgService(
         string s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null!;
         string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName);
 
-        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
+        await client.ApplyManifestAsync(manifest, ct);
     }
 
     /// <summary>
@@ -521,6 +712,8 @@ public class CnpgService(
 
         // ClusterFor refuses for the same reason the explicit guard here used to, and says so.
         Clusters.IClusterClient reapplyTo = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+
+        await AlignStorageSizeAsync(db, cnpg, reapplyTo, ct);
 
         // Same secret-name convention as every other apply path, so the rebuilt manifest matches
         // the live spec everywhere except the parts this version of EntKube changed.
@@ -592,6 +785,10 @@ public class CnpgService(
             throw new InvalidOperationException(
                 $"Target version ({targetVersion}) must be a higher major version than current ({source.PostgresVersion}).");
         }
+
+        // The new cluster is created with the source's size, and must hold all of its data.
+        await AlignStorageSizeAsync(
+            db, source, await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
 
         // Step 1: Take a fresh backup so the restore includes the latest data.
 
@@ -865,6 +1062,8 @@ public class CnpgService(
 
         try
         {
+            await AlignStorageSizeAsync(db, cnpg, client, ct);
+
             string s3SecretName = $"{cnpg.Name}-s3-credentials";
             await client.ApplyManifestAsync(
                 BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
@@ -923,6 +1122,9 @@ public class CnpgService(
         }
 
         Clusters.IClusterClient client = await ClusterFor(tenantId, source.KubernetesClusterId, ct);
+
+        // The restored cluster is sized from the source, and a stale 50Gi cannot hold 300GB.
+        await AlignStorageSizeAsync(db, source, client, ct);
 
         // Step 1: Persist the new cluster record immediately so it appears in the UI.
         // Skip the empty-cluster-then-delete pattern: CNPG clusters have finalizers, so
@@ -1003,6 +1205,12 @@ public class CnpgService(
             throw new InvalidOperationException(
                 "Cluster has no backup storage configured. Cannot restore without backups.");
         }
+
+        // ⚠️ Read the real size BEFORE the delete. Deleting the Cluster resource takes its claims
+        // with it, and the recovery recreates them from StorageSize — so a stale value here
+        // means restoring 300GB onto 50Gi volumes, and afterwards nothing is left to read.
+        await AlignStorageSizeAsync(
+            db, source, await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
 
         // Delete only the Cluster CRD, not the ObjectStore — the recovery bootstrap
         // references the existing ObjectStore to locate WAL archives in S3.
@@ -1763,11 +1971,26 @@ public class CnpgService(
         {
             // Query the CNPG Cluster CRD status for phase and primary info.
 
-            string clusterJson = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+
+            string clusterJson = await client.GetJsonAsync(
                 $"cluster.postgresql.cnpg.io/{cluster.Name}",
                 cluster.Namespace, ct: ct);
 
             ParseClusterStatus(clusterJson, detail);
+
+            // The page shows what the cluster has, not what EntKube recorded at create time —
+            // and the stored size is corrected here, before the drift check below builds a
+            // manifest from it. This writes EntKube's own record only, never the cluster, so
+            // it raises no acknowledgment (see the note on drift below).
+            try
+            {
+                detail.Storage = await AlignStorageSizeAsync(db, cluster, client, ct, clusterJson);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A failed save must not cost the operator the rest of the panel.
+            }
 
             // Query pods belonging to this CNPG cluster via label selector.
 
@@ -1910,6 +2133,8 @@ public class CnpgService(
         {
             Clusters.IClusterClient client =
                 await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+
+            await AlignStorageSizeAsync(db, cluster, client, ct);
 
             string output = await client.ApplyManifestAsync(
                 BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"), ct);

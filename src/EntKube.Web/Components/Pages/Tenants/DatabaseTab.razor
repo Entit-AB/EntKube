@@ -1234,6 +1234,100 @@
                                         </div>
                                     </div>
 
+                                    @* ── Storage ──
+                                       Read from the cluster: the Cluster spec, every claim and its
+                                       volume. EntKube's stored size is corrected from this before any
+                                       manifest is built, so a volume grown by hand no longer makes
+                                       every action ask CNPG to shrink it. *@
+                                    <div class="border rounded p-2 mb-3 small">
+                                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                                            <div>
+                                                <i class="bi bi-device-hdd me-1"></i><strong>Storage</strong>
+                                                @if (clusterDetail.Storage?.EffectiveSize is string liveSize)
+                                                {
+                                                    <span class="ms-2">@liveSize per instance</span>
+                                                    <span class="text-muted ms-1">(@CnpgStorage.Describe(liveSize))</span>
+                                                    @if (clusterDetail.Storage.WalSpecSize is not null)
+                                                    {
+                                                        <span class="text-muted ms-2">· WAL @clusterDetail.Storage.WalSpecSize</span>
+                                                    }
+                                                    @if (clusterDetail.Storage.StorageClass is not null)
+                                                    {
+                                                        <span class="text-muted ms-2">· class <code>@clusterDetail.Storage.StorageClass</code></span>
+                                                        @if (clusterDetail.Storage.AllowVolumeExpansion == false)
+                                                        {
+                                                            <span class="badge bg-warning-subtle text-warning-emphasis border ms-1" title="allowVolumeExpansion is not true on this storage class">no expansion</span>
+                                                        }
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    <span class="ms-2">@mc.StorageSize</span>
+                                                    <span class="text-muted ms-1">(as recorded — the cluster's volumes could not be read)</span>
+                                                }
+                                            </div>
+                                            @if (clusterDetail.Storage?.ClusterRead == true)
+                                            {
+                                                <div class="d-flex align-items-center gap-1">
+                                                    <input class="form-control form-control-sm" style="width: 7rem;"
+                                                           placeholder="e.g. 400Gi" aria-label="@($"New storage size for {mc.Name}")"
+                                                           @bind="cnpgExpandSize" @bind:event="oninput"
+                                                           disabled="@(expandingCnpgId == mc.Id)" />
+                                                    <button class="btn btn-sm btn-outline-primary py-0"
+                                                            title="Grow every instance's data volume. Volumes can only grow, never shrink."
+                                                            disabled="@(expandingCnpgId == mc.Id || string.IsNullOrWhiteSpace(cnpgExpandSize))"
+                                                            @onclick="() => ExpandCnpgStorage(mc)">
+                                                        @if (expandingCnpgId == mc.Id)
+                                                        {
+                                                            <span class="spinner-border spinner-border-sm me-1"></span>
+                                                        }
+                                                        <i class="bi bi-arrows-angle-expand me-1"></i>Expand
+                                                    </button>
+                                                </div>
+                                            }
+                                        </div>
+                                        @if (expandCnpgError is not null)
+                                        {
+                                            <div class="alert alert-danger py-1 px-2 mb-2">@expandCnpgError</div>
+                                        }
+                                        @if (clusterDetail.Storage is { Volumes.Count: > 0 } storage)
+                                        {
+                                            <div class="table-responsive">
+                                                <table class="table table-sm small mb-0">
+                                                    <thead class="table-light">
+                                                        <tr>
+                                                            <th>Claim</th>
+                                                            <th>Role</th>
+                                                            <th>Requested</th>
+                                                            <th>Capacity</th>
+                                                            <th>Volume</th>
+                                                            <th>Volume size</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        @foreach (CnpgVolumeInfo v in storage.Volumes)
+                                                        {
+                                                            <tr>
+                                                                <td class="font-monospace">@v.PvcName</td>
+                                                                <td>@(v.Role switch { "PG_WAL" => "WAL", "PG_TABLESPACE" => "Tablespace", _ => "Data" })</td>
+                                                                <td>@(v.Requested ?? "—")</td>
+                                                                <td>
+                                                                    @(v.Capacity ?? "—")
+                                                                    @if (v.Resizing is not null)
+                                                                    {
+                                                                        <span class="badge bg-info-subtle text-info-emphasis border ms-1">@v.Resizing</span>
+                                                                    }
+                                                                </td>
+                                                                <td class="font-monospace text-truncate" style="max-width: 14rem;">@(v.VolumeName ?? "—")</td>
+                                                                <td>@(v.VolumeCapacity ?? "—")</td>
+                                                            </tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        }
+                                    </div>
+
                                     @* ── Configuration drift ──
                                        Opening this panel used to APPLY the generated manifest, which
                                        raised an acknowledgment dialog for a read. The drift is shown
@@ -3650,6 +3744,11 @@
     private CnpgClusterDetail? clusterDetail;
     private bool loadingDetail;
 
+    // Storage expansion
+    private string cnpgExpandSize = "";
+    private Guid? expandingCnpgId;
+    private string? expandCnpgError;
+
     // Delete cluster
     private Guid? deletingId;
     private Guid? cnpgRestartingId;
@@ -4090,6 +4189,7 @@
             else
             {
                 clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, cnpgClusterId);
+                ShowLiveStorageOnCard();
             }
         }
         catch (Exception ex)
@@ -4102,6 +4202,56 @@
         }
     }
 
+    /// <summary>
+    /// Grows the cluster's data volumes. The service refuses a shrink, an unreadable cluster and
+    /// a storage class that cannot expand before anything is written; the change gate then asks
+    /// for the one patch.
+    /// </summary>
+    private async Task ExpandCnpgStorage(CnpgCluster cluster)
+    {
+        expandingCnpgId = cluster.Id;
+        expandCnpgError = null;
+        StateHasChanged();
+
+        try
+        {
+            CnpgStorageSnapshot result =
+                await CnpgService.ExpandStorageAsync(TenantId, cluster.Id, cnpgExpandSize);
+
+            Toasts.Success($"{cluster.Name}: storage set to {result.SpecSize}. CNPG is resizing the volumes.");
+            cnpgExpandSize = "";
+            clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, cluster.Id);
+            ShowLiveStorageOnCard();
+        }
+        catch (Exception ex)
+        {
+            expandCnpgError = ex.Message;
+        }
+        finally
+        {
+            expandingCnpgId = null;
+        }
+    }
+
+    /// <summary>
+    /// The detail read corrects the stored size from the cluster; the card's summary row was
+    /// loaded before that, so it is brought along rather than reloading every cluster.
+    /// </summary>
+    private void ShowLiveStorageOnCard()
+    {
+        if (clusterDetail is null || managedClusters is null)
+        {
+            return;
+        }
+
+        CnpgCluster? listed = managedClusters.FirstOrDefault(c => c.Id == clusterDetail.Cluster.Id);
+
+        if (listed is not null)
+        {
+            listed.StorageSize = clusterDetail.Cluster.StorageSize;
+        }
+    }
+
     private async Task RefreshOpenDetailPanels()
     {
         if (expandedClusterId.HasValue)
@@ -4109,6 +4259,7 @@
             try
             {
                 clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, expandedClusterId.Value);
+                ShowLiveStorageOnCard();
             }
             catch
             {
@@ -4147,11 +4298,14 @@
         expandedClusterId = cluster.Id;
         clusterDetail = null;
         loadingDetail = true;
+        cnpgExpandSize = "";
+        expandCnpgError = null;
         StateHasChanged();
 
         try
         {
             clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, cluster.Id);
+            ShowLiveStorageOnCard();
         }
         catch (Exception)
         {

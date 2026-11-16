@@ -39,6 +39,13 @@ public class CnpgClusterDetail
     public string? ConfigurationDriftText { get; set; }
 
     /// <summary>
+    /// The storage the cluster actually has — the Cluster spec, every claim and its volume —
+    /// read live. Null when the cluster could not be reached; the page then shows the stored
+    /// size and says it is unverified.
+    /// </summary>
+    public EntKube.Web.Services.CnpgStorageSnapshot? Storage { get; set; }
+
+    /// <summary>
     /// The CNPG cluster phase as reported by the Cluster status (e.g. "Cluster in healthy state").
     /// </summary>
     public string Phase { get; set; } = "Unknown";
