@@ -1718,4 +1718,324 @@ public class CnpgServiceTests : IDisposable
 
         sink.Calls.Should().Be(2, "each action is its own decision");
     }
+
+    // ════════════════════════════════════════════════════════════════
+    //  The size is the cluster's, not the record's
+    // ════════════════════════════════════════════════════════════════
+
+    // Reported from production: a database filled its 50Gi volumes, they were grown to 300Gi
+    // outside EntKube, and EntKube's stored 50Gi then made every manifest-building action ask
+    // CNPG to shrink the cluster — which its webhook refuses.
+
+    private async Task<(Tenant tenant, CnpgCluster pg)> SeedRecordedAt50GiAsync()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster pg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "postgres",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            Instances = 2,
+            StorageSize = "50Gi",
+            StorageLinkId = storageLink.Id,
+            BackupSchedule = "0 0 2 * * *",
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(pg);
+        await db.SaveChangesAsync();
+
+        return (tenant, pg);
+    }
+
+    /// <summary>The cluster as it really is: 300Gi in the spec and on both claims.</summary>
+    private void LiveClusterIs300Gi(bool allowVolumeExpansion = true, Func<bool>? clusterExists = null)
+    {
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string resource, string _, string _, string _, CancellationToken _) =>
+            {
+                if (resource == "cluster.postgresql.cnpg.io/postgres")
+                {
+                    return clusterExists is null || clusterExists()
+                        ? """{"spec":{"storage":{"size":"300Gi","storageClass":"csi-cinder"}},"status":{}}"""
+                        : throw new InvalidOperationException("NotFound");
+                }
+
+                // CNPG's claims are owned by the Cluster, so deleting it garbage-collects them.
+                if (resource == "persistentvolumeclaims" && clusterExists is not null && !clusterExists())
+                {
+                    return """{"items":[]}""";
+                }
+
+                return resource switch
+                {
+                    "persistentvolumeclaims" => """
+                        {"items":[
+                          {"metadata":{"name":"postgres-1","labels":{"cnpg.io/pvcRole":"PG_DATA"}},
+                           "spec":{"resources":{"requests":{"storage":"300Gi"}},"volumeName":"pv-1"},
+                           "status":{"capacity":{"storage":"300Gi"}}},
+                          {"metadata":{"name":"postgres-2","labels":{"cnpg.io/pvcRole":"PG_DATA"}},
+                           "spec":{"resources":{"requests":{"storage":"300Gi"}},"volumeName":"pv-2"},
+                           "status":{"capacity":{"storage":"300Gi"}}}]}
+                        """,
+                    "persistentvolume/pv-1" or "persistentvolume/pv-2" =>
+                        """{"spec":{"capacity":{"storage":"300Gi"}}}""",
+                    "storageclass/csi-cinder" => allowVolumeExpansion
+                        ? """{"metadata":{"name":"csi-cinder"},"allowVolumeExpansion":true}"""
+                        : """{"metadata":{"name":"csi-cinder"}}""",
+                    _ => "{}",
+                };
+            });
+    }
+
+    private List<string> CaptureApplies()
+    {
+        List<string> applied = [];
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .ReturnsAsync(string.Empty);
+        return applied;
+    }
+
+    private async Task<string> StoredSizeAsync(Guid id)
+    {
+        using ApplicationDbContext check = testDb.CreateContext();
+        return (await check.CnpgClusters.AsNoTracking().SingleAsync(c => c.Id == id)).StorageSize;
+    }
+
+    [Fact]
+    public async Task ReapplyClusterManifestsAsync_CarriesTheLiveSize_NotTheStaleOne()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+        List<string> applied = CaptureApplies();
+
+        KubernetesOperationResult<string> result = await sut.ReapplyClusterManifestsAsync(tenant.Id, pg.Id);
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        string clusterManifest = applied.Single(m => m.Contains("kind: Cluster"));
+        clusterManifest.Should().Contain("size: 300Gi").And.NotContain("size: 50Gi");
+        (await StoredSizeAsync(pg.Id)).Should().Be("300Gi", "the correction is kept");
+    }
+
+    [Fact]
+    public async Task BackupAsync_ReappliesAtTheLiveSize()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+        List<string> applied = CaptureApplies();
+
+        await sut.BackupAsync(tenant.Id, pg.Id);
+
+        applied.Where(m => m.Contains("kind: Cluster"))
+            .Should().ContainSingle().Which.Should().Contain("size: 300Gi");
+    }
+
+    [Fact]
+    public async Task UpgradeClusterAsync_DoesNotAskToShrink()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+        List<string> applied = CaptureApplies();
+
+        await sut.UpgradeClusterAsync(tenant.Id, pg.Id, "18.1");
+
+        applied.Single().Should().Contain("size: 300Gi").And.Contain("postgresql:18.1");
+    }
+
+    /// <summary>
+    /// The page shows the live size and the drift check compares against it — otherwise the
+    /// panel reported "differs" for a shrink nobody wanted.
+    /// </summary>
+    [Fact]
+    public async Task GetClusterDetailAsync_ShowsAndRecordsTheLiveSize()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+
+        string? diffed = null;
+        k8sFactory.Setup(f => f.DiffManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, CancellationToken>((m, _, _, _) => diffed = m)
+            .ReturnsAsync(new EntKube.Web.Services.Clusters.ManifestDiff(
+                EntKube.Web.Services.Clusters.DiffOutcome.Matches, null));
+
+        CnpgClusterDetail? detail = await sut.GetClusterDetailAsync(tenant.Id, pg.Id);
+
+        detail!.Storage.Should().NotBeNull();
+        detail.Storage!.EffectiveSize.Should().Be("300Gi");
+        detail.Storage.Volumes.Should().HaveCount(2)
+            .And.OnlyContain(v => v.VolumeCapacity == "300Gi");
+        detail.Storage.AllowVolumeExpansion.Should().BeTrue();
+        detail.Cluster.StorageSize.Should().Be("300Gi");
+        diffed.Should().Contain("size: 300Gi");
+        (await StoredSizeAsync(pg.Id)).Should().Be("300Gi");
+
+        k8sFactory.Verify(f => f.ApplyManifestAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "correcting EntKube's own record is not a change to the cluster");
+    }
+
+    /// <summary>
+    /// The worst case: an in-place restore deletes the Cluster (and its claims) and recreates it
+    /// from the stored size. The size must be read BEFORE the delete — afterwards there is
+    /// nothing left to read, and 300GB does not restore onto 50Gi.
+    /// </summary>
+    [Fact]
+    public async Task RestoreInPlaceAsync_ReadsTheSizeBeforeDeletingTheCluster()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+
+        bool deleted = false;
+        LiveClusterIs300Gi(clusterExists: () => !deleted);
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Callback(() => deleted = true)
+            .Returns(Task.CompletedTask);
+        List<string> applied = CaptureApplies();
+
+        await sut.RestoreInPlaceAsync(tenant.Id, pg.Id, DateTime.UtcNow);
+
+        deleted.Should().BeTrue();
+        applied.Single(m => m.Contains("kind: Cluster")).Should().Contain("size: 300Gi");
+    }
+
+    [Fact]
+    public async Task RestoreAsync_SizesTheNewClusterFromTheLiveSource()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+        List<string> applied = CaptureApplies();
+
+        CnpgCluster restored = await sut.RestoreAsync(tenant.Id, pg.Id, "postgres-restored");
+
+        restored.StorageSize.Should().Be("300Gi");
+        applied.Single(m => m.Contains("kind: Cluster")).Should().Contain("size: 300Gi");
+    }
+
+    /// <summary>When the cluster cannot be read, the stored value stands — no guessing.</summary>
+    [Fact]
+    public async Task AnUnreadableCluster_KeepsTheStoredSize()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("apiserver unreachable"));
+        List<string> applied = CaptureApplies();
+
+        await sut.ReapplyClusterManifestsAsync(tenant.Id, pg.Id);
+
+        applied.Single(m => m.Contains("kind: Cluster")).Should().Contain("size: 50Gi");
+        (await StoredSizeAsync(pg.Id)).Should().Be("50Gi");
+    }
+
+    // ──────── Expanding storage ────────
+
+    [Fact]
+    public async Task ExpandStorageAsync_PatchesOnlyTheSize_AndRecordsIt()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+
+        string? patch = null;
+        k8sFactory.Setup(f => f.PatchJsonAsync(
+                "cluster.postgresql.cnpg.io", "postgres", "databases",
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, string, CancellationToken>((_, _, _, p, _, _) => patch = p)
+            .Returns(Task.CompletedTask);
+
+        await sut.ExpandStorageAsync(tenant.Id, pg.Id, "400Gi");
+
+        patch.Should().Be("""{"spec":{"storage":{"size":"400Gi"}}}""");
+        (await StoredSizeAsync(pg.Id)).Should().Be("400Gi");
+        k8sFactory.Verify(f => f.ApplyManifestAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "a registered cluster must not have EntKube's whole manifest written over it to grow a disk");
+    }
+
+    /// <summary>
+    /// "Larger" is judged against the LIVE size: 200Gi is larger than the stale 50Gi record but
+    /// smaller than the 300Gi the cluster has, and CNPG would refuse it.
+    /// </summary>
+    [Theory]
+    [InlineData("200Gi")]
+    [InlineData("300Gi")]
+    [InlineData("300G")]
+    public async Task ExpandStorageAsync_RefusesAnythingNotLargerThanTheLiveSize(string size)
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+
+        Func<Task> expand = () => sut.ExpandStorageAsync(tenant.Id, pg.Id, size);
+
+        (await expand.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*can only grow*300Gi*");
+        k8sFactory.Verify(f => f.PatchJsonAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ExpandStorageAsync_RefusesWhenTheStorageClassCannotExpand()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi(allowVolumeExpansion: false);
+
+        Func<Task> expand = () => sut.ExpandStorageAsync(tenant.Id, pg.Id, "400Gi");
+
+        (await expand.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*csi-cinder*does not allow volume expansion*");
+        k8sFactory.Verify(f => f.PatchJsonAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ExpandStorageAsync_RefusesToResizeBlind()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("apiserver unreachable"));
+
+        Func<Task> expand = () => sut.ExpandStorageAsync(tenant.Id, pg.Id, "400Gi");
+
+        (await expand.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*current size is unknown*");
+        (await StoredSizeAsync(pg.Id)).Should().Be("50Gi");
+    }
+
+    [Fact]
+    public async Task ExpandStorageAsync_RefusesSomethingThatIsNotASize()
+    {
+        (Tenant tenant, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+
+        Func<Task> expand = () => sut.ExpandStorageAsync(tenant.Id, pg.Id, "400Gi\"}}");
+
+        (await expand.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*is not a storage size*");
+    }
+
+    [Fact]
+    public async Task ExpandStorageAsync_ForAnotherTenant_ChangesNothing()
+    {
+        (Tenant _, CnpgCluster pg) = await SeedRecordedAt50GiAsync();
+        LiveClusterIs300Gi();
+
+        Func<Task> expand = () => sut.ExpandStorageAsync(Guid.NewGuid(), pg.Id, "400Gi");
+
+        (await expand.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*not found*");
+        k8sFactory.Verify(f => f.PatchJsonAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }
