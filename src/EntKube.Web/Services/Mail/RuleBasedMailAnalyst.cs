@@ -98,7 +98,7 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
         }
 
         // A reply to an existing ticket, by reference number or by mail threading.
-        Ticket? existing = MatchTicket(message, context.OpenTickets);
+        Ticket? existing = MatchTicket(message, context.OpenTickets, context.MergedInto);
         App? app = MatchApp(text, context.Apps);
 
         if (existing is not null)
@@ -191,7 +191,7 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
     private IReadOnlyList<MailSuggestion> FromABounce(MailContext context)
     {
         InboundMailMessage message = context.Message;
-        Ticket? about = MatchTicket(message, context.OpenTickets);
+        Ticket? about = MatchTicket(message, context.OpenTickets, context.MergedInto);
 
         return [Suggestion(
             message.Id, MailSuggestionKind.FlagDeliveryFailure,
@@ -225,7 +225,7 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
     private IReadOnlyList<MailSuggestion> FromOneOfOurs(MailContext context)
     {
         InboundMailMessage message = context.Message;
-        Ticket? about = MatchTicket(message, context.OpenTickets);
+        Ticket? about = MatchTicket(message, context.OpenTickets, context.MergedInto);
 
         if (about is null)
         {
@@ -262,15 +262,20 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
     /// follow. Nothing fuzzier — attaching a message to the wrong ticket corrupts the
     /// history §14.6 makes evidence.
     /// </summary>
-    public Ticket? MatchTicket(InboundMailMessage message, IReadOnlyList<Ticket> open)
+    public Ticket? MatchTicket(
+        InboundMailMessage message, IReadOnlyList<Ticket> open,
+        IReadOnlyDictionary<int, int>? mergedInto = null)
     {
+        // A merged duplicate's number means the ticket it went into.
+        int Resolve(int n) => mergedInto is not null && mergedInto.TryGetValue(n, out int target) ? target : n;
+
         // What the message is a reply to, first. A subject can be edited, translated by a
         // client, or lost to a forward; the thread headers survive all three, and a reply
         // that opens a second ticket about the fault already being worked is the failure
         // this exists to prevent.
         if (SupportMessageId.TicketNumberIn(message.InReplyTo) is int threaded)
         {
-            Ticket? byThread = open.FirstOrDefault(t => t.Number == threaded);
+            Ticket? byThread = open.FirstOrDefault(t => t.Number == Resolve(threaded));
 
             if (byThread is not null)
             {
@@ -280,7 +285,7 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
 
         if (ReferencedNumber(references, message.Subject) is int number)
         {
-            Ticket? byNumber = open.FirstOrDefault(t => t.Number == number);
+            Ticket? byNumber = open.FirstOrDefault(t => t.Number == Resolve(number));
             if (byNumber is not null)
             {
                 return byNumber;

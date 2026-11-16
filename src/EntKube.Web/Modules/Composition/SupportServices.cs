@@ -38,6 +38,11 @@ internal static class SupportServices
         services.AddScoped<OnCallService>();
         services.AddScoped<EntKube.Web.Services.Contracts.ContractService>();
         services.AddScoped<EntKube.Web.Services.Tickets.TicketService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketWorkService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketOverviews>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketBulkService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketFollowUp>();
+        services.AddSingletonWork<EntKube.Web.Services.Tickets.TicketFollowUpSweep>();
         services.AddScoped<EntKube.Web.Services.Time.TimeService>();
         services.AddScoped<EntKube.Web.Services.Knowledge.KnowledgeService>();
         services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();

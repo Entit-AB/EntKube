@@ -14,6 +14,9 @@ namespace EntKube.Web.Data.Modules;
 /// </summary>
 internal static class SupportModel
 {
+    /// <summary>The longest tag name stored. Long enough for a phrase, short enough to be a label.</summary>
+    internal const int TicketTagNameMaxLength = 50;
+
     internal static void Configure(ModelBuilder builder)
     {
         // Table names, stated rather than inferred.
@@ -47,6 +50,9 @@ internal static class SupportModel
         builder.Entity<TicketAffectedApp>().ToTable("TicketAffectedApps");
         builder.Entity<TicketBridgeConnection>().ToTable("TicketBridgeConnections");
         builder.Entity<TicketEvent>().ToTable("TicketEvents");
+        builder.Entity<TicketLink>().ToTable("TicketLinks");
+        builder.Entity<TicketSubscription>().ToTable("TicketSubscriptions");
+        builder.Entity<TicketTag>().ToTable("TicketTags");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -180,6 +186,14 @@ internal static class SupportModel
             // monthly report reads for a period.
             entity.HasIndex(t => new { t.CustomerId, t.Status, t.Priority });
             entity.HasIndex(t => new { t.TenantId, t.ReportedAt });
+
+            // The follow-up sweep's two questions, per tenant: whose reminder is due, and
+            // which resolved ticket closes now.
+            entity.HasIndex(t => new { t.TenantId, t.ReminderAt });
+            entity.HasIndex(t => new { t.TenantId, t.AutoCloseAt });
+            entity.HasIndex(t => t.MergedIntoTicketId);
+
+            entity.Property(t => t.ReminderNote).HasMaxLength(500);
             entity.HasIndex(t => t.AppId);
 
             entity.HasOne(t => t.Tenant)
@@ -209,6 +223,55 @@ internal static class SupportModel
             entity.HasOne(e => e.Ticket)
                   .WithMany(t => t.Events)
                   .HasForeignKey(e => e.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketTag>(entity =>
+        {
+            entity.HasKey(t => new { t.TicketId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(TicketTagNameMaxLength);
+
+            // The vocabulary is read per tenant through the ticket; this one serves "which
+            // tickets carry this tag", which overviews and search ask.
+            entity.HasIndex(t => t.Name);
+
+            entity.HasOne(t => t.Ticket)
+                  .WithMany(t => t.Tags)
+                  .HasForeignKey(t => t.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+            entity.HasIndex(l => new { l.FromTicketId, l.ToTicketId, l.Kind }).IsUnique();
+            entity.HasIndex(l => l.ToTicketId);
+            entity.HasIndex(l => l.TenantId);
+
+            // Cascade from both ends. SQL Server refuses two cascade paths into one table, so
+            // the second end is NoAction there and the service deletes those rows itself —
+            // which it does anyway, because a ticket is never deleted while it has links
+            // through anything but a tenant purge, and that deletes in its own order.
+            entity.HasOne(l => l.FromTicket)
+                  .WithMany()
+                  .HasForeignKey(l => l.FromTicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(l => l.ToTicket)
+                  .WithMany()
+                  .HasForeignKey(l => l.ToTicketId)
+                  .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<TicketSubscription>(entity =>
+        {
+            entity.HasKey(s => new { s.TicketId, s.UserId });
+            entity.Property(s => s.UserId).HasMaxLength(450);
+            entity.HasIndex(s => s.UserId);
+
+            entity.HasOne(s => s.Ticket)
+                  .WithMany()
+                  .HasForeignKey(s => s.TicketId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

@@ -1,7 +1,15 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Tickets
+@using EntKube.Web.Services.Support
+@using Microsoft.AspNetCore.Components.Authorization
 @inject TicketService Tickets
+@inject TicketOverviews Overviews
+@inject TicketBulkService Bulk
+@inject SupportDutyService Duty
+@inject CurrentActor ActorService
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -19,7 +27,8 @@
 {
     <TicketDetail TenantId="DetailTenantId"
                   TicketId="selectedTicketId.Value"
-                  OnBack="() => selectedTicketId = null"
+                  TenantSlug="@TenantSlug"
+                  OnBack="BackToQueue"
                   OnChanged="LoadAsync" />
 }
 else
@@ -55,6 +64,85 @@ else
         </div>
     </div>
 
+    @if (overviews is not null)
+    {
+        <ul class="nav nav-pills nav-sm mb-3 small" data-test="overviews">
+            @foreach (TicketOverview o in Enum.GetValues<TicketOverview>())
+            {
+                <li class="nav-item">
+                    <button class="nav-link py-1 px-2 @(o == overview ? "active" : "")" @onclick="() => ChooseOverview(o)">
+                        @OverviewLabel(o)
+                        <span class="badge @(o == overview ? "bg-light text-dark" : "bg-secondary") ms-1">@overviews[o].Count</span>
+                    </button>
+                </li>
+            }
+        </ul>
+    }
+
+    @if (selected.Count > 0)
+    {
+        <div class="border rounded p-2 mb-3 bg-light small d-flex flex-wrap gap-2 align-items-center" data-test="bulk-bar">
+            <strong>@selected.Count selected</strong>
+            <select class="form-select form-select-sm w-auto" @bind="bulkAction">
+                <option value="">Change…</option>
+                <option value="assign">Hand to</option>
+                <option value="unassign">Put back in the queue</option>
+                <option value="tag">Add tag</option>
+                <option value="untag">Remove tag</option>
+                <option value="remind">Set reminder</option>
+                <option value="priority">Priority</option>
+                <option value="note">Add a note</option>
+                <option value="close">Close the resolved ones</option>
+            </select>
+            @switch (bulkAction)
+            {
+                case "assign":
+                    @if (roster is { Count: > 0 })
+                    {
+                        <select class="form-select form-select-sm w-auto" @bind="bulkAssignee">
+                            <option value="">— who —</option>
+                            @foreach (SupportTechnician t in roster)
+                            {
+                                <option value="@t.UserId">@t.Name</option>
+                            }
+                        </select>
+                    }
+                    else
+                    {
+                        <span class="text-muted">Nobody is on the support rota.</span>
+                    }
+                    break;
+                case "tag" or "untag":
+                    <input class="form-control form-control-sm w-auto" placeholder="tag" @bind="bulkText" />
+                    break;
+                case "remind":
+                    <input class="form-control form-control-sm w-auto" type="datetime-local" @bind="bulkWhen" />
+                    break;
+                case "priority":
+                    <select class="form-select form-select-sm w-auto" @bind="bulkPriority">
+                        @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                        {
+                            <option value="@p">@p</option>
+                        }
+                    </select>
+                    <input class="form-control form-control-sm" style="min-width: 16rem" placeholder="Reason — §14.3 requires it" @bind="bulkText" />
+                    break;
+                case "note":
+                    <input class="form-control form-control-sm" style="min-width: 16rem" placeholder="The note" @bind="bulkText" />
+                    <div class="form-check m-0">
+                        <input class="form-check-input" type="checkbox" id="bulk-visible" @bind="bulkVisible" />
+                        <label class="form-check-label" for="bulk-visible">The customer sees this</label>
+                    </div>
+                    break;
+            }
+            @if (!string.IsNullOrEmpty(bulkAction))
+            {
+                <AsyncButton CssClass="btn-sm btn-primary" OnClick="ApplyBulkAsync">Apply</AsyncButton>
+            }
+            <button class="btn btn-sm btn-link ms-auto" @onclick="() => selected.Clear()">Clear selection</button>
+        </div>
+    }
+
     @if (visible.Count == 0)
     {
         <EmptyState Icon="bi-check2-circle" Title="Nothing open"
@@ -76,6 +164,11 @@ else
             <table class="table table-sm align-middle">
                 <thead class="table-light">
                     <tr>
+                        <th style="width: 1.5rem">
+                            <input class="form-check-input" type="checkbox" aria-label="Select all"
+                                   checked="@(visible.Count > 0 && visible.All(v => selected.Contains(v.Ticket.Id)))"
+                                   @onchange="ToggleAll" />
+                        </th>
                         <th>#</th>
                         <th>Prio</th>
                         <th>Ticket</th>
@@ -94,7 +187,12 @@ else
                     @foreach (TicketSlaStatus row in visible)
                     {
                         <tr class="@RowClass(row)" style="cursor: pointer"
-                            @onclick="() => selectedTicketId = row.Ticket.Id">
+                            @onclick="() => Open(row.Ticket)">
+                            <td @onclick:stopPropagation="true">
+                                <input class="form-check-input" type="checkbox" aria-label="@($"Select #{row.Ticket.Number}")"
+                                       checked="@selected.Contains(row.Ticket.Id)"
+                                       @onchange="e => ToggleOne(row.Ticket.Id, e)" />
+                            </td>
                             <td class="text-muted small">@row.Ticket.Number</td>
                             <td>
                                 <span class="badge @PriorityClass(row.Ticket.Priority)">@row.Ticket.Priority</span>
@@ -107,7 +205,26 @@ else
                                 }
                             </td>
                             <td>
-                                <div class="fw-semibold small">@row.Ticket.Title</div>
+                                <div class="fw-semibold small">
+                                    @row.Ticket.Title
+                                    @if (TicketOverviews.ReminderDue(row.Ticket, now))
+                                    {
+                                        <i class="bi bi-alarm text-danger ms-1" title="@($"Reminder due{(row.Ticket.ReminderNote is null ? "" : $": {row.Ticket.ReminderNote}")}")"></i>
+                                    }
+                                    else if (row.Ticket.ReminderAt is not null)
+                                    {
+                                        <i class="bi bi-alarm text-muted ms-1" title="A reminder is set"></i>
+                                    }
+                                </div>
+                                @if (row.Ticket.Tags.Count > 0)
+                                {
+                                    <div>
+                                        @foreach (TicketTag tag in row.Ticket.Tags.OrderBy(t => t.Name, StringComparer.Ordinal))
+                                        {
+                                            <span class="badge bg-light text-muted border me-1" style="font-size: .65rem">@tag.Name</span>
+                                        }
+                                    </div>
+                                }
                                 <div class="text-muted" style="font-size: .75rem">
                                     @row.Ticket.SupportWindow
                                     @if (row.Ticket.Channel == TicketChannel.Monitoring)
@@ -193,6 +310,15 @@ else
     [Parameter] public Guid? TenantId { get; set; }
 
     /// <summary>
+    /// The tenant's slug. Given, the open ticket lives in the address (<c>?ticket=N</c>), so it
+    /// can be linked to, copied, bookmarked and reached with the back button.
+    /// </summary>
+    [Parameter] public string? TenantSlug { get; set; }
+
+    /// <summary>The ticket to open, by number — from the address.</summary>
+    [Parameter] public int? FocusTicketNumber { get; set; }
+
+    /// <summary>
     /// The tenant the detail view acts as. Every ticket operation is scoped to it now, so the
     /// queue has to name one rather than letting the detail derive it from the ticket it loaded.
     ///
@@ -218,9 +344,27 @@ else
     /// <summary>Whose ticket each row is only needs saying when the rows are not all one customer's.</summary>
     private bool spansCustomers => CustomerId is null && TenantId is not null;
 
-    private List<TicketSlaStatus> visible => customerFilter is Guid only
-        ? [.. queue.Where(q => q.Ticket.CustomerId == only)]
-        : queue;
+    private List<TicketSlaStatus> visible
+    {
+        get
+        {
+            IEnumerable<TicketSlaStatus> rows = overviews is not null ? overviews[overview] : queue;
+            return customerFilter is Guid only ? [.. rows.Where(q => q.Ticket.CustomerId == only)] : [.. rows];
+        }
+    }
+
+    // ---- Overviews and bulk changes (docs/helpdesk.md, phase 1) ----
+    private Dictionary<TicketOverview, List<TicketSlaStatus>>? overviews;
+    private TicketOverview overview = TicketOverview.Open;
+    private HashSet<Guid> selected = [];
+    private List<SupportTechnician>? roster;
+    private string bulkAction = "";
+    private string bulkText = "";
+    private string bulkAssignee = "";
+    private DateTime? bulkWhen;
+    private bool bulkVisible;
+    private TicketPriority bulkPriority = TicketPriority.P3;
+    private int? openedNumber;
 
     private List<(Guid Id, string Name, int Count)> customers => [.. queue
         .GroupBy(q => q.Ticket.CustomerId)
@@ -234,7 +378,143 @@ else
     private void OnCustomerFilterChanged(ChangeEventArgs e) =>
         customerFilter = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
 
-    protected override async Task OnParametersSetAsync() => await LoadAsync();
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadAsync();
+
+        // The address names a ticket: open it, if it is this tenant's. Only when the address
+        // changed, so a reload after an action does not reopen one the operator just left.
+        if (FocusTicketNumber != openedNumber)
+        {
+            openedNumber = FocusTicketNumber;
+            selectedTicketId = FocusTicketNumber is int number && TenantId is Guid tenant
+                ? await Tickets.FindByNumberAsync(tenant, number)
+                : null;
+
+            if (FocusTicketNumber is not null && selectedTicketId is null)
+            {
+                Toasts.Error($"There is no ticket #{FocusTicketNumber} here.");
+            }
+        }
+    }
+
+    private void Open(Ticket ticket)
+    {
+        if (TenantSlug is null)
+        {
+            selectedTicketId = ticket.Id;
+            return;
+        }
+
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("ticket", ticket.Number));
+    }
+
+    private void BackToQueue()
+    {
+        if (TenantSlug is null)
+        {
+            selectedTicketId = null;
+            return;
+        }
+
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("ticket", (int?)null));
+    }
+
+    private void ChooseOverview(TicketOverview o)
+    {
+        overview = o;
+        selected.Clear();
+    }
+
+    private static string OverviewLabel(TicketOverview o) => o switch
+    {
+        TicketOverview.Open => "All open",
+        TicketOverview.Mine => "Mine",
+        TicketOverview.Unassigned => "Unassigned",
+        TicketOverview.MyReminders => "My reminders due",
+        TicketOverview.Reminders => "Reminders due",
+        TicketOverview.Escalated => "Escalated",
+        TicketOverview.Following => "Following",
+        _ => o.ToString(),
+    };
+
+    private void ToggleOne(Guid id, ChangeEventArgs e)
+    {
+        if (e.Value is true) selected.Add(id); else selected.Remove(id);
+    }
+
+    private void ToggleAll(ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            selected.UnionWith(visible.Select(v => v.Ticket.Id));
+        }
+        else
+        {
+            selected.Clear();
+        }
+    }
+
+    private async Task ApplyBulkAsync()
+    {
+        BulkChange? change = bulkAction switch
+        {
+            "assign" => roster?.Cast<SupportTechnician?>().FirstOrDefault(t => t!.Value.UserId == bulkAssignee) is { } to
+                ? new BulkChange.Assign(to) : null,
+            "unassign" => new BulkChange.Assign(null),
+            "tag" => new BulkChange.AddTag(bulkText),
+            "untag" => new BulkChange.RemoveTag(bulkText),
+            "remind" => bulkWhen is DateTime local
+                ? new BulkChange.Remind(TimeZoneInfo.ConvertTimeToUtc(
+                    DateTime.SpecifyKind(local, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime), null)
+                : null,
+            "priority" => new BulkChange.Prioritise(bulkPriority, bulkText),
+            "note" => new BulkChange.Comment(bulkText, bulkVisible),
+            "close" => new BulkChange.Close(),
+            _ => null,
+        };
+
+        if (change is null)
+        {
+            Toasts.Error("Say what to change them to.");
+            return;
+        }
+
+        try
+        {
+            string actor = await ActorService.NameAsync();
+            List<BulkOutcome> outcomes = await Bulk.ApplyAsync(DetailTenantId, [.. selected], change, actor, DateTime.UtcNow);
+
+            List<BulkOutcome> skipped = [.. outcomes.Where(o => o.Skipped is not null)];
+            int done = outcomes.Count - skipped.Count;
+
+            if (skipped.Count == 0)
+            {
+                Toasts.Success($"{done} ticket(s) changed.");
+            }
+            else
+            {
+                Toasts.Info($"{done} changed, {skipped.Count} left alone: "
+                    + string.Join("; ", skipped.Take(5).Select(o => $"#{o.Number} — {o.Skipped}")));
+            }
+
+            selected.Clear();
+            bulkAction = "";
+            bulkText = "";
+            await LoadAsync();
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task<OverviewViewer> ViewerAsync()
+    {
+        AuthenticationState state = await AuthState.GetAuthenticationStateAsync();
+        string? userId = state.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        return new OverviewViewer(userId, await ActorService.NameAsync());
+    }
 
     private async Task LoadAsync()
     {
@@ -244,11 +524,23 @@ else
         try
         {
             now = DateTime.UtcNow;
-            queue = CustomerId is Guid customer
-                ? await Tickets.GetOpenQueueAsync(DetailTenantId, customer, now)
-                : TenantId is Guid tenant
-                    ? await Tickets.GetTenantQueueAsync(tenant, now)
-                    : [];
+            if (CustomerId is Guid customer)
+            {
+                queue = await Tickets.GetOpenQueueAsync(DetailTenantId, customer, now);
+                overviews = null;
+            }
+            else if (TenantId is Guid tenant)
+            {
+                overviews = await Overviews.AllAsync(tenant, await ViewerAsync(), now);
+                queue = overviews[TicketOverview.Open];
+                roster ??= await Duty.GetActiveAsync(tenant);
+                selected.IntersectWith(queue.Select(q => q.Ticket.Id));
+            }
+            else
+            {
+                queue = [];
+                overviews = null;
+            }
         }
         catch (Exception ex)
         {
@@ -347,6 +639,7 @@ else
         TicketStatus.Waiting => "bg-secondary",
         TicketStatus.Resolved => "bg-success",
         TicketStatus.Rejected => "bg-dark",
+        TicketStatus.Merged => "bg-dark",
         _ => "bg-light text-dark border",
     };
 }

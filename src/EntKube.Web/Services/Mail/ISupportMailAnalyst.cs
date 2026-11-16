@@ -44,6 +44,11 @@ namespace EntKube.Web.Services.Mail;
 /// <para>Membership, deliberately, and not the support roster — a colleague standing down
 /// this week is still ours, and an answer they write should still reach the customer.</para>
 /// </param>
+/// <param name="MergedInto">
+/// Ticket numbers the message names that belong to a merged duplicate, mapped to the number of
+/// the ticket it was merged into. The reporter goes on quoting the number they were sent; the
+/// matter is on the target now.
+/// </param>
 public readonly record struct MailContext(
     InboundMailMessage Message,
     Customer? Customer,
@@ -54,7 +59,8 @@ public readonly record struct MailContext(
     bool PlacedOnTheSendersWord = false,
     bool PlacedOnTheFromAddress = false,
     bool SenderIsOneOfOurs = false,
-    bool IsDeliveryReport = false);
+    bool IsDeliveryReport = false,
+    IReadOnlyDictionary<int, int>? MergedInto = null);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

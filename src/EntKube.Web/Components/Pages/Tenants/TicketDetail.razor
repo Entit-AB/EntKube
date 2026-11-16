@@ -11,6 +11,9 @@
 @inject UserAccessService Access
 @inject AuthenticationStateProvider AuthState
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject TicketWorkService Work
+@inject IJSRuntime JS
+@inject NavigationManager Nav
 
 @* ═══════════════════════════════════════════════════════════════════
    One ticket, with the actions §14 actually defines and the history
@@ -28,10 +31,34 @@
 
     <div class="d-flex justify-content-between align-items-start mb-3">
         <div>
-            <h5 class="mb-1">
-                <span class="text-muted">#@ticket.Number</span>
-                @ticket.Title
-            </h5>
+            @if (renaming)
+            {
+                <div class="input-group input-group-sm mb-1" style="max-width: 40rem">
+                    <span class="input-group-text">#@ticket.Number</span>
+                    <input class="form-control" @bind="renameTo" @onkeydown="OnRenameKeyAsync" aria-label="Title" />
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="RenameAsync">Save</AsyncButton>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => renaming = false">Cancel</button>
+                </div>
+            }
+            else
+            {
+                <h5 class="mb-1">
+                    <span class="text-muted">#@ticket.Number</span>
+                    @ticket.Title
+                    <button class="btn btn-sm btn-link text-muted p-0 ms-1" title="Rename — the customer sees the new title"
+                            @onclick="StartRename"><i class="bi bi-pencil"></i></button>
+                    <span class="dropdown d-inline-block">
+                        <button class="btn btn-sm btn-link text-muted p-0 ms-1" data-bs-toggle="dropdown" title="Copy">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(1))">Number</button></li>
+                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(2))">Number and title</button></li>
+                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(3))">Number, title and link</button></li>
+                        </ul>
+                    </span>
+                </h5>
+            }
             <div class="small text-muted">
                 Reported @ticket.ReportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
                 via @ticket.Channel
@@ -58,6 +85,18 @@
             }
         </div>
     </div>
+
+    @if (ticket.Status == TicketStatus.Merged && mergedInto is { } into)
+    {
+        <div class="alert alert-secondary py-2 small">
+            <i class="bi bi-intersect me-1"></i>
+            Merged into <a href="@TicketHref(into.Number)">#@into.Number</a> — the matter is followed there.
+            This ticket's own clocks and history stand as they were.
+        </div>
+    }
+
+    <div class="row">
+    <div class="col-xl-9">
 
     @* ───────────── Clocks ───────────── *@
     <div class="row g-3 mb-4">
@@ -205,6 +244,12 @@
                 {
                     <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleMove">
                         <i class="bi bi-signpost-split me-1"></i>Move it
+                    </button>
+                }
+                @if (IsOpen)
+                {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showMerge = !showMerge">
+                        <i class="bi bi-intersect me-1"></i>Merge into…
                     </button>
                 }
 
@@ -408,17 +453,94 @@
                 </div>
             }
 
+            @if (showMerge)
+            {
+                <div class="border rounded p-3 mb-2" data-test="merge-form">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">The original — merge #@ticket.Number into</label>
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text">#</span>
+                                <input class="form-control" type="number" min="1" @bind="mergeTarget" />
+                            </div>
+                        </div>
+                        <div class="col-md-8">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="merge-exclude" @bind="mergeExclude" />
+                                <label class="form-check-label small" for="merge-exclude">
+                                    Also exclude #@ticket.Number from SLA measurement
+                                </label>
+                            </div>
+                            @if (mergeExclude)
+                            {
+                                <input class="form-control form-control-sm mt-1" @bind="mergeReason"
+                                       placeholder="Why — §14.6 requires the reason" />
+                            }
+                        </div>
+                    </div>
+                    <div class="form-text small mt-2">
+                        #@ticket.Number becomes <strong>merged</strong>: its clocks stop now and, if nobody has
+                        answered it yet, the merge is recorded as its first response — being assessed as a
+                        duplicate of a ticket that is being worked. A response that was already late stays late.
+                        Its history stays with it and is shown on the original; replies quoting its number go
+                        to the original. Excluding it from the SLA is a separate decision, made here with a reason.
+                    </div>
+                    @if (status.Response is { Breached: true })
+                    {
+                        <div class="form-text small text-danger mt-1">
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            This ticket's response time has already been missed. Merging does not change that.
+                        </div>
+                    }
+                    <div class="text-end mt-2">
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="MergeAsync">Merge</AsyncButton>
+                    </div>
+                </div>
+            }
+
             @if (showNote)
             {
                 <div class="border rounded p-3 mb-2">
                     <textarea class="form-control form-control-sm mb-2" rows="2" @bind="formReason"
                               placeholder="A status update, or a working note"></textarea>
+                    @if (colleagues is { Count: > 0 })
+                    {
+                        <div class="small text-muted mb-1">Mention colleagues — they are mailed the note and follow the ticket:</div>
+                        <div class="d-flex flex-wrap gap-2 mb-2" data-test="mentions">
+                            @foreach (SupportTechnician c in colleagues)
+                            {
+                                <div class="form-check form-check-inline small m-0">
+                                    <input class="form-check-input" type="checkbox" id="@($"mention-{c.UserId}")"
+                                           checked="@mentioned.Contains(c.UserId)"
+                                           @onchange="e => ToggleMention(c.UserId, e)" />
+                                    <label class="form-check-label" for="@($"mention-{c.UserId}")">@c.Name</label>
+                                </div>
+                            }
+                        </div>
+                    }
                     <div class="d-flex justify-content-between align-items-center">
                         <div class="form-check">
                             <input class="form-check-input" type="checkbox" id="visible" @bind="formCustomerVisible" />
                             <label class="form-check-label small" for="visible">The customer sees this</label>
                         </div>
                         <AsyncButton CssClass="btn-sm btn-primary" OnClick="AddNoteAsync">Add</AsyncButton>
+                    </div>
+                </div>
+            }
+
+            @if (splitFrom is Guid splitEntry)
+            {
+                <div class="border rounded p-3 mb-2" data-test="split-form">
+                    <label class="form-label small text-muted">Title of the new ticket</label>
+                    <input class="form-control form-control-sm mb-2" @bind="splitTitle" />
+                    <div class="form-text small mb-2">
+                        Opened for the same customer and application, and reported at the time of that entry —
+                        that is when it was raised, so its clocks count from there. The customer is sent a
+                        receipt for it, and the two tickets are linked as parent and child.
+                    </div>
+                    <div class="text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => splitFrom = null">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="() => SplitAsync(splitEntry)">Open the new ticket</AsyncButton>
                     </div>
                 </div>
             }
@@ -439,13 +561,25 @@
     </div>
 
     <div class="list-group">
-        @foreach (TicketEvent entry in ticket.Events.OrderByDescending(e => e.At))
+        @foreach ((TicketEvent entry, int? fromNumber) in History())
         {
-            <div class="list-group-item py-2">
+            <div class="list-group-item py-2 @(fromNumber is null ? "" : "bg-light")">
                 <div class="d-flex justify-content-between">
-                    <div class="small">
+                    <div class="small" style="white-space: pre-wrap">
+                        @if (fromNumber is int from)
+                        {
+                            <a class="badge bg-secondary text-decoration-none me-1" href="@TicketHref(from)"
+                               title="From a duplicate merged into this ticket">#@from</a>
+                        }
                         <span class="badge @EventClass(entry.Kind) me-2">@entry.Kind</span>
                         @entry.Detail
+                        @if (fromNumber is null && IsOpen && entry.Kind == TicketEventKind.Note)
+                        {
+                            <button class="btn btn-sm btn-link text-muted p-0 ms-2" style="font-size: .75rem"
+                                    title="Open a new ticket from this entry" @onclick="() => StartSplit(entry)">
+                                <i class="bi bi-box-arrow-up-right me-1"></i>split
+                            </button>
+                        }
                     </div>
                     <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
                         @entry.At.ToLocalTime().ToString("MMM d HH:mm")
@@ -462,6 +596,12 @@
             </div>
         }
     </div>
+
+    </div>
+    <div class="col-xl-3">
+        <TicketWorkPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" Actor="@Actor" OnChanged="ReloadAfterWorkAsync" />
+    </div>
+    </div>
 }
 </LoadingPanel>
 
@@ -470,6 +610,9 @@
 
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
     [Parameter] public EventCallback OnBack { get; set; }
+
+    /// <summary>The tenant's slug, for the ticket's own address and links to other tickets.</summary>
+    [Parameter] public string? TenantSlug { get; set; }
     [Parameter] public EventCallback OnChanged { get; set; }
 
     private bool loading = true;
@@ -478,7 +621,20 @@
     private TicketSlaStatus status;
     private DateTime now = DateTime.UtcNow;
 
-    private bool showPriority, showPause, showResolve, showReject, showNote, showMove;
+    private bool showPriority, showPause, showResolve, showReject, showNote, showMove, showMerge;
+
+    // ---- Phase 1 helpdesk work (docs/helpdesk.md) ----
+    private bool renaming;
+    private string renameTo = "";
+    private int? mergeTarget;
+    private bool mergeExclude;
+    private string? mergeReason;
+    private Guid? splitFrom;
+    private string splitTitle = "";
+    private List<MergedEntry> mergedEntries = [];
+    private (int Number, Guid Id)? mergedInto;
+    private List<SupportTechnician>? colleagues;
+    private HashSet<string> mentioned = [];
 
     // ---- Moving it somewhere else ----
     //
@@ -499,7 +655,7 @@
     private WaitingOn formWaitingOn = WaitingOn.Customer;
     private bool formCustomerVisible = true;
 
-    private bool IsOpen => ticket is { Status: not (TicketStatus.Closed or TicketStatus.Rejected) };
+    private bool IsOpen => ticket is { Status: not (TicketStatus.Closed or TicketStatus.Rejected or TicketStatus.Merged) };
 
     private bool IsPaused => ticket?.Pauses.Any(p => p.EndedAt is null) == true;
 
@@ -737,6 +893,14 @@
                 // the ticket's tenant and that is not known until it has been read. Reloaded
                 // with the ticket too, which is what a move to another tenant needs.
                 roster = await Duty.GetActiveAsync(ticket.TenantId);
+
+                mergedEntries = await Work.GetMergedHistoryAsync(TenantId, ticket.Id);
+                mergedInto = await MergedIntoAsync();
+
+                // Anybody in the tenant with an address can be mentioned — not only who is on
+                // the rota this week. Leaving out oneself: mentioning yourself mails yourself.
+                colleagues = [.. (await Duty.GetRosterAsync(ticket.TenantId))
+                    .Where(c => !string.IsNullOrWhiteSpace(c.Email) && c.Name != Actor)];
             }
         }
         catch (Exception ex)
@@ -751,7 +915,7 @@
 
     private async Task AfterChangeAsync(string message)
     {
-        showPriority = showPause = showResolve = showReject = showNote = false;
+        showPriority = showPause = showResolve = showReject = showNote = showMerge = false;
         formReason = "";
         formParty = null;
 
@@ -906,8 +1070,203 @@
             return;
         }
 
-        await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
-        await AfterChangeAsync("Note added.");
+        List<TicketWorkService.Mentioned> named = [.. (colleagues ?? [])
+            .Where(c => mentioned.Contains(c.UserId))
+            .Select(c => new TicketWorkService.Mentioned(c.UserId, c.Name, c.Email!))];
+
+        if (named.Count == 0)
+        {
+            await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
+            await AfterChangeAsync("Note added.");
+            return;
+        }
+
+        List<string>? reached = await Work.AddNoteMentioningAsync(
+            TenantId, TicketId, formReason, formCustomerVisible, named, Actor, DateTime.UtcNow);
+
+        mentioned.Clear();
+
+        List<string> missed = [.. named.Select(n => n.Name).Except(reached ?? [])];
+
+        await AfterChangeAsync(missed.Count == 0
+            ? $"Note added; {string.Join(", ", named.Select(n => n.Name))} told."
+            : $"Note added. Could not mail {string.Join(", ", missed)} — they follow the ticket but have not been told.");
+    }
+
+    private void ToggleMention(string userId, ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            mentioned.Add(userId);
+        }
+        else
+        {
+            mentioned.Remove(userId);
+        }
+    }
+
+    // ───────────── Rename, copy, merge, split ─────────────
+
+    private void StartRename()
+    {
+        renameTo = ticket!.Title;
+        renaming = true;
+    }
+
+    private async Task OnRenameKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await RenameAsync();
+        }
+        else if (e.Key == "Escape")
+        {
+            renaming = false;
+        }
+    }
+
+    private async Task RenameAsync()
+    {
+        try
+        {
+            await Work.RenameAsync(TenantId, TicketId, renameTo, Actor, DateTime.UtcNow);
+            renaming = false;
+            await AfterChangeAsync("Renamed.");
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private string TicketHref(int number) =>
+        TenantSlug is null ? "" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+
+    /// <summary>Zammad's ".", ".." and "...": the number, then the title, then the address.</summary>
+    private string CopyText(int level)
+    {
+        string text = $"#{ticket!.Number}";
+
+        if (level >= 2)
+        {
+            text += $": {ticket.Title}";
+        }
+
+        if (level >= 3 && TenantSlug is not null)
+        {
+            text += $"\n{Nav.ToAbsoluteUri(TicketHref(ticket.Number))}";
+        }
+
+        return text;
+    }
+
+    private async Task CopyAsync(string text)
+    {
+        try
+        {
+            await using IJSObjectReference module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/tickets.js");
+            bool copied = await module.InvokeAsync<bool>("copy", text);
+
+            if (copied)
+            {
+                Toasts.Info("Copied.");
+            }
+            else
+            {
+                Toasts.Error("The browser would not let us copy.");
+            }
+        }
+        catch (JSException)
+        {
+            Toasts.Error("The browser would not let us copy.");
+        }
+    }
+
+    private async Task<(int Number, Guid Id)?> MergedIntoAsync()
+    {
+        if (ticket?.MergedIntoTicketId is not Guid targetId)
+        {
+            return null;
+        }
+
+        Ticket? target = await Tickets.GetAsync(TenantId, targetId);
+        return target is null ? null : (target.Number, target.Id);
+    }
+
+    private async Task MergeAsync()
+    {
+        if (mergeTarget is not int number)
+        {
+            Toasts.Error("Which ticket is the original?");
+            return;
+        }
+
+        try
+        {
+            TicketWorkService.MergeResult? result = await Work.MergeAsync(
+                TenantId, TicketId, number, mergeExclude, mergeReason, Actor, DateTime.UtcNow);
+
+            if (result is not { } merged)
+            {
+                Toasts.Error("That ticket no longer exists.");
+                return;
+            }
+
+            mergeTarget = null;
+            mergeExclude = false;
+            mergeReason = null;
+
+            await AfterChangeAsync(merged.RecordedAsResponse
+                ? $"Merged into #{merged.Target.Number}. Recorded as this ticket's first response{(merged.ResponseWasLate ? " — late" : "")}."
+                : $"Merged into #{merged.Target.Number}.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private void StartSplit(TicketEvent entry)
+    {
+        splitFrom = entry.Id;
+        string first = entry.Detail.Split('\n', 2)[0].Trim();
+        splitTitle = first.Length > 80 ? first[..80] : first;
+    }
+
+    private async Task SplitAsync(Guid entryId)
+    {
+        try
+        {
+            Ticket? created = await Work.SplitAsync(TenantId, TicketId, entryId, splitTitle, Actor, DateTime.UtcNow);
+            splitFrom = null;
+
+            if (created is null)
+            {
+                Toasts.Error("That entry is no longer on this ticket.");
+                return;
+            }
+
+            await AfterChangeAsync($"#{created.Number} opened and linked as this ticket's child.");
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// This ticket's history with the entries of duplicates merged into it, newest first —
+    /// the whole matter in one list, without the duplicates' own records being rewritten.
+    /// </summary>
+    private IEnumerable<(TicketEvent Entry, int? FromNumber)> History() =>
+        ticket!.Events.Select(e => (e, (int?)null))
+            .Concat(mergedEntries.Select(m => (m.Event, (int?)m.FromNumber)))
+            .OrderByDescending(x => x.Item1.At);
+
+    private async Task ReloadAfterWorkAsync()
+    {
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
     }
 
     /// <summary>

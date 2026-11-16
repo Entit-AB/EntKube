@@ -1,0 +1,21 @@
+# Support: the agent's manual
+
+How to work EntKube's support queue: answering customers, keeping the agreement's clocks,
+and organising the work around them.
+
+EntKube's support module is the system of record for an application-management agreement.
+Every ticket is measured against that agreement's response and resolution times, so a few
+things work differently from a general helpdesk. These chapters say where.
+
+## Basics
+
+1. [Ticket basics](ticket-basics.md): what a ticket is, its statuses, priorities and clocks.
+2. [Find tickets](find-tickets.md): the queue, its overviews, and a ticket's own address.
+3. [Work with tickets](work-with-tickets.md): answering, notes, assigning, reminders and
+   following, alone or many tickets at once.
+
+## Advanced
+
+4. [Ticket actions](ticket-actions.md): merge, split and link.
+
+More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).

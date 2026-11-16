@@ -37,6 +37,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
     public DbSet<TicketPause> TicketPauses => Set<TicketPause>();
     public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
+    public DbSet<TicketTag> TicketTags => Set<TicketTag>();
+    public DbSet<TicketLink> TicketLinks => Set<TicketLink>();
+    public DbSet<TicketSubscription> TicketSubscriptions => Set<TicketSubscription>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();

@@ -8416,6 +8416,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(450)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("AutoCloseAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("Channel")
                         .HasColumnType("INTEGER");
 
@@ -8447,6 +8450,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<bool>("IsCallout")
                         .HasColumnType("INTEGER");
 
+                    b.Property<Guid?>("MergedIntoTicketId")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("Number")
                         .HasColumnType("INTEGER");
 
@@ -8467,6 +8473,16 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<int?>("ProposedPriority")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ReminderAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReminderNote")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ReminderSentAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("ReportedAt")
                         .HasColumnType("TEXT");
@@ -8509,10 +8525,16 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.HasIndex("AppId");
 
+                    b.HasIndex("MergedIntoTicketId");
+
                     b.HasIndex("TenantId", "AssigneeUserId");
+
+                    b.HasIndex("TenantId", "AutoCloseAt");
 
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
+
+                    b.HasIndex("TenantId", "ReminderAt");
 
                     b.HasIndex("TenantId", "ReportedAt");
 
@@ -8621,6 +8643,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<int>("Kind")
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateTime?>("RecordedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("TicketId")
                         .HasColumnType("TEXT");
 
@@ -8629,6 +8654,42 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TicketId", "At");
 
                     b.ToTable("TicketEvents", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("FromTicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ToTicketId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("ToTicketId");
+
+                    b.HasIndex("FromTicketId", "ToTicketId", "Kind")
+                        .IsUnique();
+
+                    b.ToTable("TicketLinks", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
@@ -8667,6 +8728,64 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TicketId", "StartedAt");
 
                     b.ToTable("TicketPauses", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketSubscription", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("NotifiedThrough")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Reason")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("TicketId", "UserId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("TicketSubscriptions", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketTag", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("AddedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AddedBy")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("TicketId", "Name");
+
+                    b.HasIndex("Name");
+
+                    b.ToTable("TicketTags", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
@@ -11877,10 +11996,51 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Ticket");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketLink", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "FromTicket")
+                        .WithMany()
+                        .HasForeignKey("FromTicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "ToTicket")
+                        .WithMany()
+                        .HasForeignKey("ToTicketId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("FromTicket");
+
+                    b.Navigation("ToTicket");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
                         .WithMany("Pauses")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketSubscription", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketTag", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("Tags")
                         .HasForeignKey("TicketId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -12602,6 +12762,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Events");
 
                     b.Navigation("Pauses");
+
+                    b.Navigation("Tags");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>

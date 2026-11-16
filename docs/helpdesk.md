@@ -136,6 +136,27 @@ work). Six overviews. Bulk edit. Subscribe and @@mention, delivered by mail thro
 the existing `TicketNotifier`.
 *Manual chapters: Ticket basics, Find tickets, Work with tickets, Ticket actions.*
 
+**Status (2026-11-16): built in the UI and the services.** The manual is in
+`docs/user-guide/support/`. The rules are pinned in `TicketWorkTests` and the screens in
+`TicketWorkRenderTests`. Decisions made while building it:
+
+- **Merge stops the duplicate's clocks** by recording the merge as its first response, if it
+  had none. Assessing a report as a duplicate of a ticket being worked *is* the assessment
+  §14.4 waits for. Without that, a merged duplicate's response clock kept running and turned
+  into a breach a week later. A merge made after the deadline is recorded as late.
+- **The deep link is `?section=tickets&ticket=N`** inside the tenant explorer, rather than a
+  route of its own, so that tenant access is checked where it already is.
+- **Follower mail is a digest driven by the history** (`TicketEvent.RecordedAt`), not a hook in
+  every write path. It is sent once the ticket has been quiet for two minutes, and the claim is
+  a compare-and-set on the cursor.
+- **Split is offered on notes only.** The *Created* entry holds "Registered via …", not the
+  customer's words. Customer replies are filed as notes, so they can be split.
+
+**Not yet done (Phase 1b): the ticket API and CLI.** Tickets have **no public API at all**
+today: no list, no read, nothing to hang tags, links or merge on. Adding one properly means a
+scope, typed responses for the OpenAPI ratchets, CLI verbs and the parity tests. That is its
+own PR rather than a tail on this one.
+
 ### Phase 2: Write faster
 Article types, attachments (inbound and outbound), and reply, reply-all, forward and quote.
 Text modules with a placeholder engine. Ticket templates (fill empty fields

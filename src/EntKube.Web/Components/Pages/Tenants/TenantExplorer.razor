@@ -430,6 +430,10 @@ else
     [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
     [SupplyParameterFromQuery(Name = "tab")] private string? TabParam { get; set; }
 
+    // A ticket's address: ?section=tickets&ticket=1042. Read by the queue, which checks the
+    // number belongs to this tenant before opening anything.
+    [SupplyParameterFromQuery(Name = "ticket")] private int? TicketParam { get; set; }
+
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
@@ -601,7 +605,7 @@ else
     private Guid? registerEnvId;
 
     private string? _loadedSlug;                              // tenant whose data is currently loaded
-    private (Guid?, Guid?, Guid?, string?, Guid?, Guid?)? _appliedQuery;   // last (app, cluster, customer, section, env, incident) applied
+    private (Guid?, Guid?, Guid?, string?, Guid?, Guid?, int?)? _appliedQuery;   // last (app, cluster, customer, section, env, incident, ticket) applied
 
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
 
@@ -622,7 +626,7 @@ else
         // Re-derive the open pane from the query string whenever it changes. This is what makes
         // the mega menu's ?section=… / ?app=… links act when you're already on a tenant page:
         // those change only the query, which never re-runs OnInitializedAsync.
-        (Guid?, Guid?, Guid?, string?, Guid?, Guid?) sig = (AppParam, ClusterParam, CustomerParam, SectionParam, EnvParam, IncidentParam);
+        (Guid?, Guid?, Guid?, string?, Guid?, Guid?, int?) sig = (AppParam, ClusterParam, CustomerParam, SectionParam, EnvParam, IncidentParam, TicketParam);
         if (_appliedQuery is not { } applied || applied != sig)
         {
             _appliedQuery = sig;
@@ -948,6 +952,8 @@ else
         string uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
         {
             ["app"] = app, ["cluster"] = cluster, ["section"] = section, ["env"] = env, ["customer"] = customer,
+            // Leaving for anywhere else leaves the open ticket behind.
+            ["ticket"] = null,
         });
         Nav.NavigateTo(uri, forceLoad: false, replace: true);
     }
@@ -1047,7 +1053,13 @@ else
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "feedback": builder.OpenComponent<FeedbackInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "tickets": builder.OpenComponent<TicketQueue>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
+            case "tickets":
+                builder.OpenComponent<TicketQueue>(0);
+                builder.AddComponentParameter(1, "TenantId", (Guid?)tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
+                builder.AddComponentParameter(3, "FocusTicketNumber", TicketParam);
+                builder.CloseComponent();
+                break;
             case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);

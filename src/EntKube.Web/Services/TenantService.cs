@@ -163,6 +163,9 @@ public class TenantService(
         await db.VpnTunnels.Where(v => v.TenantId == id).ExecuteDeleteAsync(ct);
         // Kyverno policies Restrict-ref Environment.
         await db.KyvernoPolicies.Where(k => k.TenantId == id).ExecuteDeleteAsync(ct);
+        // Ticket links: the far end is NO ACTION (SQL Server will not take two cascade paths
+        // into one table), so they go before the customers whose tickets they join.
+        await db.TicketLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

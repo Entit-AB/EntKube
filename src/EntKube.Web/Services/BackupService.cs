@@ -226,6 +226,9 @@ public class BackupService(
             TicketEvents = await db.TicketEvents.AsNoTracking().ToListAsync(),
             TicketPauses = await db.TicketPauses.AsNoTracking().ToListAsync(),
             TicketAffectedApps = await db.TicketAffectedApps.AsNoTracking().ToListAsync(),
+            TicketTags = await db.TicketTags.AsNoTracking().ToListAsync(),
+            TicketLinks = await db.TicketLinks.AsNoTracking().ToListAsync(),
+            TicketSubscriptions = await db.TicketSubscriptions.AsNoTracking().ToListAsync(),
             TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
             WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
             AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
@@ -584,6 +587,9 @@ public class BackupService(
             await InsertEntities(db, db.TicketEvents, bundle.TicketEvents);
             await InsertEntities(db, db.TicketPauses, bundle.TicketPauses);
             await InsertEntities(db, db.TicketAffectedApps, bundle.TicketAffectedApps);
+            await InsertEntities(db, db.TicketTags, bundle.TicketTags);
+            await InsertEntities(db, db.TicketLinks, bundle.TicketLinks);
+            await InsertEntities(db, db.TicketSubscriptions, bundle.TicketSubscriptions);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);

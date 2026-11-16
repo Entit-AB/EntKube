@@ -15,6 +15,9 @@ public class SupportDbContext(DbContextOptions<SupportDbContext> options) : Modu
     public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
     public DbSet<TicketPause> TicketPauses => Set<TicketPause>();
     public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
+    public DbSet<TicketTag> TicketTags => Set<TicketTag>();
+    public DbSet<TicketLink> TicketLinks => Set<TicketLink>();
+    public DbSet<TicketSubscription> TicketSubscriptions => Set<TicketSubscription>();
     public DbSet<TicketBridgeConnection> TicketBridgeConnections => Set<TicketBridgeConnection>();
     public DbSet<ExternalTicketLink> ExternalTicketLinks => Set<ExternalTicketLink>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();

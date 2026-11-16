@@ -260,6 +260,11 @@ public static partial class ModuleMap
         [typeof(TicketBridgeService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketNotifier)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketWorkService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketOverviews)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketBulkService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketFollowUp)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketFollowUpSweep)] = Module.Support,
         [typeof(EntKube.Web.Services.Time.TimeService)] = Module.Support,
 
         // ---- Advisor ---------------------------------------------------------------

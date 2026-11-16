@@ -50,6 +50,24 @@ public enum TicketEventKind
     /// makes that history the record between the parties.
     /// </summary>
     Moved = 15,
+
+    /// <summary>Merged into another ticket, or another ticket merged into this one.</summary>
+    Merged = 16,
+
+    /// <summary>A link to another ticket was added or removed.</summary>
+    Linked = 17,
+
+    /// <summary>The title changed.</summary>
+    Renamed = 18,
+
+    /// <summary>A reminder or an automatic close was set, cleared or fired.</summary>
+    Reminder = 19,
+
+    /// <summary>A tag was added or removed.</summary>
+    Tagged = 20,
+
+    /// <summary>A new ticket was split off from an entry on this one, or this one was split off.</summary>
+    Split = 21,
 }
 
 /// <summary>
@@ -85,6 +103,15 @@ public class TicketEvent
     /// from the SLA record — every entry counts as history — but they are not shown.
     /// </summary>
     public bool CustomerVisible { get; set; } = true;
+
+    /// <summary>
+    /// When the row was written, as opposed to <see cref="At"/>, which is when the thing it
+    /// records happened and is sometimes earlier (a ticket is registered at its reporting
+    /// time, a mail at its arrival). Subscriber notifications walk this, so that an event
+    /// written late with an early <see cref="At"/> is not stepped over. Null on rows written
+    /// before it existed.
+    /// </summary>
+    public DateTime? RecordedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
     public Ticket Ticket { get; set; } = null!;
