@@ -42,6 +42,175 @@ public class MongoService(
                "The cluster has no stored kubeconfig, or does not belong to this tenant, "
                + "so nothing can be applied to it.");
 
+    // ──────── Live storage ────────
+
+    /// <summary>
+    /// Reads the storage a MongoDB cluster has right now: the StatefulSet's <c>data-volume</c>
+    /// claim template (or, when the StatefulSet cannot be read, the MongoDBCommunity resource's),
+    /// every claim the StatefulSet owns, each claim's bound volume and the storage class. Each
+    /// read is best-effort. Returns null only when neither a template nor any claim was seen.
+    /// </summary>
+    /// <param name="communityJson">The MongoDBCommunity resource, when the caller already has it.</param>
+    private static async Task<MongoStorageSnapshot?> ReadLiveStorageAsync(
+        Clusters.IClusterClient client, MongoCluster mongo, string? communityJson, CancellationToken ct)
+    {
+        MongoStorageSnapshot snapshot = new();
+
+        try
+        {
+            (snapshot.TemplateSize, snapshot.StorageClass) = MongoStorage.ReadStatefulSetTemplate(
+                await client.GetJsonAsync($"statefulset/{mongo.Name}", mongo.Namespace, ct: ct));
+
+            if (snapshot.TemplateSize is not null)
+            {
+                snapshot.TemplateSource = "StatefulSet";
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
+
+        if (snapshot.TemplateSize is null)
+        {
+            try
+            {
+                communityJson ??= await client.GetJsonAsync(
+                    $"mongodbcommunity.mongodbcommunity.mongodb.com/{mongo.Name}", mongo.Namespace, ct: ct);
+                (snapshot.TemplateSize, string? sc) = MongoStorage.ReadCommunityTemplate(communityJson);
+                snapshot.StorageClass ??= sc;
+
+                if (snapshot.TemplateSize is not null)
+                {
+                    snapshot.TemplateSource = "MongoDBCommunity";
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+            }
+        }
+
+        try
+        {
+            snapshot.Volumes = MongoStorage.ReadClaims(
+                await client.GetJsonAsync("persistentvolumeclaims", mongo.Namespace, ct: ct), mongo.Name);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
+
+        if (snapshot.TemplateSize is null && snapshot.Volumes.Count == 0)
+        {
+            return null;
+        }
+
+        // PersistentVolumes and StorageClasses are cluster-scoped, and a namespace-scoped
+        // kubeconfig may not read them. They are shown when they can be, never required.
+        for (int i = 0; i < snapshot.Volumes.Count; i++)
+        {
+            CnpgVolumeInfo volume = snapshot.Volumes[i];
+
+            if (volume.VolumeName is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                string? capacity = CnpgStorage.ReadVolumeCapacity(await client.GetJsonAsync(
+                    $"persistentvolume/{volume.VolumeName}", "", ct: ct));
+                snapshot.Volumes[i] = volume with { VolumeCapacity = capacity };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+            }
+        }
+
+        snapshot.StorageClass ??= snapshot.DataVolumes.FirstOrDefault()?.StorageClass;
+
+        if (snapshot.StorageClass is not null)
+        {
+            try
+            {
+                snapshot.AllowVolumeExpansion = CnpgStorage.ReadAllowVolumeExpansion(
+                    await client.GetJsonAsync($"storageclass/{snapshot.StorageClass}", "", ct: ct));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Brings the stored <see cref="MongoCluster.StorageSize"/> into line with what the cluster
+    /// holds before anything is decided from it, and saves the correction. When the cluster cannot
+    /// be read the stored value stands, because an unread size is no reason to guess.
+    /// </summary>
+    /// <param name="db">The context <paramref name="mongo"/> is tracked by.</param>
+    private async Task<MongoStorageSnapshot?> AlignStorageSizeAsync(
+        DataServicesDbContext db, MongoCluster mongo, Clusters.IClusterClient client,
+        CancellationToken ct, string? communityJson = null)
+    {
+        MongoStorageSnapshot? snapshot = await ReadLiveStorageAsync(client, mongo, communityJson, ct);
+        string? live = snapshot?.EffectiveSize;
+
+        if (live is not null && !string.Equals(live, mongo.StorageSize, StringComparison.Ordinal))
+        {
+            mongo.StorageSize = live;
+            await db.SaveChangesAsync(ct);
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// The <c>data-volume</c> size a re-applied manifest must carry: the one the StatefulSet was
+    /// created with. Its claim templates are immutable, so a manifest carrying anything else
+    /// either is refused or makes the operator fail every later StatefulSet update. That held
+    /// whether the stored size was stale (smaller) or had been raised by a claim resize (larger).
+    /// Only a cluster that cannot be read falls back to the stored size.
+    /// </summary>
+    private static string ManifestDataVolumeSize(MongoCluster mongo, MongoStorageSnapshot? snapshot) =>
+        snapshot?.TemplateSize ?? mongo.StorageSize;
+
+    /// <summary>
+    /// The detail view's storage: shown from the cluster, and the stored size corrected to match.
+    /// Reading the cluster is not a change to it, so nothing here asks for acknowledgment.
+    ///
+    /// <para>The correction is saved through its own context. The caller's context tracks the
+    /// cluster with its databases, which <see cref="PersistDiscoveredMetadataAsync"/> appends to
+    /// in memory, and saving that context would insert those rows a second time. Never fatal: a
+    /// failure here leaves the stored size and the rest of the detail as they were.</para>
+    /// </summary>
+    private async Task ReadAndRecordLiveStorageAsync(
+        MongoCluster cluster, MongoClusterDetail detail, string communityJson, CancellationToken ct)
+    {
+        try
+        {
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            detail.Storage = await ReadLiveStorageAsync(client, cluster, communityJson, ct);
+
+            if (detail.Storage?.EffectiveSize is string live
+                && !string.Equals(live, cluster.StorageSize, StringComparison.Ordinal))
+            {
+                using DataServicesDbContext storageDb = dbFactory.CreateDbContext();
+                MongoCluster? record = await storageDb.MongoClusters
+                    .FirstOrDefaultAsync(c => c.Id == cluster.Id && c.TenantId == cluster.TenantId, ct);
+
+                if (record is not null)
+                {
+                    record.StorageSize = live;
+                    await storageDb.SaveChangesAsync(ct);
+                    cluster.StorageSize = live;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
+    }
+
     // ──────── Cluster Lifecycle ────────
 
     /// <summary>
@@ -521,9 +690,11 @@ public class MongoService(
         else
         {
             string? s3SecretName = mongo.StorageLinkId.HasValue ? $"{mongo.Name}-s3-credentials" : null;
-            string manifest = BuildClusterManifest(mongo);
+            Clusters.IClusterClient client = await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct);
+            MongoStorageSnapshot? storage = await AlignStorageSizeAsync(db, mongo, client, ct);
+            string manifest = BuildClusterManifest(mongo, ManifestDataVolumeSize(mongo, storage));
 
-            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
+            await client.ApplyManifestAsync(manifest, ct);
 
             // Re-apply the CronJob so the mongodump image version stays in sync.
             if (!string.IsNullOrEmpty(mongo.BackupSchedule) && mongo.StorageLink is not null && s3SecretName is not null)
@@ -572,11 +743,18 @@ public class MongoService(
     /// The Community Operator propagates the change to the StatefulSet pod template and
     /// performs a rolling restart, so the cluster stays available throughout.
     ///
-    /// Storage — patches each PVC directly via the Kubernetes API (bypasses the immutable
-    /// StatefulSet volumeClaimTemplate). Requires the StorageClass to have
+    /// Storage — patches each data claim the StatefulSet owns, as listed live (bypasses the
+    /// immutable StatefulSet volumeClaimTemplate, which the manifest keeps at the size the
+    /// StatefulSet was created with). Requires the StorageClass to have
     /// allowVolumeExpansion: true. The kubelet expands the filesystem without restarting
     /// the pod when online expansion is supported; otherwise, a pod restart is required.
     /// StorageSize on the DB record is updated on success.
+    ///
+    /// Storage is judged against what the cluster holds, not the stored size, which went stale
+    /// when volumes were grown outside EntKube. Asking for the current size changes nothing.
+    /// Every refusal comes before anything is written: a size that would shrink, a size that
+    /// is not a quantity, growing when the claims cannot be read, or a storage class that
+    /// cannot expand.
     ///
     /// Either set of changes can be applied independently or together.
     /// </summary>
@@ -598,17 +776,61 @@ public class MongoService(
             .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("MongoDB cluster not found.");
 
+        string? requested = string.IsNullOrWhiteSpace(storageSize) ? null : storageSize.Trim();
+
+        if (requested is not null && !CnpgStorage.IsValidSize(requested))
+        {
+            throw new InvalidOperationException(
+                $"'{requested}' is not a storage size. Use a Kubernetes quantity such as 400Gi or 1Ti.");
+        }
+
         bool resourcesChanged = cpuRequest  != mongo.CpuRequest
             || cpuLimit    != mongo.CpuLimit
             || memoryRequest != mongo.MemoryRequest
             || memoryLimit   != mongo.MemoryLimit;
 
-        bool storageChanged = !string.IsNullOrWhiteSpace(storageSize)
-            && storageSize.Trim() != mongo.StorageSize;
+        Clusters.IClusterClient client = await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct);
+        MongoStorageSnapshot? storage = await AlignStorageSizeAsync(db, mongo, client, ct);
+
+        // ── Storage: decided before anything is written ──────────────────────────
+        List<CnpgVolumeInfo> claimsToGrow = [];
+        string current = mongo.StorageSize;
+
+        if (requested is not null && CnpgStorage.ToBytes(requested) != CnpgStorage.ToBytes(current))
+        {
+            if (CnpgStorage.ToBytes(requested) < CnpgStorage.ToBytes(current))
+            {
+                throw new InvalidOperationException(
+                    $"Storage can only grow: {requested} is smaller than the current {current}. Nothing was changed.");
+            }
+
+            claimsToGrow = storage?.DataVolumes.ToList() ?? [];
+
+            if (claimsToGrow.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Could not read the data volumes of {mongo.Name} in {mongo.Namespace}, so its current "
+                    + "size is unknown. Nothing was changed.");
+            }
+
+            if (storage!.AllowVolumeExpansion == false)
+            {
+                throw new InvalidOperationException(
+                    $"Storage class '{storage.StorageClass}' does not allow volume expansion "
+                    + "(allowVolumeExpansion is not true). Nothing was changed.");
+            }
+        }
+
+        if (!resourcesChanged && claimsToGrow.Count == 0)
+        {
+            return;
+        }
 
         // ── CPU / Memory ──────────────────────────────────────────────────────────
         // One action, one acknowledgment: everything below is one decision.
-        using IDisposable operation = gate.BeginOperation("resize a MongoDB cluster");
+        using IDisposable operation = gate.BeginOperation(claimsToGrow.Count == 0
+            ? $"resize the CPU and memory of {mongo.Name} in {mongo.Namespace}"
+            : $"resize {mongo.Name} in {mongo.Namespace}, growing its storage from {current} to {requested}");
 
         if (resourcesChanged)
         {
@@ -620,29 +842,26 @@ public class MongoService(
 
             // Re-apply the full manifest — the operator performs a rolling restart to
             // pick up the new resource requests/limits on the StatefulSet pod template.
-            string manifest = BuildClusterManifest(mongo);
-            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
+            string manifest = BuildClusterManifest(mongo, ManifestDataVolumeSize(mongo, storage));
+            await client.ApplyManifestAsync(manifest, ct);
         }
 
         // ── Storage ───────────────────────────────────────────────────────────────
-        if (storageChanged)
+        if (claimsToGrow.Count > 0)
         {
-            string newSize = storageSize!.Trim();
+            // Patch each claim the StatefulSet owns, as listed live rather than guessed from
+            // the member count. The StatefulSet's volumeClaimTemplates are immutable, so this
+            // cannot go through the CRD. The kubelet expands the filesystem in place when the
+            // StorageClass supports online expansion.
+            string patch = MongoStorage.BuildClaimResizePatch(requested!);
 
-            // Patch each PVC individually — StatefulSet volumeClaimTemplates are immutable
-            // so we cannot go through the CRD. The kubelet expands the filesystem in-place
-            // when the StorageClass supports online expansion.
-            string patch = $"{{\"spec\":{{\"resources\":{{\"requests\":{{\"storage\":\"{newSize}\"}}}}}}}}";
-
-            for (int i = 0; i < mongo.Members; i++)
+            foreach (CnpgVolumeInfo claim in claimsToGrow)
             {
-                string pvcName = $"data-volume-{mongo.Name}-{i}";
-                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).PatchJsonAsync(
-                    "pvc", pvcName, mongo.Namespace, patch,
-                     ct);
+                await client.PatchJsonAsync("pvc", claim.PvcName, mongo.Namespace, patch, ct);
             }
 
-            mongo.StorageSize = newSize;
+            // Recorded only once every claim accepted it.
+            mongo.StorageSize = requested!;
             await db.SaveChangesAsync(ct);
         }
     }
@@ -915,6 +1134,11 @@ public class MongoService(
 
         StorageLink storageLink = await db.StorageLinks
             .FirstAsync(s => s.Id == source.StorageLinkId!.Value, ct);
+
+        // The copy must hold what the source holds, and the stored size may predate the
+        // source's volumes being grown.
+        await AlignStorageSizeAsync(
+            db, source, await ClusterFor(source.TenantId, source.KubernetesClusterId, ct), ct);
 
         MongoCluster newCluster = await CreateClusterAsync(
             tenantId, source.KubernetesClusterId, newName, source.Namespace,
@@ -1759,6 +1983,8 @@ public class MongoService(
                 cluster.Namespace, ct: ct);
 
             ParseClusterStatus(clusterJson, detail);
+
+            await ReadAndRecordLiveStorageAsync(cluster, detail, clusterJson, ct);
 
             // Persist discovered version and databases back to the DB so the cluster
             // header shows the correct version and db count without re-querying K8s.
@@ -2646,7 +2872,9 @@ public class MongoService(
     /// pre-existing {name}-admin-password Secret so the operator can configure SCRAM
     /// authentication and create the StatefulSet.
     /// </summary>
-    private static string BuildClusterManifest(MongoCluster mongo)
+    /// <param name="dataVolumeSize">The claim template size; see <see cref="ManifestDataVolumeSize"/>.
+    /// Only a cluster being created has no StatefulSet yet and takes the stored size.</param>
+    private static string BuildClusterManifest(MongoCluster mongo, string? dataVolumeSize = null)
     {
         // Community Operator requires a full X.Y.Z version; coerce X.Y → X.Y.0.
         string version = mongo.MongoVersion.Count(c => c == '.') < 2
@@ -2744,7 +2972,7 @@ public class MongoService(
         sb.AppendLine("            accessModes: [\"ReadWriteOnce\"]");
         sb.AppendLine("            resources:");
         sb.AppendLine("              requests:");
-        sb.AppendLine($"                storage: {mongo.StorageSize}");
+        sb.AppendLine($"                storage: {dataVolumeSize ?? mongo.StorageSize}");
 
         return sb.ToString();
     }
@@ -3487,6 +3715,9 @@ public class MongoClusterDetail
     public List<MongoPodInfo> Pods { get; set; } = [];
     public List<MongoBackup> Backups { get; set; } = [];
     public string? SyncError { get; set; }
+
+    /// <summary>The storage the cluster really has; null when it could not be read.</summary>
+    public MongoStorageSnapshot? Storage { get; set; }
 }
 
 /// <summary>
