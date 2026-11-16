@@ -30,6 +30,12 @@ public sealed class AgentConnection : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan ResultGrace = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How long a best-effort LeaseCancel may wait for the link's send lock. Bounded so that
+    /// telling the agent to stop can never outlast the answer it is attached to.
+    /// </summary>
+    private static readonly TimeSpan CancelSendTimeout = TimeSpan.FromSeconds(5);
+
     private readonly WebSocket socket;
     private readonly ILogger logger;
     private readonly ConcurrentDictionary<uint, AgentStream> streams = new();
@@ -229,6 +235,20 @@ public sealed class AgentConnection : IAsyncDisposable
 
             LeaseAckPayload ack = await pending.Ack.Task.WaitAsync(AckTimeout, linked.Token);
 
+            if (pending.LinkClosed is { } lost)
+            {
+                // Not the agent's answer. TearDownAsync resolves this waiter so nobody is left
+                // hanging, and it has to resolve it with *something* — but a synthetic
+                // LeaseAckPayload(Accepted: false) read as a refusal, and Refused means "the agent
+                // declined", which is a configuration answer an operator would go and act on. The
+                // agent never saw this lease. Worse, it was not even consistently wrong: the
+                // caller has two exits for one event — this result and the lifetime cancellation
+                // below — and which one won depended on thread-pool scheduling, except when
+                // teardown finished first, where WaitAsync checks IsCompleted before the token and
+                // the refusal won every time.
+                return new ResultPayload(leaseId, LeaseOutcome.Failed, lost);
+            }
+
             if (!ack.Accepted)
             {
                 // A refusal is an ordinary answer, not a fault: the agent is telling us it cannot
@@ -254,9 +274,12 @@ public sealed class AgentConnection : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // The link itself went away; TearDownAsync has already resolved what it could.
+            // The link itself went away. Deliberately the same outcome AND the same reason as the
+            // branch above, so the two exits from one event are indistinguishable to a caller
+            // rather than merely both plausible.
             return new ResultPayload(
-                leaseId, LeaseOutcome.Failed, "The agent link closed before the lease finished.");
+                leaseId, LeaseOutcome.Failed,
+                pending.LinkClosed ?? "The agent link closed before the lease finished.");
         }
         finally
         {
@@ -328,7 +351,28 @@ public sealed class AgentConnection : IAsyncDisposable
                 }
                 while (!result.EndOfMessage);
 
-                await HandleFrameAsync(AgentProtocol.Decode(message.ToArray()), linked.Token);
+                // Framing stays strict — Decode throws on a truncated header and that ends the
+                // link, because a desynchronised link is mis-reading bytes. HANDLING does not:
+                // one frame that this build cannot make sense of must never take down the tunnel
+                // and every TCP stream multiplexed over it. A malformed Capability frame used to
+                // do exactly that, by way of a NullReferenceException past a catch that only
+                // named InvalidDataException.
+                AgentFrame frame = AgentProtocol.Decode(message.ToArray());
+
+                try
+                {
+                    await HandleFrameAsync(frame, linked.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex, "Agent {AgentId} sent a {Type} frame this build could not handle",
+                        AgentId, frame.Type);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -427,10 +471,16 @@ public sealed class AgentConnection : IAsyncDisposable
             CapabilityPayload payload = AgentTaskFrames.Decode<CapabilityPayload>(frame.Payload);
             declared = payload;
 
+            // Capabilities is nullable because System.Text.Json does not enforce non-nullable
+            // reference types: a frame that simply omits the field decodes cleanly and leaves a
+            // null behind. The narrowing check in RunLeaseAsync already reads a null as "has not
+            // said", which is the right answer for a peer that did not say.
+            IReadOnlyList<string> names = payload.Capabilities ?? [];
+
             logger.LogInformation(
                 "Agent {AgentId} declared agent version {AgentVersion}, protocol {Protocol}, capabilities: {Capabilities}",
                 AgentId, payload.AgentVersion, payload.ProtocolVersion,
-                payload.Capabilities.Count == 0 ? "none" : string.Join(", ", payload.Capabilities));
+                names.Count == 0 ? "none" : string.Join(", ", names));
 
             if (payload.ProtocolVersion != ProtocolVersion)
             {
@@ -516,9 +566,16 @@ public sealed class AgentConnection : IAsyncDisposable
     {
         try
         {
+            // Bounded, because this runs on the paths that exist to deliver an answer when
+            // something has already gone wrong. SendAsync waits on the link's single send lock,
+            // which a 64 KiB tunnel write can hold; with CancellationToken.None a timed-out or
+            // cancelled lease would queue behind that write forever and its verdict — the thing
+            // DescribeTimeout exists to get right — would never be returned at all.
+            using CancellationTokenSource bounded = new(CancelSendTimeout);
+
             await SendAsync(
                 AgentTaskFrames.Encode(AgentFrameType.LeaseCancel, new LeaseCancelPayload(leaseId, reason)),
-                CancellationToken.None);
+                bounded.Token);
         }
         catch (Exception ex)
         {
@@ -577,6 +634,9 @@ public sealed class AgentConnection : IAsyncDisposable
         {
             // Every waiter is resolved rather than left hanging: a lease has no durable record, so
             // a link drop is the end of it and the caller has to be told rather than timing out.
+            // The flag goes first, because the ack below is a synthetic one and the caller must be
+            // able to tell it from the agent's own answer.
+            lease.LinkClosed = reason;
             lease.Ack.TrySetResult(new LeaseAckPayload(leaseId, Accepted: false, reason));
             lease.Result.TrySetResult(new ResultPayload(leaseId, LeaseOutcome.Failed, reason));
         }
@@ -605,6 +665,13 @@ public sealed class AgentConnection : IAsyncDisposable
     /// <summary>One dispatched lease, and whoever is waiting on it.</summary>
     private sealed class PendingLease(Func<ProgressPayload, Task>? onProgress)
     {
+        /// <summary>
+        /// Set by <see cref="TearDownAsync"/> before it resolves the waiters, so a caller can tell
+        /// the link going away from an answer the agent actually gave. Without it a synthetic
+        /// refusal is indistinguishable from a real one.
+        /// </summary>
+        public volatile string? LinkClosed;
+
         public TaskCompletionSource<LeaseAckPayload> Ack { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource<ResultPayload> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

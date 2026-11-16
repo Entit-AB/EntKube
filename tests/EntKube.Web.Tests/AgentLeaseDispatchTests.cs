@@ -250,7 +250,78 @@ public class AgentLeaseDispatchTests
         ResultPayload result = await dispatch.WaitAsync(Backstop);
 
         result.Outcome.Should().Be(LeaseOutcome.Failed);
-        result.Reason.Should().Contain("link closed");
+
+        // ⚠️ This used to assert only Contain("link closed"), which BOTH exits from a teardown
+        // emit — so it could not tell them apart and a mutation that removed the lease resolution
+        // entirely still passed. Pinned to the exact reason now.
+        result.Reason.Should().Be("link closed");
+    }
+
+    [Fact]
+    public async Task A_link_that_drops_before_the_agent_answers_is_not_reported_as_a_refusal()
+    {
+        // The bug: TearDownAsync resolves the ack waiter with a synthetic
+        // LeaseAckPayload(Accepted: false), which read as the agent declining the work. Refused
+        // means "the agent will not do this" — a configuration answer an operator goes and acts
+        // on — and the agent never saw this lease at all. It was not even consistently wrong:
+        // the caller has two exits for one event, and which won depended on scheduling, except
+        // when teardown finished first, where WaitAsync returns the completed task before it
+        // looks at the token and the refusal won every time.
+        await using Harness harness = Harness.Start();
+
+        Task<ResultPayload> dispatch = harness.Connection.RunLeaseAsync("component.scan", Deadline);
+        await harness.NextSent<LeasePayload>(AgentFrameType.Lease);
+
+        // No ack. The link simply goes away while the dispatch is waiting for one.
+        harness.Complete();
+
+        ResultPayload result = await dispatch.WaitAsync(Backstop);
+
+        result.Outcome.Should().NotBe(
+            LeaseOutcome.Refused, "the agent never answered — it cannot have refused");
+        result.Outcome.Should().Be(LeaseOutcome.Failed);
+        result.Reason.Should().Be("link closed");
+    }
+
+    [Fact]
+    public async Task A_capability_frame_with_no_capability_list_does_not_take_the_link_down()
+    {
+        // System.Text.Json does not enforce non-nullable reference types, so a frame that omits
+        // the field decodes cleanly and leaves a null behind. Reading .Count off it threw a
+        // NullReferenceException straight through a catch that named only InvalidDataException,
+        // out of the receive loop, into TearDownAsync — killing every multiplexed TCP stream on
+        // the link over one malformed frame from an authenticated but buggy agent. That is the
+        // precise outcome this whole change exists to prevent.
+        await using Harness harness = Harness.Start();
+
+        harness.Push(AgentFrameType.Capability, new CapabilityPayload(2, "1.2.3", null));
+        await harness.Settled();
+
+        harness.Connection.IsAlive.Should().BeTrue();
+        harness.Connection.DeclaredCapabilities!.AgentVersion.Should().Be("1.2.3");
+
+        // "Has not said" is the honest reading of a peer that did not say, so it must not narrow.
+        Task<ResultPayload> dispatch = harness.Connection.RunLeaseAsync("component.scan", Deadline);
+        (await harness.NextSent<LeasePayload>(AgentFrameType.Lease)).Capability
+            .Should().Be("component.scan");
+
+        harness.Complete();
+        await dispatch.WaitAsync(Backstop);
+    }
+
+    [Fact]
+    public async Task A_frame_whose_body_is_nonsense_does_not_take_the_link_down()
+    {
+        // The general form of the same rule: framing is strict, handling is not. Any failure
+        // while handling one frame is that frame's problem, never the link's.
+        await using Harness harness = Harness.Start();
+
+        harness.PushRaw(AgentProtocol.Encode(AgentFrameType.Capability, 0, "{not json at all"));
+        harness.PushRaw(AgentProtocol.Encode(AgentFrameType.Result, 0, "[]"));
+        harness.PushRaw(AgentProtocol.Encode(AgentFrameType.Progress, 0, ""));
+        await harness.Settled();
+
+        harness.Connection.IsAlive.Should().BeTrue();
     }
 
     [Fact]

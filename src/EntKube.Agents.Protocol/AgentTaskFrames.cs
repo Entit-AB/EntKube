@@ -123,11 +123,18 @@ public sealed record ResultPayload(
 /// names in its own registry, so an agent advertising something EntKube does not know about is
 /// ignored rather than obeyed — which is what stops a rogue or rolled-forward agent arguing a
 /// capability into existence.
+///
+/// <para>⚠️ <b>Nullable on purpose.</b> System.Text.Json does not enforce non-nullable reference
+/// types, so a frame that omits this field decodes cleanly and leaves a null behind whatever the
+/// declaration says. Declaring it non-null did not make it non-null; it only moved the discovery
+/// to a NullReferenceException on the receiving end, which — before the receive loop stopped
+/// treating a handling failure as fatal — took down the link and every TCP stream on it. A null
+/// here reads as "has not said", which is the honest reading of a peer that did not say.</para>
 /// </param>
 public sealed record CapabilityPayload(
     int ProtocolVersion,
     string AgentVersion,
-    IReadOnlyList<string> Capabilities);
+    IReadOnlyList<string>? Capabilities);
 
 /// <summary>Stop working on this lease.</summary>
 public sealed record LeaseCancelPayload(Guid LeaseId, string? Reason = null);
