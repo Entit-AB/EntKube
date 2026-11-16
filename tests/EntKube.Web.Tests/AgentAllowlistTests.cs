@@ -151,11 +151,22 @@ public class AgentAllowlistTests
     }
 
     [Fact]
-    public void An_unknown_frame_type_is_rejected()
+    public void An_unknown_frame_type_is_no_longer_rejected()
     {
-        Action act = () => AgentProtocol.Decode(new byte[] { 0xff, 0, 0, 0, 1 });
+        // ⚠️ This assertion is the reverse of the one that shipped here, and the reversal was
+        // deliberate. Decode used to throw on an undefined type byte; neither receive loop caught
+        // it, so one unfamiliar frame tore down the link and every multiplexed TCP stream on it —
+        // on an agent binary EntKube cannot upgrade. That made every future widening of the
+        // vocabulary a flag day. Framing is still strict (see the truncation test above): an
+        // unknown type cannot desynchronise a link, because one WebSocket message is one frame.
+        //
+        // Note this test would NOT have failed on its own when the task frames were added: it
+        // feeds 0xff, which is still undefined. The change had to be made on purpose.
+        // AgentTaskFrameTests covers what each end now does with such a frame.
+        AgentFrame frame = AgentProtocol.Decode(new byte[] { 0xff, 0, 0, 0, 1 });
 
-        act.Should().Throw<InvalidDataException>().WithMessage("*frame type*");
+        AgentProtocol.IsKnown(frame.Type).Should().BeFalse();
+        frame.StreamId.Should().Be(1u);
     }
 
     [Fact]

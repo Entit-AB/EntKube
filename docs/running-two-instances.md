@@ -321,6 +321,25 @@ for.)
 ⚠️ **Do not read this document as "HA is done."** It removes the two failures that break the UI
 outright and gives the sweeps somewhere single to live. It is not two interchangeable instances.
 
+**An egress agent reaches exactly one instance, and the worker is never it.** An agent dials
+`/agent/connect`, which falls into the balanced `handle` block and is round-robined across the two
+web instances. `ClientWebSocket` never stores the stickiness cookie, so a reconnect re-picks an
+upstream. `AgentRegistry` is a process-local singleton with no backplane, so **the other instance
+sees that healthy agent as disconnected** — and the worker, deliberately outside the pool, can
+never hold an agent link at all.
+
+That matters today, not only for future agent work. A storage link routed via an agent is used by
+`TelemetrySegmentBlobStore`, which runs on the worker: **agent-routed object storage for telemetry
+offload cannot work in this deployment.** Agent-routed OpenStack calls from the UI work only when
+the request lands on the instance holding the link — roughly half the time, with no pattern an
+operator can see.
+
+The error used to say *"Start the agent in the network that is allowed to reach this endpoint, then
+retry"*, which is advice to start a process that is already running. It now names the real
+possibility — the agent may be connected to a different instance. The repair is `docs/decomposition.md`
+§6.13: the agent link moves behind a gateway, or dispatch gains a cross-instance hop. Until then,
+**if you use egress agents, run one instance.**
+
 **Telemetry is wrong at two instances, and visibly so.** The active tier is a local Lucene index
 (`SegmentManagerBase.cs:245`). Pinning ingest to the worker fixes the worst version of this — data
 splitting randomly across three processes, so log lines appear and vanish as you refresh — but a

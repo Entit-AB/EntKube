@@ -173,9 +173,13 @@ public sealed class EgressAgentLinkTests : IAsyncLifetime
         // agent dialled out. That is the property the whole feature rests on.
         registry.IsConnected(agentId).Should().BeTrue();
 
-        var status = registry.GetStatus(agentId);
+        AgentLinkStatus? status = registry.GetStatus(agentId);
         status.Should().NotBeNull();
-        status!.Value.RemoteAddress.Should().NotBeEmpty();
+        status!.RemoteAddress.Should().NotBeEmpty();
+
+        // The link negotiated a version on the handshake. A real agent against a real server
+        // should reach the task vocabulary; anything less means the two headers did not meet.
+        status.ProtocolVersion.Should().Be(AgentProtocol.ProtocolVersion);
     }
 
     [Fact]
