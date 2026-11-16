@@ -1,22 +1,46 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using EntKube.Agents.Protocol;
 
 namespace EntKube.Web.Services.Agents;
 
 /// <summary>
 /// EntKube's end of one live agent link: the WebSocket the agent dialled in on,
-/// the streams multiplexed over it, and the loop that reads frames.
+/// the streams multiplexed over it, the leases dispatched over it, and the loop
+/// that reads frames.
 ///
 /// Owned by <see cref="AgentRegistry"/> for as long as the agent stays connected.
+///
+/// <para>⚠️ <b>A lease can only be dispatched by the process holding the link.</b> This object is
+/// process-local and there is no backplane, so <see cref="RunLeaseAsync"/> is reachable only from
+/// the instance the agent happened to connect to. In a multi-instance deployment that is a real
+/// constraint, not a detail — see <see cref="AgentRegistry"/>.</para>
 /// </summary>
 public sealed class AgentConnection : IAsyncDisposable
 {
+    /// <summary>How long the agent has to accept or refuse a lease before the dispatch gives up.</summary>
+    private static readonly TimeSpan AckTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long after the agent's own deadline the server keeps waiting for the terminal frame.
+    /// The agent counts its deadline from receipt and EntKube from send, so this covers the
+    /// round trip plus the agent noticing its own expiry and saying so.
+    /// </summary>
+    private static readonly TimeSpan ResultGrace = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long a best-effort LeaseCancel may wait for the link's send lock. Bounded so that
+    /// telling the agent to stop can never outlast the answer it is attached to.
+    /// </summary>
+    private static readonly TimeSpan CancelSendTimeout = TimeSpan.FromSeconds(5);
+
     private readonly WebSocket socket;
     private readonly ILogger logger;
     private readonly ConcurrentDictionary<uint, AgentStream> streams = new();
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<(bool Success, string? Error)>> pendingOpens = new();
+    private readonly ConcurrentDictionary<Guid, PendingLease> leases = new();
 
     // WebSocket.SendAsync must not be called concurrently, and every stream on the
     // link shares this one socket.
@@ -25,13 +49,16 @@ public sealed class AgentConnection : IAsyncDisposable
 
     private uint nextStreamId;
     private volatile bool closed;
+    private volatile CapabilityPayload? declared;
 
-    public AgentConnection(Guid agentId, string remoteAddress, WebSocket socket, ILogger logger)
+    public AgentConnection(
+        Guid agentId, string remoteAddress, WebSocket socket, ILogger logger, int protocolVersion)
     {
         AgentId = agentId;
         RemoteAddress = remoteAddress;
         this.socket = socket;
         this.logger = logger;
+        ProtocolVersion = protocolVersion;
         ConnectedAt = DateTime.UtcNow;
     }
 
@@ -39,11 +66,28 @@ public sealed class AgentConnection : IAsyncDisposable
     public string RemoteAddress { get; }
     public DateTime ConnectedAt { get; }
 
+    /// <summary>
+    /// The protocol version this agent declared on the handshake. 1 means a tunnel-only agent that
+    /// predates the task vocabulary — it is not broken and must keep working, but nothing above
+    /// <see cref="AgentFrameType.Pong"/> may be sent to it.
+    /// </summary>
+    public int ProtocolVersion { get; }
+
+    /// <summary>
+    /// What the agent said it can do, or null when it has not said yet. <b>Informational.</b> It
+    /// narrows what this process will dispatch; it never authorizes anything, because the server's
+    /// own registry decides what a capability name means.
+    /// </summary>
+    public CapabilityPayload? DeclaredCapabilities => declared;
+
     /// <summary>True while the link is usable.</summary>
     public bool IsAlive => !closed && socket.State == WebSocketState.Open;
 
     /// <summary>Streams currently open over this link — surfaced for diagnostics.</summary>
     public int ActiveStreams => streams.Count;
+
+    /// <summary>Leases currently in flight over this link — surfaced for diagnostics.</summary>
+    public int ActiveLeases => leases.Count;
 
     /// <summary>
     /// Opens a TCP stream to <paramref name="host"/>:<paramref name="port"/> from
@@ -106,6 +150,173 @@ public sealed class AgentConnection : IAsyncDisposable
     }
 
     /// <summary>
+    /// Dispatches one unit of work to this agent and waits for its verdict.
+    ///
+    /// <para><b>Sending the Lease is the dispatch, and there is nowhere later to gate it.</b> The
+    /// change gate is an in-process scoped service and the agent is a separate binary in the
+    /// customer's network, so once this frame is on the socket nothing in EntKube can intervene.
+    /// Everything that decides whether this work may happen therefore happens above this line:
+    /// the capability must be one the server registered (<see cref="AgentCapabilityRegistry"/>),
+    /// and the registry has no way to express a mutating capability at all.</para>
+    ///
+    /// <para><b>What this is not.</b> There is no durable store behind it, so a link that drops
+    /// mid-lease loses the lease and the caller is told so. Dispatch, deadline, retry and result
+    /// persistence are item 11 of docs/decomposition.md; this is the wire half.</para>
+    /// </summary>
+    /// <param name="capability">A registered name such as <c>component.scan</c> — what to do, never how.</param>
+    /// <param name="deadline">How long the agent has, counted from its own receipt of the frame.</param>
+    /// <param name="onProgress">Called for each partial output frame, in arrival order.</param>
+    /// <exception cref="InvalidOperationException">
+    /// The agent speaks a protocol that predates leases, or has declared that it cannot do this.
+    /// </exception>
+    public async Task<ResultPayload> RunLeaseAsync(
+        string capability,
+        TimeSpan deadline,
+        JsonElement? input = null,
+        Func<ProgressPayload, Task>? onProgress = null,
+        CancellationToken ct = default)
+    {
+        if (!IsAlive)
+        {
+            throw new IOException("The egress agent is not connected.");
+        }
+
+        if (!AgentTaskFrames.IsValidCapabilityName(capability))
+        {
+            throw new ArgumentException(
+                $"'{capability}' is not a capability name. A capability names what to do, in lowercase "
+                + "dotted segments such as 'component.scan' — never a command to run.",
+                nameof(capability));
+        }
+
+        if (deadline <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(deadline), "A lease needs a deadline the agent can count down from.");
+        }
+
+        int required = AgentProtocol.RequiredVersion(AgentFrameType.Lease);
+
+        if (ProtocolVersion < required)
+        {
+            // Refusing here is the whole point of the handshake. Sending this frame to an agent
+            // that predates it would decode into a type it does not handle and, on any agent built
+            // before the protocol became tolerant, tear down the link and every TCP stream on it.
+            throw new InvalidOperationException(
+                $"Agent {AgentId} speaks protocol version {ProtocolVersion} and leases need {required}. "
+                + "Upgrade the agent, or use it as a tunnel only.");
+        }
+
+        if (declared is { Capabilities: { } names } && !names.Contains(capability))
+        {
+            throw new InvalidOperationException(
+                $"Agent {AgentId} did not declare '{capability}'. It declared: "
+                + $"{(names.Count == 0 ? "nothing" : string.Join(", ", names))}.");
+        }
+
+        Guid leaseId = Guid.NewGuid();
+        PendingLease pending = new(onProgress);
+        leases[leaseId] = pending;
+
+        // Which of the two waits below timed out is not something the exception can say, and the
+        // two mean different things to whoever reads the answer. See DescribeTimeout.
+        bool acknowledged = false;
+
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
+
+        try
+        {
+            await SendAsync(
+                AgentTaskFrames.Encode(
+                    AgentFrameType.Lease,
+                    new LeasePayload(leaseId, capability, (int)deadline.TotalMilliseconds, input)),
+                linked.Token);
+
+            LeaseAckPayload ack = await pending.Ack.Task.WaitAsync(AckTimeout, linked.Token);
+
+            if (pending.LinkClosed is { } lost)
+            {
+                // Not the agent's answer. TearDownAsync resolves this waiter so nobody is left
+                // hanging, and it has to resolve it with *something* — but a synthetic
+                // LeaseAckPayload(Accepted: false) read as a refusal, and Refused means "the agent
+                // declined", which is a configuration answer an operator would go and act on. The
+                // agent never saw this lease. Worse, it was not even consistently wrong: the
+                // caller has two exits for one event — this result and the lifetime cancellation
+                // below — and which one won depended on thread-pool scheduling, except when
+                // teardown finished first, where WaitAsync checks IsCompleted before the token and
+                // the refusal won every time.
+                return new ResultPayload(leaseId, LeaseOutcome.Failed, lost);
+            }
+
+            if (!ack.Accepted)
+            {
+                // A refusal is an ordinary answer, not a fault: the agent is telling us it cannot
+                // or will not do this, which is a configuration answer an operator needs to read.
+                return new ResultPayload(
+                    leaseId, LeaseOutcome.Refused, ack.Reason ?? "the agent gave no reason");
+            }
+
+            acknowledged = true;
+
+            return await pending.Result.Task.WaitAsync(deadline + ResultGrace, linked.Token);
+        }
+        catch (TimeoutException)
+        {
+            await TryCancelAsync(leaseId, acknowledged ? "the deadline passed with no result" : "no answer");
+
+            return DescribeTimeout(leaseId, AgentId, acknowledged, AckTimeout, deadline + ResultGrace);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await TryCancelAsync(leaseId, "the caller cancelled");
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // The link itself went away. Deliberately the same outcome AND the same reason as the
+            // branch above, so the two exits from one event are indistinguishable to a caller
+            // rather than merely both plausible.
+            return new ResultPayload(
+                leaseId, LeaseOutcome.Failed,
+                pending.LinkClosed ?? "The agent link closed before the lease finished.");
+        }
+        finally
+        {
+            leases.TryRemove(leaseId, out _);
+        }
+    }
+
+    /// <summary>
+    /// What to report when a dispatch runs out of patience. A pure decision, because it had been
+    /// wrong: one <c>catch (TimeoutException)</c> served both of <see cref="RunLeaseAsync"/>'s
+    /// waits and reported the second one's budget for either, so an agent that never acknowledged
+    /// inside 30s produced "sent no verdict within 70s" — a number that had not elapsed, about a
+    /// wait that had not happened.
+    ///
+    /// <para>They are also different failures. No acknowledgment means the agent never took the
+    /// work: the likeliest causes are a build that predates the capability, or a link whose send
+    /// queue is saturated by tunnel traffic. No result means it took the work and did not finish,
+    /// which is the agent's problem rather than the dispatch's. An operator who is handed the
+    /// second diagnosis for the first failure looks in the wrong place.</para>
+    ///
+    /// <para>Pure so the distinction can be tested without waiting out either budget on a machine
+    /// whose wall clock jumps when it sleeps. The one line in <see cref="RunLeaseAsync"/> that
+    /// chooses which case applies is not separately covered.</para>
+    /// </summary>
+    public static ResultPayload DescribeTimeout(
+        Guid leaseId, Guid agentId, bool acknowledged, TimeSpan ackTimeout, TimeSpan resultWait)
+        => acknowledged
+            ? new ResultPayload(
+                leaseId, LeaseOutcome.Expired,
+                $"Agent {agentId} accepted this lease and sent no verdict within "
+                + $"{resultWait.TotalSeconds:0}s.")
+            : new ResultPayload(
+                leaseId, LeaseOutcome.Failed,
+                $"Agent {agentId} did not acknowledge this lease within {ackTimeout.TotalSeconds:0}s, "
+                + "so it never took the work. It may be an older build, or its link may be busy.");
+
+    /// <summary>
     /// Reads frames until the link closes. Runs for the lifetime of the agent's
     /// HTTP request, so the request handler must await it.
     /// </summary>
@@ -140,7 +351,28 @@ public sealed class AgentConnection : IAsyncDisposable
                 }
                 while (!result.EndOfMessage);
 
-                await HandleFrameAsync(AgentProtocol.Decode(message.ToArray()), linked.Token);
+                // Framing stays strict — Decode throws on a truncated header and that ends the
+                // link, because a desynchronised link is mis-reading bytes. HANDLING does not:
+                // one frame that this build cannot make sense of must never take down the tunnel
+                // and every TCP stream multiplexed over it. A malformed Capability frame used to
+                // do exactly that, by way of a NullReferenceException past a catch that only
+                // named InvalidDataException.
+                AgentFrame frame = AgentProtocol.Decode(message.ToArray());
+
+                try
+                {
+                    await HandleFrameAsync(frame, linked.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex, "Agent {AgentId} sent a {Type} frame this build could not handle",
+                        AgentId, frame.Type);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -193,15 +425,173 @@ public sealed class AgentConnection : IAsyncDisposable
                 // Liveness only; nothing to do.
                 break;
 
+            case AgentFrameType.Capability:
+                HandleCapability(frame);
+                break;
+
+            case AgentFrameType.LeaseAck:
+                HandleLeaseFrame<LeaseAckPayload>(
+                    frame, p => p.LeaseId, (pending, p) => pending.Ack.TrySetResult(p));
+                break;
+
+            case AgentFrameType.Result:
+                HandleLeaseFrame<ResultPayload>(
+                    frame, p => p.LeaseId, (pending, p) => pending.Result.TrySetResult(p));
+                break;
+
+            case AgentFrameType.Progress:
+                await HandleProgressAsync(frame);
+                break;
+
             case AgentFrameType.Open:
             case AgentFrameType.Ping:
+            case AgentFrameType.Lease:
+            case AgentFrameType.LeaseCancel:
                 // Server-to-agent frames; an agent sending these is misbehaving.
                 logger.LogWarning("Agent {AgentId} sent an unexpected {Type} frame", AgentId, frame.Type);
+                break;
+
+            default:
+                // A peer newer than this build. Reported rather than ignored, because a frame that
+                // decodes and then vanishes is the quietest possible version-skew failure — and
+                // reported rather than fatal, because dropping the link would take every tunnel
+                // stream with it over something that is merely unfamiliar.
+                logger.LogWarning(
+                    "Agent {AgentId} sent frame type 0x{Type:x2}, which this build does not handle. "
+                    + "The agent may be newer than this EntKube.",
+                    AgentId, (byte)frame.Type);
                 break;
         }
     }
 
-    /// <summary>Sends a liveness probe. Used by the registry to notice half-open links.</summary>
+    private void HandleCapability(AgentFrame frame)
+    {
+        try
+        {
+            CapabilityPayload payload = AgentTaskFrames.Decode<CapabilityPayload>(frame.Payload);
+            declared = payload;
+
+            // Capabilities is nullable because System.Text.Json does not enforce non-nullable
+            // reference types: a frame that simply omits the field decodes cleanly and leaves a
+            // null behind. The narrowing check in RunLeaseAsync already reads a null as "has not
+            // said", which is the right answer for a peer that did not say.
+            IReadOnlyList<string> names = payload.Capabilities ?? [];
+
+            logger.LogInformation(
+                "Agent {AgentId} declared agent version {AgentVersion}, protocol {Protocol}, capabilities: {Capabilities}",
+                AgentId, payload.AgentVersion, payload.ProtocolVersion,
+                names.Count == 0 ? "none" : string.Join(", ", names));
+
+            if (payload.ProtocolVersion != ProtocolVersion)
+            {
+                // Not fatal — the handshake is what this process acts on — but a disagreement
+                // between an agent's two statements about itself is worth seeing in a log.
+                logger.LogWarning(
+                    "Agent {AgentId} declared protocol {Declared} in its Capability frame but {Handshake} on the handshake.",
+                    AgentId, payload.ProtocolVersion, ProtocolVersion);
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogWarning(ex, "Agent {AgentId} sent a Capability frame that could not be read", AgentId);
+        }
+    }
+
+    private void HandleLeaseFrame<T>(AgentFrame frame, Func<T, Guid> leaseId, Action<PendingLease, T> apply)
+    {
+        try
+        {
+            T payload = AgentTaskFrames.Decode<T>(frame.Payload);
+            Guid id = leaseId(payload);
+
+            if (leases.TryGetValue(id, out PendingLease? pending))
+            {
+                apply(pending, payload);
+            }
+            else
+            {
+                // Deliberately logged, unlike a Data frame for an unknown stream. A late Result is
+                // work the agent actually did, and a link drop or an expiry leaves no other trace
+                // of it; silence here is how an agent ends up doing work nobody is waiting for.
+                logger.LogInformation(
+                    "Agent {AgentId} sent a {Type} for lease {LeaseId}, which is no longer in flight.",
+                    AgentId, frame.Type, id);
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogWarning(ex, "Agent {AgentId} sent a {Type} frame that could not be read", AgentId, frame.Type);
+        }
+    }
+
+    private async Task HandleProgressAsync(AgentFrame frame)
+    {
+        ProgressPayload payload;
+
+        try
+        {
+            payload = AgentTaskFrames.Decode<ProgressPayload>(frame.Payload);
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogWarning(ex, "Agent {AgentId} sent a Progress frame that could not be read", AgentId);
+            return;
+        }
+
+        if (!leases.TryGetValue(payload.LeaseId, out PendingLease? pending))
+        {
+            logger.LogInformation(
+                "Agent {AgentId} sent progress for lease {LeaseId}, which is no longer in flight.",
+                AgentId, payload.LeaseId);
+            return;
+        }
+
+        if (pending.OnProgress is null) return;
+
+        try
+        {
+            await pending.OnProgress(payload);
+        }
+        catch (Exception ex)
+        {
+            // A caller's handler must not be able to kill the link, and therefore every tunnel
+            // stream on it, by throwing on one chunk.
+            logger.LogWarning(
+                ex, "The progress handler for lease {LeaseId} on agent {AgentId} threw",
+                payload.LeaseId, AgentId);
+        }
+    }
+
+    private async Task TryCancelAsync(Guid leaseId, string reason)
+    {
+        try
+        {
+            // Bounded, because this runs on the paths that exist to deliver an answer when
+            // something has already gone wrong. SendAsync waits on the link's single send lock,
+            // which a 64 KiB tunnel write can hold; with CancellationToken.None a timed-out or
+            // cancelled lease would queue behind that write forever and its verdict — the thing
+            // DescribeTimeout exists to get right — would never be returned at all.
+            using CancellationTokenSource bounded = new(CancelSendTimeout);
+
+            await SendAsync(
+                AgentTaskFrames.Encode(AgentFrameType.LeaseCancel, new LeaseCancelPayload(leaseId, reason)),
+                bounded.Token);
+        }
+        catch (Exception ex)
+        {
+            // Best effort: the link may already be gone, which is often why we are cancelling.
+            logger.LogDebug(ex, "Could not cancel lease {LeaseId} on agent {AgentId}", leaseId, AgentId);
+        }
+    }
+
+    /// <summary>Sends a liveness probe.</summary>
+    /// <remarks>
+    /// ⚠️ Nothing calls this. Its doc comment used to claim the registry used it to notice
+    /// half-open links; it does not, and there is no timer anywhere that does. Left in place
+    /// because the agent answers it correctly and a heartbeat is wanted once leases have deadlines
+    /// to measure against — but said plainly, because a liveness probe nobody sends is worse than
+    /// none at all if it is mistaken for one.
+    /// </remarks>
     public Task PingAsync(CancellationToken ct = default)
         => SendAsync(AgentProtocol.Encode(AgentFrameType.Ping, 0), ct);
 
@@ -239,6 +629,19 @@ public sealed class AgentConnection : IAsyncDisposable
         }
 
         pendingOpens.Clear();
+
+        foreach ((Guid leaseId, PendingLease lease) in leases)
+        {
+            // Every waiter is resolved rather than left hanging: a lease has no durable record, so
+            // a link drop is the end of it and the caller has to be told rather than timing out.
+            // The flag goes first, because the ack below is a synthetic one and the caller must be
+            // able to tell it from the agent's own answer.
+            lease.LinkClosed = reason;
+            lease.Ack.TrySetResult(new LeaseAckPayload(leaseId, Accepted: false, reason));
+            lease.Result.TrySetResult(new ResultPayload(leaseId, LeaseOutcome.Failed, reason));
+        }
+
+        leases.Clear();
         await lifetime.CancelAsync();
     }
 
@@ -257,5 +660,22 @@ public sealed class AgentConnection : IAsyncDisposable
 
         sendLock.Dispose();
         lifetime.Dispose();
+    }
+
+    /// <summary>One dispatched lease, and whoever is waiting on it.</summary>
+    private sealed class PendingLease(Func<ProgressPayload, Task>? onProgress)
+    {
+        /// <summary>
+        /// Set by <see cref="TearDownAsync"/> before it resolves the waiters, so a caller can tell
+        /// the link going away from an answer the agent actually gave. Without it a synthetic
+        /// refusal is indistinguishable from a real one.
+        /// </summary>
+        public volatile string? LinkClosed;
+
+        public TaskCompletionSource<LeaseAckPayload> Ack { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<ResultPayload> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Func<ProgressPayload, Task>? OnProgress { get; } = onProgress;
     }
 }

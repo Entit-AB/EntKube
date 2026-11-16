@@ -441,10 +441,26 @@
                                         {
                                             <span class="badge bg-success-subtle text-success-emphasis">Connected</span>
                                             <div class="text-muted">from @status.RemoteAddress, @status.ActiveStreams stream(s)</div>
+                                            @if (status.ProtocolVersion < EntKube.Agents.Protocol.AgentProtocol.ProtocolVersion)
+                                            {
+                                                @* An older agent is not broken — it tunnels exactly as before, and is simply
+                                                   never sent work it would not understand. Shown because "why does this agent
+                                                   never get anything" is otherwise invisible from here. *@
+                                                <div class="text-muted">
+                                                    protocol @status.ProtocolVersion — tunnel only
+                                                    (this EntKube speaks @EntKube.Agents.Protocol.AgentProtocol.ProtocolVersion)
+                                                </div>
+                                            }
+                                            else if (status.DeclaredCapabilities.Count > 0)
+                                            {
+                                                <div class="text-muted">can do @string.Join(", ", status.DeclaredCapabilities)</div>
+                                            }
                                         }
                                         else
                                         {
-                                            <span class="badge bg-secondary-subtle text-secondary-emphasis">Offline</span>
+                                            @* Offline *to this instance*. An agent holds one link, so another instance may
+                                               well be using it right now — see docs/running-two-instances.md. *@
+                                            <span class="badge bg-secondary-subtle text-secondary-emphasis">Offline here</span>
                                         }
                                     </td>
                                     <td class="small text-muted">

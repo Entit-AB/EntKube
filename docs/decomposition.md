@@ -1037,6 +1037,20 @@ But it is a **TCP tunnel**, not an agent. The frame types are `Open / OpenAck / 
 Close / Ping / Pong` — it multiplexes opaque byte streams. It carries no concept of a
 task, a result, or a capability.
 
+> **Updated 2026-11-16 (item 9).** The vocabulary half of that is now done: six task frames
+> (`Lease / LeaseAck / Progress / Result / Capability / LeaseCancel`), a protocol version
+> negotiated on the handshake, and a server-side capability registry. What is still true is the
+> sentence that matters — *it is not an agent yet*, because nothing can be dispatched: the
+> registry is empty and the agent implements no capabilities, so every lease is refused with a
+> reason. Item 12 adds the first one. See §6.13.
+>
+> One claim in the code was wrong and is corrected there: `AgentProtocol.cs` said it was
+> "shared verbatim by both ends (the agent project compiles this same file) **so the two cannot
+> drift apart**". It is one assembly both ends reference, and the property is compile-time only.
+> The agent ships as a self-contained binary a customer runs under systemd with no update path,
+> so the two deployments drift permanently — which is exactly the assumption item 9 had to stop
+> relying on.
+
 ### 5.2 The generalization
 
 Keep the link, widen the vocabulary. Add task frames alongside the stream frames:
@@ -1057,9 +1071,16 @@ telemetry node ship path: a fix that cannot be version-negotiated reaches no clu
 ### 5.3 This inverts how EntKube talks to clusters
 
 Today the management plane holds a kubeconfig and shells out to `kubectl` *into* each
-cluster. The telemetry work already moved the other way — indexer and querier run
-*in* the cluster, and the mgmt plane federates. The agent model generalizes that
-inversion to everything else: push the work to where the cluster is.
+cluster. The agent model inverts that: push the work to where the cluster is.
+
+> ⚠️ **Corrected 2026-11-16.** This section used to argue the inversion by precedent — "the
+> telemetry work already moved the other way: indexer and querier run *in* the cluster, and the
+> mgmt plane federates." **That decision was reversed.** `docs/telemetry-central-again.md` is the
+> live one; collectors ship to EntKube again and the in-cluster indexer and querier were retired.
+> Left unamended, the next reader would cite a reversed decision as support for this one.
+>
+> The agent model may still be right, and it has to be argued on its own merits — which are the
+> paragraph below, and which do not depend on the telemetry path at all.
 
 The payoff is real: no kubeconfig custody for agent-run operations, no mgmt-plane
 egress to customer API servers, and operations that survive a management-plane
@@ -1067,8 +1088,17 @@ restart because the lease is durable.
 
 ### 5.4 ⚠ The safety prerequisite — do this before any agent mutates anything
 
+> ⚠️ **Corrected 2026-11-16: the code quoted below no longer exists, and "No circuit, no gate"
+> is now false.** It was true when this was written and §5.4.1 records the fix, but a reader
+> arriving here — the passage that justifies the whole "agents may not write" constraint — met
+> the danger before the remedy and could reasonably conclude the constraint was unaddressed.
+> What `ClusterChangeGate.AcknowledgeAsync` does today: `!Enabled` records `GateDisabled` and
+> returns; no sink **and no declaration** records `RefusedUndeclared` and **throws**; a declared
+> scope records `AppliedUnattended` and proceeds. The original text is kept because the reasoning
+> it leads to is still the reasoning the product runs on.
+
 `ClusterChangeGate` computes a server-side dry-run diff and blocks for operator
-acknowledgment. But read `ClusterChangeGate.AcknowledgeAsync`:
+acknowledgment. But read `ClusterChangeGate.AcknowledgeAsync` *as it was in October 2026*:
 
 ```csharp
 // Bypass when the feature is off, or when there is no interactive sink on this scope
@@ -1077,7 +1107,7 @@ if (!Enabled || _sink is null)
     return;
 ```
 
-The sink is registered per Blazor circuit. **No circuit, no gate.** Which means that
+The sink is registered per Blazor circuit. **No circuit, no gate.** Which meant that
 the moment an agent can call a mutation path, every ack-before-apply protection in
 the product silently evaporates for it — it takes the `_sink is null` branch and
 applies straight through.
@@ -2652,6 +2682,116 @@ Generation added a layer; it has not yet removed one. **The CLI and MCP server s
 route strings and parse JSON by hand** — 922 and 867 lines. Migrating them onto `EntKubeApi` is
 where the hand-maintained client code actually shrinks, and it is the next step rather than part of
 this one.
+
+### 6.13 Item 9: the vocabulary is widened, and the thing that nearly broke a live link (2026-11-16)
+
+Phase 2 item 9 — "widen `AgentProtocol` with the task frames and `Capability` negotiation" — is
+done. It took one change that was not in the ask, and it surfaced one problem that is bigger than
+the item.
+
+**The measurement that reordered the work.** §5.2 reads as if `Capability` were the negotiation
+mechanism. It cannot be, and finding out why came first. `AgentProtocol.Decode` threw on any type
+byte it did not define, and **neither receive loop survived that throw**:
+
+- A new server sending `Lease` (0x07) to a deployed agent unwound `AgentClient.ReceiveLoopAsync`,
+  disposed **every TCP relay on the link**, and reconnected with the backoff pinned at its 60s
+  ceiling. The only diagnosis — `Link failed: Unknown agent frame type 0x07` — is printed on the
+  customer's own box. What EntKube sees is an abort indistinguishable from a flaky network.
+- A new agent sending `Capability` to an older server was worse: the server tore the link down and
+  closed it with `NormalClosure`, so the agent read a *clean* shutdown, reset its backoff to 5s,
+  reconnected, re-sent `Capability` on connect, and died again. A five-second kill loop that looks
+  like a graceful restart, and the tunnel never does any work at all.
+
+So the version has to be settled **before any frame moves**, and a frame cannot settle it. It
+travels on the WebSocket handshake instead, beside the allowlist header the agent already sends:
+`X-EntKube-Agent-Protocol`, on the request and echoed on the 101. An agent that predates this
+sends nothing, reads as version 1, and keeps working as a tunnel forever. Both directions were
+confirmed by compiling a probe rather than by reading docs: `CollectHttpResponseDetails` makes the
+101's headers readable on the client, and a response header set **before** `AcceptWebSocketAsync`
+reaches the client while one set after throws — so the ordering trap fails loudly in a test rather
+than silently on the wire.
+
+`Decode` is also tolerant of unknown frame *types* now, while staying strict on framing. That does
+nothing for the agents already deployed — they are strict and cannot be upgraded — but it means the
+*next* widening is not a flag day. Both frame switches gained a `default:` arm that logs, because
+neither had one: adding five enum members compiled clean and the new frames would have been
+silently dropped by whichever end had not implemented them.
+
+⚠️ **The test that should have caught this would not have.** `An_unknown_frame_type_is_rejected`
+feeds `0xff`, which is still undefined after the widening, so it stayed green. The assertion was
+reversed on purpose and says so in the file.
+
+**Three decisions worth keeping.**
+
+1. **The deadline is a duration, not an instant.** The agent runs on a box EntKube does not manage
+   and whose clock it cannot vouch for, so an absolute deadline needs a clock agreement nothing
+   keeps. The asymmetry is in the safe direction: the server counts from send and the agent from
+   receipt, so the server gives up no earlier. A reflection test asserts no task payload has a
+   `DateTime` property at all. It also makes the tests deterministic on a machine that sleeps
+   mid-run — no clock is read anywhere in them.
+2. **A `Result` is a verdict, not a body.** A frame is capped at 64 KiB and the cap is enforced by
+   throwing on the sender and by tearing the link down on the receiver, which is a fine answer to a
+   corrupt peer and a terrible answer to a task whose output grew. Task payloads have their own
+   16 KiB bound, checked before a frame is built, reported as `PayloadTooLarge`. Bulk output
+   streams as `Progress` — which is what §5.2 already called it. Reusing `Data` frames for this was
+   ruled out: `Data` routes through the tunnel's stream table and a frame for an unknown id is
+   dropped with no `else` and no log.
+3. **"Never apply" is an absence, not a field.** The gate is an in-process scoped service and the
+   agent is a separate binary in the customer's network, so **sending the `Lease` is the dispatch**
+   and there is no later point at which EntKube can intervene. An approval token or an intent field
+   the agent checks would be `ChangeIntent`'s rejected classifier wearing a different hat — a field
+   that appears to have checked. Instead: `AgentCapabilityEffect` has exactly one member, `Read`,
+   so a mutating capability is **inexpressible**; the server's registry decides what a name means,
+   so an agent cannot argue a capability into existence by advertising it; and a capability name
+   must be lowercase dotted segments, so it cannot carry a command line — §5.4.2's thirty-call-site
+   problem, prevented from reaching the wire.
+
+A sixth frame was added beyond §5.2's five: `LeaseCancel`. §5.2 lists a deadline and nothing that
+stops a lease, so there is a moment when the server has given up and the agent has not been told.
+The tunnel half has `Close` in both directions for exactly that reason. Adding a frame type later
+is a flag day against a binary EntKube cannot upgrade, so the cheap moment to add it was this one.
+
+**What this does NOT do.** The registry is empty and the agent implements no capabilities, so every
+lease is refused with a reason — which is the correct behaviour for a product with no agent
+capabilities yet, and it is why there is no "run the work" path on the agent: that would be
+unreachable code shipped to a customer's box. There is no durable store, so a link that drops
+mid-lease loses the lease and the caller is told so rather than left waiting. Item 11 is the store;
+item 12 is the first capability.
+
+#### ⚠️ The thing that is bigger than item 9: a lease cannot be dispatched in the HA deployment
+
+`AgentRegistry` is a process-local `ConcurrentDictionary` registered `AddSingleton`, with no
+backplane and no row saying which instance a link landed on. In the two-instance deployment this
+repository documents, `/agent/connect` falls into the balanced `handle` block and is round-robined
+across `entkube-web-1` and `entkube-web-2`, and `ClientWebSocket` never stores the stickiness
+cookie, so every reconnect re-picks an upstream. **The worker is deliberately not in that pool at
+all.** Neither `docs/running-two-instances.md` nor the example compose file mentions agents — zero
+hits for the word.
+
+This is not a future tension introduced by leases. It is **already live for the tunnel**:
+`StorageLinkClientFactory` routes S3 through the agent when a storage link says to, and
+`TelemetrySegmentBlobStore` resolves that factory from a background scope — on the worker, which
+can never hold an agent link. Agent-routed object storage for telemetry offload therefore cannot
+work in this deployment, and the error it produced told the operator to *"Start the agent in the
+network that is allowed to reach this endpoint, then retry"* — advice to start a process that is
+already running, for an agent that is perfectly healthy on another instance.
+
+That message is fixed here, which is all that can honestly be fixed at this layer: it now says the
+agent may be connected to a different instance. The repair is a decision, not a patch, and it is
+one of three — and they are different protocols, not refinements of each other:
+
+- **(a) The agent link is gateway-only.** Item 10 moves it behind `entkube-gateway`; dispatch lives
+  there. Then item 10 comes before item 11, and the link is not HA.
+- **(b) Dispatch is relayed across instances.** Then `Pick` must first answer "is this link even in
+  my process?", and the `Lease` crosses a hop that can drop it — which needs an idempotency key the
+  six-frame vocabulary does not have.
+- **(c) The agent pulls.** Then `Lease` is not server→agent and §5.2's table is wrong on its first
+  line.
+
+Item 9 assumes **one process**: `AgentConnection.RunLeaseAsync` is reachable only from the instance
+holding the link, and that is stated in the type rather than left to be discovered. Nothing here
+chooses between (a), (b) and (c); the point of writing it down is that `Lease = 0x07` is now on a
+wire that cannot be renumbered, so the choice has to be made with that fixed.
 
 ## 7. What not to do
 

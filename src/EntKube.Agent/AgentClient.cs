@@ -21,6 +21,12 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
     private ClientWebSocket? socket;
 
     /// <summary>
+    /// What EntKube declared on the handshake. Defaults to tunnel-only, so a server that says
+    /// nothing is never sent a frame it might not survive.
+    /// </summary>
+    private int serverVersion = AgentProtocol.TunnelOnlyVersion;
+
+    /// <summary>
     /// Connects and serves until cancelled, reconnecting with backoff whenever the
     /// link drops. Returns only when <paramref name="ct"/> is cancelled.
     /// </summary>
@@ -69,7 +75,13 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
 
         using ClientWebSocket ws = new();
         ws.Options.SetRequestHeader(AgentProtocol.TokenHeader, options.Token);
-        ws.Options.SetRequestHeader("X-EntKube-Agent-Allowlist", options.DescribeAllowlist());
+        ws.Options.SetRequestHeader(AgentProtocol.AllowlistHeader, options.DescribeAllowlist());
+        ws.Options.SetRequestHeader(AgentProtocol.ProtocolHeader, AgentProtocol.ProtocolVersion.ToString());
+
+        // Without this the 101 response's headers are discarded, and the server's declared
+        // version with them. That version is the only thing that makes it safe to send a task
+        // frame: an EntKube that predates the vocabulary would drop the link over one.
+        ws.Options.CollectHttpResponseDetails = true;
 
         // Keep the link warm through NAT and idle-timeout proxies.
         ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
@@ -78,8 +90,31 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
         await ws.ConnectAsync(endpoint, ct);
         socket = ws;
 
+        serverVersion = AgentProtocol.ParsePeerVersion(
+            ws.HttpResponseHeaders is { } headers
+            && headers.TryGetValue(AgentProtocol.ProtocolHeader, out IEnumerable<string>? declared)
+                ? declared.FirstOrDefault()
+                : null);
+
         log($"Connected. Allowing {options.AllowedHosts.Count} host pattern(s) on port(s) "
             + $"{string.Join(", ", options.AllowedPorts)}.");
+
+        if (serverVersion >= AgentProtocol.RequiredVersion(AgentFrameType.Capability))
+        {
+            await SendAsync(
+                AgentTaskFrames.Encode(AgentFrameType.Capability, AgentCapabilities.Declare()), ct);
+
+            log($"EntKube speaks protocol {serverVersion}; declared "
+                + $"{(AgentCapabilities.Supported.Count == 0
+                    ? "no capabilities"
+                    : string.Join(", ", AgentCapabilities.Supported))}.");
+        }
+        else
+        {
+            // An older EntKube. Saying so is the whole value of the handshake: the agent keeps
+            // working as a tunnel and never sends a frame that would drop the link.
+            log($"EntKube speaks protocol {serverVersion}; this link is a tunnel only.");
+        }
 
         try
         {
@@ -88,6 +123,7 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
         finally
         {
             socket = null;
+            serverVersion = AgentProtocol.TunnelOnlyVersion;
 
             foreach (TcpRelay relay in relays.Values)
             {
@@ -165,9 +201,35 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
                     await SendAsync(AgentProtocol.Encode(AgentFrameType.Pong, 0), ct);
                     break;
 
+                case AgentFrameType.Lease:
+                    // Answered inline, unlike Open. Deciding costs no I/O — this agent implements
+                    // nothing, so every lease is refused — and answering promptly is the point:
+                    // the server is holding a dispatch open waiting for this.
+                    await HandleLeaseAsync(frame, ct);
+                    break;
+
+                case AgentFrameType.LeaseCancel:
+                    // Nothing is ever running to cancel, because nothing is ever accepted.
+                    // Logged rather than ignored so that, if that ever stops being true, the
+                    // silence is not what anyone has to debug.
+                    if (options.VerboseLogging) log("CANCEL for a lease this agent is not running.");
+                    break;
+
                 case AgentFrameType.OpenAck:
                 case AgentFrameType.Pong:
+                case AgentFrameType.LeaseAck:
+                case AgentFrameType.Progress:
+                case AgentFrameType.Result:
+                case AgentFrameType.Capability:
                     // Agent-to-server frames; ignore if echoed back.
+                    break;
+
+                default:
+                    // An EntKube newer than this binary. Reported and ignored: dropping the link
+                    // would take every tunnelled TCP connection with it over a frame that is
+                    // merely unfamiliar, and this agent cannot be upgraded remotely.
+                    log($"Ignoring frame type 0x{(byte)frame.Type:x2} from EntKube; "
+                        + "this agent is older than the server.");
                     break;
             }
         }
@@ -226,6 +288,61 @@ public sealed class AgentClient(AgentOptions options, Action<string> log)
                 // Link is gone; nothing to report to.
             }
         }
+    }
+
+    /// <summary>
+    /// Answers a lease. Today that answer is always a refusal with a reason, because
+    /// <see cref="AgentCapabilities.Supported"/> is empty — see that type for why the work path
+    /// arrives with the first capability rather than ahead of it.
+    /// </summary>
+    private async Task HandleLeaseAsync(AgentFrame frame, CancellationToken ct)
+    {
+        LeasePayload lease;
+
+        try
+        {
+            lease = AgentTaskFrames.Decode<LeasePayload>(frame.Payload);
+        }
+        catch (InvalidDataException ex)
+        {
+            // Nothing can be answered: without a lease id there is no one to answer to.
+            log($"Ignoring an unreadable Lease frame: {ex.Message}");
+            return;
+        }
+
+        // The invariant this whole change rests on runs in both directions: never send a frame the
+        // peer has not said it understands. The agent held it when declaring its capabilities and
+        // not here, where a server that dispatched a lease while declaring tunnel-only would have
+        // been answered with a task frame anyway. That server would be wrong — and surviving a
+        // wrong peer is the entire reason the version is negotiated rather than assumed.
+        int required = AgentProtocol.RequiredVersion(AgentFrameType.LeaseAck);
+
+        if (serverVersion < required)
+        {
+            log($"Ignoring lease {lease.LeaseId}: EntKube declared protocol {serverVersion}, so "
+                + $"answering it would mean sending a frame it did not say it understands.");
+            return;
+        }
+
+        LeaseAckPayload ack = AgentCapabilities.Decide(lease);
+        await SendAsync(AgentTaskFrames.Encode(AgentFrameType.LeaseAck, ack), ct);
+
+        if (!ack.Accepted)
+        {
+            log($"REFUSED lease {lease.LeaseId} ({lease.Capability}): {ack.Reason}");
+            return;
+        }
+
+        // Unreachable while nothing is supported, and deliberately written rather than asserted:
+        // the mistake it catches is adding a name to Supported without wiring what runs it, and
+        // the honest answer to that is a failed result rather than a lease that never ends.
+        await SendAsync(
+            AgentTaskFrames.Encode(
+                AgentFrameType.Result,
+                new ResultPayload(
+                    lease.LeaseId, LeaseOutcome.Failed,
+                    $"This agent accepted '{lease.Capability}' but has nothing wired to run it.")),
+            ct);
     }
 
     private async Task SendAsync(byte[] frame, CancellationToken ct)

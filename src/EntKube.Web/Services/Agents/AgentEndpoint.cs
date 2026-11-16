@@ -50,13 +50,26 @@ public static class AgentEndpoint
 
             // Recorded so an operator can confirm the link comes from the network
             // they expect, and see what the agent will actually dial.
-            string? reportedAllowlist = context.Request.Headers["X-EntKube-Agent-Allowlist"].FirstOrDefault();
+            string? reportedAllowlist = context.Request.Headers[AgentProtocol.AllowlistHeader].FirstOrDefault();
+
+            // What the agent says it speaks. An agent that predates the task vocabulary sends
+            // nothing and is read as version 1 — a working tunnel that must never be sent a frame
+            // it would not survive.
+            int agentVersion = AgentProtocol.ParsePeerVersion(
+                context.Request.Headers[AgentProtocol.ProtocolHeader].FirstOrDefault());
+
+            // ⚠️ Must be set BEFORE the upgrade: once the 101 has been written the headers are
+            // read-only and this throws. This is the other half of the negotiation — it tells a
+            // new agent whether this EntKube can receive task frames at all, so the agent does not
+            // send a Capability frame to a server that would drop the link over it.
+            context.Response.Headers[AgentProtocol.ProtocolHeader] =
+                AgentProtocol.ProtocolVersion.ToString();
 
             using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
 
             await registry.RunConnectionAsync(
                 agent, socket, Describe(context.Connection.RemoteIpAddress), reportedAllowlist,
-                context.RequestAborted);
+                agentVersion, context.RequestAborted);
         }).AllowAnonymous();
     }
 

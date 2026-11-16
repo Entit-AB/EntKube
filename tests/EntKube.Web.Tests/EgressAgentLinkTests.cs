@@ -173,9 +173,49 @@ public sealed class EgressAgentLinkTests : IAsyncLifetime
         // agent dialled out. That is the property the whole feature rests on.
         registry.IsConnected(agentId).Should().BeTrue();
 
-        var status = registry.GetStatus(agentId);
+        AgentLinkStatus? status = registry.GetStatus(agentId);
         status.Should().NotBeNull();
-        status!.Value.RemoteAddress.Should().NotBeEmpty();
+        status!.RemoteAddress.Should().NotBeEmpty();
+
+        // The link negotiated a version on the handshake. A real agent against a real server
+        // should reach the task vocabulary; anything less means the two headers did not meet.
+        status.ProtocolVersion.Should().Be(AgentProtocol.ProtocolVersion);
+    }
+
+    [Fact]
+    public async Task The_agent_learns_this_server_s_version_from_the_handshake_response()
+    {
+        // ⚠️ This covers the half of the negotiation nothing else could see. The assertion above
+        // proves the agent's version reached the server — the REQUEST header. Nothing proved the
+        // server's version reached the agent, and deleting the response header in AgentEndpoint
+        // left the whole suite green while turning the task vocabulary off fleet-wide: every
+        // agent would read the server as tunnel-only, never declare itself, and silently refuse
+        // to answer any lease, all while reporting Connected.
+        //
+        // There is no direct way to ask the agent what it read. But it only sends its Capability
+        // frame when the server declared version 2, so the frame ARRIVING is the proof: server
+        // set the header, agent read it, agent acted on it.
+        AgentLinkStatus status = await WaitForDeclarationAsync();
+
+        status.AgentVersion.Should().NotBeNullOrWhiteSpace();
+        status.ProtocolVersion.Should().Be(AgentProtocol.ProtocolVersion);
+
+        // Empty is the correct content today — the agent implements nothing — so the assertion
+        // that carries weight is that the declaration arrived at all.
+        status.DeclaredCapabilities.Should().BeEmpty();
+    }
+
+    private async Task<AgentLinkStatus> WaitForDeclarationAsync()
+    {
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            if (registry.GetStatus(agentId) is { AgentVersion: not null } declared) return declared;
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException(
+            "The agent never sent its Capability frame. Either it did not read the server's "
+            + "protocol header off the 101 response, or the server never sent one.");
     }
 
     [Fact]

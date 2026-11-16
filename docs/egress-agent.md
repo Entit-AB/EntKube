@@ -151,6 +151,18 @@ comes from the network you expect without logging into the box.
   accepts multiple links per agent and picks the least loaded.
 - **Refusals are explicit.** A host outside the allowlist produces a clear error
   in EntKube naming the host, not a timeout.
+- ⚠️ **One instance, if you use agents.** An agent holds exactly one link, to
+  whichever EntKube instance it dialled. In a multi-instance deployment the other
+  instances see that healthy agent as disconnected, and the worker — which runs the
+  background work named above, including telemetry blob writes — never holds an agent
+  link at all. So the availability note above is accurate for a single-instance
+  install and optimistic for a two-instance one. See `docs/running-two-instances.md`.
+- **Versions are negotiated, so upgrades are not a flag day.** Each end declares what
+  it speaks on the WebSocket handshake (`X-EntKube-Agent-Protocol`), and neither sends
+  the other a frame it would not understand. An agent older than its EntKube keeps
+  working as a tunnel and is simply never sent newer work; an agent newer than its
+  EntKube notices and says so in its log. You do not have to upgrade agents and EntKube
+  together, and nothing breaks if you never upgrade an agent at all.
 - **Disabling.** Clearing an agent's enabled flag refuses its link without
   deleting the registration. Deleting is blocked while a connection still routes
   through it.

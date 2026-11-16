@@ -1348,7 +1348,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     public bool IsEgressAgentConnected(Guid agentId) => agentRegistry.IsConnected(agentId);
 
     /// <summary>Live link details for an agent, or null when it is not connected.</summary>
-    public (DateTime ConnectedAt, string RemoteAddress, int ActiveStreams)? GetEgressAgentStatus(Guid agentId)
+    public EntKube.Web.Services.Agents.AgentLinkStatus? GetEgressAgentStatus(Guid agentId)
         => agentRegistry.GetStatus(agentId);
 
     /// <summary>
