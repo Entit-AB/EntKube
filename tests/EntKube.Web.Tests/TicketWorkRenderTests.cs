@@ -72,6 +72,8 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new TicketChecklistService(factory));
         Services.AddSingleton(new TicketPresenceService(factory));
         Services.AddSingleton(new KnowledgeBaseService(factory));
+        Services.AddSingleton(new TicketHighlightService(factory));
+        Services.AddSingleton(NoIssueTrackers.For(factory));
         Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, work));
@@ -252,6 +254,111 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await queue.InvokeAsync(() => queue.Find("input[aria-label='Select all']").Change(true));
 
         queue.Find("[data-test=bulk-bar]").TextContent.Should().Contain("2 selected");
+    }
+
+    // ───────────────────────────── Phase 6 ─────────────────────────────
+
+    /// <summary>
+    /// The keyboard shortcuts click elements marked for them, so the marks are the contract: if
+    /// "Resolve" loses its mark, Shift+C silently does nothing.
+    /// </summary>
+    [Fact]
+    public async Task The_queue_and_the_ticket_carry_the_marks_the_shortcuts_press()
+    {
+        Ticket ticket = await Raise("Marked");
+        JSInterop.SetupModule("./js/ticket-shortcuts.js").Mode = JSRuntimeMode.Loose;
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TenantSlug, "entit"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-shortcut=n]").TextContent.Should().Contain("New ticket"));
+        queue.Find("[data-shortcut-focus=s]").GetAttribute("aria-label").Should().Be("Search tickets");
+
+        IRenderedComponent<TicketQueue> detail = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TenantSlug, "entit")
+            .Add(c => c.FocusTicketNumber, ticket.Number));
+
+        // Closing an open ticket starts with resolving it (the SLA's resolution time), so on an
+        // open ticket the close shortcut presses Resolve; on a resolved one, Close.
+        detail.WaitForAssertion(() => detail.Find("[data-shortcut=C]").TextContent.Should().Contain("Resolve"));
+        detail.Find("[data-shortcut=r]").TextContent.Should().Contain("Reply");
+        detail.Find("[data-shortcut=x]").TextContent.Should().Contain("note");
+        detail.Find("[data-shortcut=Escape]").TextContent.Should().Contain("Back to the queue");
+    }
+
+    [Fact]
+    public async Task An_opened_ticket_becomes_a_tab_and_closing_its_tab_forgets_it()
+    {
+        Ticket ticket = await Raise("Tabbed");
+        BunitJSModuleInterop module = JSInterop.SetupModule("./js/ticket-shortcuts.js");
+        module.SetupVoid("install").SetVoidResult();
+        module.Setup<List<TicketQueue.TicketTab>?>("tabsList", "entit").SetResult([]);
+        module.Setup<List<TicketQueue.TicketTab>?>("tabsAdd", "entit", ticket.Number, "Tabbed")
+            .SetResult([new TicketQueue.TicketTab(ticket.Number, "Tabbed")]);
+        module.Setup<List<TicketQueue.TicketTab>?>("tabsRemove", "entit", ticket.Number).SetResult([]);
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TenantSlug, "entit")
+            .Add(c => c.FocusTicketNumber, ticket.Number));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=ticket-tabs]").TextContent.Should().Contain($"#{ticket.Number}"));
+
+        await queue.InvokeAsync(() => queue.Find($"button[aria-label='Close tab #{ticket.Number}']").Click());
+
+        queue.WaitForAssertion(() => queue.FindAll("[data-test=ticket-tabs]").Should().BeEmpty());
+        module.VerifyInvoke("tabsRemove");
+    }
+
+    [Fact]
+    public async Task The_issues_panel_stays_out_of_the_way_until_a_tracker_is_set_up()
+    {
+        Ticket ticket = await Raise("No trackers");
+        JSInterop.Mode = JSRuntimeMode.Loose;
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TenantSlug, "entit")
+            .Add(c => c.FocusTicketNumber, ticket.Number));
+
+        queue.WaitForAssertion(() => queue.Markup.Should().Contain("Back to the queue"));
+        queue.FindAll("[data-test=issues-panel]").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Highlights_on_the_tickets_entries_are_listed_and_handed_to_the_painter()
+    {
+        Ticket ticket = await Raise("Highlighted");
+        TicketEvent note = new()
+        {
+            Id = Guid.NewGuid(), TicketId = ticket.Id, Kind = TicketEventKind.Note, Detail = "The VPN drops every hour on the hour.",
+        };
+        db.TicketEvents.Add(note);
+        await db.SaveChangesAsync();
+        await new TicketHighlightService(new TestDbContextFactory(connection))
+            .AddAsync(tenantId, note.Id, "every hour on the hour", HighlightColor.Pink, "nils");
+
+        BunitJSModuleInterop painter = JSInterop.SetupModule("./js/ticket-highlights.js");
+        painter.Setup<bool>("paint", _ => true).SetResult(true);
+        JSInterop.Mode = JSRuntimeMode.Loose;
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TenantSlug, "entit")
+            .Add(c => c.FocusTicketNumber, ticket.Number));
+
+        queue.WaitForAssertion(() => queue.Find($"[data-entry='{note.Id}']").TextContent.Should().Contain("VPN drops"));
+        queue.Find("[data-test=highlighter]").TextContent.Should().Contain("1 highlight");
+
+        await queue.InvokeAsync(() => queue.FindAll("[data-test=highlighter] button").Single(b => b.TextContent.Contains("1 highlight")).Click());
+        queue.Find("[data-test=highlights]").TextContent.Should().Contain("every hour on the hour").And.Contain("nils");
+
+        painter.Invocations["paint"].Should().NotBeEmpty();
+        // As the browser receives it: the entry it belongs to, the words, the colour.
+        System.Text.Json.JsonSerializer.Serialize(painter.Invocations["paint"].Last().Arguments.Single())
+            .Should().Be($"[{{\"entry\":\"{note.Id}\",\"text\":\"every hour on the hour\",\"color\":\"Pink\"}}]");
     }
 
     // ───────────────────────────── Phase 2a ─────────────────────────────

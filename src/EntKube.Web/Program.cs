@@ -585,6 +585,16 @@ public class Program
             client.Timeout = TimeSpan.FromSeconds(10);
         });
 
+        // GitHub/GitLab issue links (helpdesk phase 6). A short timeout, and never a redirect
+        // followed: a GitLab token travels in a header a redirect would carry wherever it pointed.
+        // The memory cache holds each issue's answer for a minute, keyed by tenant and address.
+        builder.Services.AddMemoryCache();
+        builder.Services.AddHttpClient(EntKube.Web.Services.Tickets.IssueLinkService.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.MaxResponseContentBufferSize = 1024 * 1024;
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+
         // Dedicated client for external route health probes — short timeout,
         // follows redirects, ignores SSL cert errors for internal/self-signed endpoints.
         // The public API's OpenAPI document. See PublicApiOpenApi for why the scopes matter.
@@ -795,6 +805,29 @@ public class Program
                 file.Content,
                 EntKube.Web.Services.Tickets.TicketAttachmentService.ServedContentType(file.Meta.ContentType),
                 file.Meta.FileName);
+        }).RequireAuthorization();
+
+        // The support report's ticket list as .xlsx (docs/helpdesk.md, phase 6). Guarded like an
+        // attachment: the tenant from the address, the person's access to it checked first.
+        app.MapGet("/tenants/{slug}/support/report.xlsx", async (
+            string slug, string from, string to, HttpContext httpContext, TenantService tenants, UserAccessService access,
+            EntKube.Web.Services.Tickets.SupportReportService reports, CancellationToken ct) =>
+        {
+            string? userId = httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (httpContext.User.Identity?.IsAuthenticated != true || userId is null)
+                return Results.Unauthorized();
+
+            Tenant? tenant = await tenants.GetTenantBySlugAsync(slug);
+            if (tenant is null || !await access.HasTenantAccessAsync(userId, tenant.Id))
+                return Results.NotFound();
+
+            if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", out DateOnly first) || !DateOnly.TryParseExact(to, "yyyy-MM-dd", out DateOnly last)
+                || last < first || last.DayNumber - first.DayNumber > 366)
+                return Results.BadRequest("from and to are dates (YYYY-MM-DD), at most a year apart.");
+
+            byte[] xlsx = await reports.ExportAsync(tenant.Id, first, last, ct);
+            return Results.File(xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                $"tickets-{tenant.Slug}-{first:yyyy-MM-dd}-{last:yyyy-MM-dd}.xlsx");
         }).RequireAuthorization();
 
         // A personal calendar feed of ticket deadlines (docs/helpdesk.md, phase 4). Anonymous by

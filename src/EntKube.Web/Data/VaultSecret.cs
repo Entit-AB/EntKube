@@ -174,6 +174,9 @@ public class VaultSecret
     /// </summary>
     public Guid? SupportMailboxId { get; set; }
 
+    /// <summary>The GitHub or GitLab token of an <see cref="IssueTracker"/> (helpdesk phase 6).</summary>
+    public Guid? IssueTrackerId { get; set; }
+
     /// <summary>
     /// When true, this secret will be synced to Kubernetes as a Secret resource.
     /// </summary>

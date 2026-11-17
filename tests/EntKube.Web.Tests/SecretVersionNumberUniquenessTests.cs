@@ -402,18 +402,23 @@ public class SecretVersionNumberUniquenessTests : IDisposable
 
         public void ApplyTheFix() => ctx.Database.Migrate();
 
+        /// <summary>
+        /// A secret as the schema stood BEFORE the fix. Written in SQL naming only the columns that
+        /// existed then: inserting through the current model would name every column added to
+        /// VaultSecrets since (an issue tracker's owner id, for one), which this database does not
+        /// have yet. GUIDs and times in the text forms EF's SQLite provider writes, so the versions
+        /// added through EF afterwards find their secret.
+        /// </summary>
         public Guid SeedSecret()
         {
             Guid id = Guid.NewGuid();
-            ctx.Set<VaultSecret>().Add(new VaultSecret
-            {
-                Id = id,
-                VaultId = vaultId,
-                Name = $"SECRET_{id:N}",
-                EncryptedValue = [9],
-                Nonce = [8],
-            });
-            ctx.SaveChanges();
+            ctx.Database.ExecuteSqlRaw(
+                """
+                INSERT INTO "VaultSecrets" ("Id", "VaultId", "Name", "EncryptedValue", "Nonce", "SecretType",
+                                            "SyncToKubernetes", "CreatedAt", "UpdatedAt")
+                VALUES ({0}, {1}, {2}, X'09', X'08', 0, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+                """,
+                id.ToString().ToUpperInvariant(), vaultId.ToString().ToUpperInvariant(), $"SECRET_{id:N}");
             return id;
         }
 

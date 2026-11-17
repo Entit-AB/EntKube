@@ -29,12 +29,12 @@
 @if (!loading && ticket is not null)
 {
     <nav class="mb-3">
-        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack" data-shortcut="Escape">
             <i class="bi bi-arrow-left me-1"></i>Back to the queue
         </button>
     </nav>
 
-    <div class="d-flex justify-content-between align-items-start mb-3">
+    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-start mb-3">
         <div>
             @if (renaming)
             {
@@ -57,9 +57,9 @@
                             <i class="bi bi-clipboard"></i>
                         </button>
                         <ul class="dropdown-menu">
-                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(1))">Number</button></li>
-                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(2))">Number and title</button></li>
-                            <li><button class="dropdown-item small" @onclick="() => CopyAsync(CopyText(3))">Number, title and link</button></li>
+                            <li><button class="dropdown-item small" data-shortcut-copy="1" @onclick="() => CopyAsync(CopyText(1))">Number</button></li>
+                            <li><button class="dropdown-item small" data-shortcut-copy="2" @onclick="() => CopyAsync(CopyText(2))">Number and title</button></li>
+                            <li><button class="dropdown-item small" data-shortcut-copy="3" @onclick="() => CopyAsync(CopyText(3))">Number, title and link</button></li>
                         </ul>
                     </span>
                 </h5>
@@ -227,7 +227,7 @@
                 }
                 @if (IsOpen)
                 {
-                    <button class="btn btn-sm btn-outline-success" @onclick="() => showResolve = !showResolve">
+                    <button class="btn btn-sm btn-outline-success" @onclick="() => showResolve = !showResolve" data-shortcut="C">
                         <i class="bi bi-check2 me-1"></i>Resolve
                     </button>
                     <button class="btn btn-sm btn-outline-dark" @onclick="() => showReject = !showReject">
@@ -236,7 +236,7 @@
                 }
                 @if (ticket.Status == TicketStatus.Resolved)
                 {
-                    <AsyncButton CssClass="btn-sm btn-success" OnClick="CloseAsync">
+                    <AsyncButton CssClass="btn-sm btn-success" OnClick="CloseAsync" data-shortcut="C">
                         <i class="bi bi-archive me-1"></i>Close
                     </AsyncButton>
                 }
@@ -246,11 +246,11 @@
                 </button>
                 @if (ticket.Status != TicketStatus.Merged)
                 {
-                    <button class="btn btn-sm btn-primary" @onclick="ToggleComposer">
+                    <button class="btn btn-sm btn-primary" @onclick="ToggleComposer" data-shortcut="r">
                         <i class="bi bi-envelope me-1"></i>Reply
                     </button>
                 }
-                <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleNoteAsync">
+                <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleNoteAsync" data-shortcut="x">
                     <i class="bi bi-chat-left-text me-1"></i>Add a note
                 </button>
                 @if (moveTargets.Count > 0)
@@ -670,12 +670,14 @@
         §14.6 makes these timestamps the record between the parties. Entries are appended, never edited.
     </div>
 
+    <TicketHighlighter TenantId="TenantId" EntryIds="@History().Select(h => h.Entry.Id).ToList()" Actor="@Actor" />
+
     <div class="list-group">
         @foreach ((TicketEvent entry, int? fromNumber) in History())
         {
             <div class="list-group-item py-2 @(fromNumber is null ? "" : "bg-light")">
                 <div class="d-flex justify-content-between">
-                    <div class="small" style="white-space: pre-wrap">
+                    <div class="small" style="white-space: pre-wrap" data-entry="@entry.Id">
                         @if (fromNumber is int from)
                         {
                             <a class="badge bg-secondary text-decoration-none me-1" href="@TicketHref(from)"
@@ -727,6 +729,7 @@
         <TicketWorkPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" Actor="@Actor" OnChanged="ReloadAfterWorkAsync" />
         <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
                               OnOpenItems="n => openChecklistItems = n" />
+        <TicketIssuesPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" />
         <TicketAttachmentsPanel TenantId="TenantId" TicketId="ticket.Id" TenantSlug="@TenantSlug" Actor="@Actor"
                                 Editable="IsOpen" OnChanged="ReloadAfterWorkAsync" />
     </div>
@@ -739,6 +742,9 @@
 
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
     [Parameter] public EventCallback OnBack { get; set; }
+
+    /// <summary>Told the ticket once it has loaded — the queue keeps it as a tab.</summary>
+    [Parameter] public EventCallback<Ticket> OnLoaded { get; set; }
 
     /// <summary>The tenant's slug, for the ticket's own address and links to other tickets.</summary>
     [Parameter] public string? TenantSlug { get; set; }
@@ -1055,6 +1061,7 @@
                 mergedEntries = await Work.GetMergedHistoryAsync(TenantId, ticket.Id);
                 offeredModules = await TextModules.OfferedAsync(TenantId, ticket.CustomerId);
                 sharedDraft = await Drafts.GetSharedNoteAsync(TenantId, ticket.Id);
+                await OnLoaded.InvokeAsync(ticket);
                 macros = await Macros.ListAsync(TenantId, activeOnly: true);
                 mergedInto = await MergedIntoAsync();
 

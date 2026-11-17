@@ -1,6 +1,6 @@
 @inject EntKube.Web.Services.ToastService Toasts
 
-<button type="@Type" class="btn @CssClass" disabled="@(Disabled || _running)"
+<button @attributes="Attributes" type="@Type" class="btn @CssClass" disabled="@(Disabled || _running)"
         aria-busy="@_running" aria-label="@AriaLabel" @onclick="RunAsync">
     @if (_running)
     {
@@ -34,6 +34,12 @@
     /// component that supplied it, which is the one whose state just changed.</para>
     /// </summary>
     [Parameter] public EventCallback OnClick { get; set; }
+
+    /// <summary>
+    /// Any other attribute — <c>data-shortcut</c> for the keyboard shortcuts, <c>data-test</c> — passed
+    /// to the button. Splatted first, so the button's own type, class and handler always win.
+    /// </summary>
+    [Parameter(CaptureUnmatchedValues = true)] public Dictionary<string, object>? Attributes { get; set; }
 
     [Parameter] public RenderFragment? ChildContent { get; set; }
 

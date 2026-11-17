@@ -82,7 +82,7 @@ public class BackupService(
                 s.RedisClusterId, s.VpnRemoteEndpointId, s.GitRepositoryId, s.CustomerGitCredentialId,
                 s.KafkaClusterId, s.OwnerClusterId, s.EnvironmentId, s.SupportMailboxId, s.SecretType,
                 s.SyncToKubernetes, s.KubernetesClusterId, s.KubernetesSecretName, s.KubernetesNamespace,
-                s.CreatedAt, s.UpdatedAt));
+                s.CreatedAt, s.UpdatedAt, s.IssueTrackerId));
         }
 
         List<DockerCredentialRecord> credRecords = [];
@@ -243,6 +243,9 @@ public class BackupService(
             CalendarFeeds = await db.CalendarFeeds.AsNoTracking().ToListAsync(),
             KbCategories = await db.KbCategories.AsNoTracking().ToListAsync(),
             KbAnswers = await db.KbAnswers.AsNoTracking().ToListAsync(),
+            IssueTrackers = await db.IssueTrackers.AsNoTracking().ToListAsync(),
+            TicketIssueLinks = await db.TicketIssueLinks.AsNoTracking().ToListAsync(),
+            TicketHighlights = await db.TicketHighlights.AsNoTracking().ToListAsync(),
             TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
             WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
             AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
@@ -527,6 +530,7 @@ public class BackupService(
             var bundledClusterIds    = bundle.KubernetesClusters.Select(c => c.Id).ToHashSet();
             var bundledEnvIds        = bundle.Environments.Select(e => e.Id).ToHashSet();
             var bundledMailboxIds    = bundle.SupportMailboxes.Select(m => m.Id).ToHashSet();
+            var bundledTrackerIds    = bundle.IssueTrackers.Select(t => t.Id).ToHashSet();
 
             foreach (var d in bundle.AppDeployments)
             {
@@ -619,6 +623,9 @@ public class BackupService(
             // Parents before children: a category's parent must exist when it is inserted.
             await InsertEntities(db, db.KbCategories, KbCategoriesParentsFirst(bundle.KbCategories));
             await InsertEntities(db, db.KbAnswers, bundle.KbAnswers);
+            await InsertEntities(db, db.IssueTrackers, bundle.IssueTrackers);
+            await InsertEntities(db, db.TicketIssueLinks, bundle.TicketIssueLinks);
+            await InsertEntities(db, db.TicketHighlights, bundle.TicketHighlights);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);
@@ -676,6 +683,8 @@ public class BackupService(
                     sr = sr with { EnvironmentId = null };
                 if (sr.SupportMailboxId.HasValue      && !bundledMailboxIds.Contains(sr.SupportMailboxId.Value))
                     sr = sr with { SupportMailboxId = null };
+                if (sr.IssueTrackerId.HasValue        && !bundledTrackerIds.Contains(sr.IssueTrackerId.Value))
+                    sr = sr with { IssueTrackerId = null };
                 bundle.VaultSecrets[i] = sr;
             }
 
@@ -726,6 +735,7 @@ public class BackupService(
                     OwnerClusterId = sr.OwnerClusterId,
                     EnvironmentId = sr.EnvironmentId,
                     SupportMailboxId = sr.SupportMailboxId,
+                    IssueTrackerId = sr.IssueTrackerId,
                     // A bundle from before these were carried says Opaque here, which is
                     // what the restore assumed anyway — so an older bundle is no worse off.
                     SecretType = sr.SecretType,

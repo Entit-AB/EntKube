@@ -184,6 +184,11 @@ public class TenantService(
         await db.KbAnswers.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
         await db.KbCategories.Where(c => c.TenantId == id).ExecuteUpdateAsync(u => u.SetProperty(c => c.ParentId, (Guid?)null), ct);
         await db.KbCategories.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
+        // Phase 6: highlights and issue links (their tickets cascade them too), then the trackers,
+        // which take their vaulted tokens with them.
+        await db.TicketHighlights.Where(h => h.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.TicketIssueLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.IssueTrackers.Where(t => t.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

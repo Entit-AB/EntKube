@@ -160,6 +160,12 @@ internal static class SecretsModel
                 .HasForeignKey(s => s.SupportMailboxId)
                 .OnDelete(DeleteBehavior.Cascade);
 
+            // An issue tracker's API token, the same arrangement.
+            entity.HasOne<IssueTracker>()
+                .WithMany()
+                .HasForeignKey(s => s.IssueTrackerId)
+                .OnDelete(DeleteBehavior.Cascade);
+
             entity.HasMany(s => s.Versions)
                 .WithOne(v => v.Secret)
                 .HasForeignKey(v => v.SecretId)
