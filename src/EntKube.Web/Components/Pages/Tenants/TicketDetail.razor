@@ -721,6 +721,7 @@
 
     </div>
     <div class="col-xl-3">
+        <TicketCustomerPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" />
         <TicketWorkPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" Actor="@Actor" OnChanged="ReloadAfterWorkAsync" />
         <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
                               OnOpenItems="n => openChecklistItems = n" />

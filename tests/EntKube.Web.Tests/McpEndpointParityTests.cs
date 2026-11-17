@@ -82,6 +82,7 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
         // writes, not instead of them. Lifting this is a decision for whoever signs the agreement.
         ["GET /api/v1/tickets"] = TicketsAreNotForAModel,
         ["GET /api/v1/tickets/{}"] = TicketsAreNotForAModel,
+        ["GET /api/v1/tickets/search"] = TicketsAreNotForAModel,
         ["POST /api/v1/tickets/{}/tags"] = TicketsAreNotForAModel,
         ["DELETE /api/v1/tickets/{}/tags/{}"] = TicketsAreNotForAModel,
         ["POST /api/v1/tickets/{}/links"] = TicketsAreNotForAModel,

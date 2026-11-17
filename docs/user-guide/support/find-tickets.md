@@ -51,7 +51,49 @@ Next to the title, the clipboard icon copies:
 - **Number and title**: `#1042: Login fails for all users`
 - **Number, title and link**: the same, followed by the ticket's address on its own line
 
-## Not yet available
+## Searching
 
-Free-text search and Zammad-style search syntax (`state:open AND tags:vpn`) arrive in a later
-phase. Until then, use the overviews and the customer filter.
+The search box above the overviews searches **every** ticket of the tenant, open and closed. The
+newest come first, up to 200; the line under the box tells you when there were more. Results
+replace the overviews until you click **Clear**, and you can select them for
+[bulk changes](work-with-tickets.md#many-tickets-at-once) like any list. The search is part of the
+page's address, so you can bookmark it or send it to a colleague.
+
+A word on its own looks in titles, descriptions and the whole history, and a number finds that
+ticket. To be more precise, use fields:
+
+| Field | Finds |
+|---|---|
+| `title:`, `text:` | words in the title; in the description or history |
+| `status:` | `new`, `open` (in progress), `waiting` (pending), `resolved`, `closed`, `rejected`, `merged` |
+| `priority:` | `P1` to `P4` |
+| `customer:`, `app:` | words in the customer's or application's name |
+| `assignee:` | who has it; `assignee:nobody` for unassigned |
+| `requester:` | the reporter's name or address |
+| `tag:` | a tag |
+| `channel:` | `email`, `portal`, `phone`, `monitoring`, `integration`, `feedback` |
+| `reported:`, `updated:`, `closed:`, `reminder:` | a day `2026-11-17`, a range `[2026-11-01 TO 2026-11-17]`, or a comparison `>now-24h`, `<=2026-10-31` |
+| `number:` | a number, or a range `[1000 TO 1100]` |
+
+Zammad's names work too, for example `state.name:`, `owner:`, `tags:` and `created_at:`.
+
+Combine terms with `AND` (the default between terms), `OR`, `NOT` or `!`, and parentheses.
+`"a phrase"` matches the words together, and `print*` matches by prefix. `status:(new OR open)`
+applies one field to several values. Fuzzy matching (`~`) and regular expressions aren't
+supported. A search that can't be read says why, under the box. Click **?** for the field list.
+
+Examples:
+
+```
+tag:vpn status:open
+customer:"Vårdbolaget" reported:>now-7d
+!status:closed assignee:nobody priority:(P1 OR P2)
+"certificate expired" OR "cert expired"
+```
+
+## The customer card
+
+On a ticket, the card at the top of the right-hand column shows the customer: how many tickets are
+open, how many were raised in the last 12 months, and how old the oldest open one is. It lists
+their other open tickets, and shows who reported this ticket and how many tickets that address has
+raised. **all tickets** and the reporter's count open a search for them.

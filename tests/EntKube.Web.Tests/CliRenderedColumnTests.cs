@@ -753,6 +753,23 @@ public class CliRenderedColumnTests
             JsonSerializer.Serialize(new[] { TicketSummaryResponse.From(ticket) }, AsTheApiSerialises));
     }
 
+    [Fact]
+    public void The_ticket_search_renders_every_column()
+    {
+        DateTime reported = new(2026, 11, 12, 8, 0, 0, DateTimeKind.Utc);
+
+        EntKube.Contracts.Support.TicketSummary ticket = new(
+            Guid.Parse("71c00000-0000-0000-0000-000000000002"), 1043, "VPN drops", "Closed", "P3", true,
+            Guid.Parse("c0570000-0000-0000-0000-000000000001"), "Entit AB", "nils", ["vpn"], reported, null,
+            new EntKube.Contracts.Support.TicketClock(reported.AddHours(8), reported.AddHours(1), false, false),
+            new EntKube.Contracts.Support.TicketClock(reported.AddDays(3), reported.AddDays(1), false, false),
+            null, false);
+
+        EveryColumnRenders(
+            Command("tickets", "search"),
+            JsonSerializer.Serialize(new TicketSearchResponse([TicketSummaryResponse.From(ticket)], false), AsTheApiSerialises));
+    }
+
     /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
@@ -771,7 +788,7 @@ public class CliRenderedColumnTests
             "upgrades", "drift", "supply-chain",
             "vms list",
             "rollouts", "dr",
-            "tickets list",
+            "tickets list", "tickets search",
         ];
 
         IEnumerable<string> describable =

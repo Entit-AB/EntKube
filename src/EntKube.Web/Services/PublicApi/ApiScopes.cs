@@ -265,7 +265,7 @@ public static class ApiScopes
         // read as minting one for titles only.
         [TicketsRead] = new("Read", [
             new("support tickets, including customers' correspondence and internal notes, which may contain personal and patient data",
-                ["GET /tickets", "GET /tickets/{}"]),
+                ["GET /tickets", "GET /tickets/search", "GET /tickets/{}"]),
         ]),
 
         [TicketsWrite] = new("Change", [

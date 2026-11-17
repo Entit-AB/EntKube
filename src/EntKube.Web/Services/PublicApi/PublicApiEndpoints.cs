@@ -945,6 +945,26 @@ public static class PublicApiEndpoints
             return TypedResults.Ok<IEnumerable<TicketSummaryResponse>>([.. queue.Select(TicketSummaryResponse.From)]);
         }).RequireApiScope("ListTickets", ApiScopes.TicketsRead);
 
+        // Before /tickets/{number:int} in the file only for the reader; the int constraint is
+        // what keeps "search" from ever being read as a number.
+        api.MapGet("/tickets/search",
+            async Task<Results<Ok<TicketSearchResponse>, BadRequest<string>>> (
+            HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets, string q, CancellationToken ct) =>
+        {
+            try
+            {
+                EntKube.Contracts.Support.TicketSearchOutcome found =
+                    await tickets.SearchAsync(ctx.GetApiPrincipal()!.TenantId, q, ct);
+
+                return TypedResults.Ok(new TicketSearchResponse(
+                    [.. found.Tickets.Select(TicketSummaryResponse.From)], found.Truncated));
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return TypedResults.BadRequest(refused.Message);
+            }
+        }).RequireApiScope("SearchTickets", ApiScopes.TicketsRead);
+
         api.MapGet("/tickets/{number:int}",
             async Task<Results<Ok<TicketResponse>, NotFound>> (
             int number, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets, CancellationToken ct) =>

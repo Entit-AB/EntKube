@@ -217,4 +217,22 @@ public sealed class TicketApiTests : IDisposable
         (await fixture.SendRawAsync("POST", $"/api/v1/tickets/{child.Number}/links", Write,
             Json(new { number = parent.Number, role = "sibling" }))).Should().Be(HttpStatusCode.UnprocessableEntity);
     }
+
+    [Fact]
+    public async Task Search_finds_this_tenants_tickets_and_refuses_a_query_it_cannot_read()
+    {
+        Ticket ours = await Raise("Searchable");
+        Ticket theirs = await Raise("Searchable", strangerCustomerId, strangerTenantId);
+
+        string body = await fixture.SendForBodyAsync(
+            "GET", $"/api/v1/tickets/search?q={Uri.EscapeDataString($"title:\"Searchable {suffix}\"")}", Read, null);
+
+        body.Should().Contain($"\"number\":{ours.Number},").And.NotContain($"\"number\":{theirs.Number},")
+            .And.Contain("\"truncated\":false");
+
+        (HttpStatusCode status, _, string why) = await fixture.SendForResponseAsync(
+            "GET", "/api/v1/tickets/search?q=colour:red", Read, null);
+        status.Should().Be(HttpStatusCode.BadRequest);
+        why.Should().Contain("There is no field");
+    }
 }

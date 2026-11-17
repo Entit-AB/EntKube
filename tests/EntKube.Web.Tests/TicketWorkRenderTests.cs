@@ -542,4 +542,42 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         written.Detail.Should().StartWith("A mail could not be sent");
         written.Actor.Should().Be("nils");
     }
+
+    // ───────────────────────────── Phase 3 ─────────────────────────────
+
+    [Fact]
+    public async Task A_search_in_the_address_is_run_and_its_results_replace_the_overviews()
+    {
+        Ticket match = await Raise("Login fails");
+        await Raise("Printer offline");
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "title:login"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=search-summary]").TextContent.Should().Contain("1 ticket(s)"));
+        queue.Markup.Should().Contain("Login fails").And.NotContain("Printer offline");
+        queue.FindAll("[data-test=overviews]").Should().BeEmpty();
+        _ = match;
+    }
+
+    [Fact]
+    public void A_search_that_cannot_be_read_says_why_instead_of_showing_nothing()
+    {
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "colour:red"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=ticket-search] + .alert").TextContent.Should().Contain("There is no field"));
+    }
+
+    [Fact]
+    public async Task The_ticket_shows_its_customer_with_their_other_open_tickets()
+    {
+        Ticket ticket = await Raise("Login fails");
+        Ticket other = await Raise("Printer offline");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string card = detail.Find("[data-test=customer-panel]").TextContent;
+        card.Should().Contain("Entit AB").And.Contain($"#{other.Number}").And.Contain("2 open");
+    }
 }

@@ -250,6 +250,24 @@ they survive a reload, a dropped circuit or another instance. They are never on 
 
 Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and organisation views).
 
+**Phase 3 done (2026-11-17): search and the customer card.**
+
+- **Search.** `TicketSearch` parses Zammad's syntax and compiles it to an EF expression, so it is
+  the same SQL on all three providers and every instance, with no index to keep in step. The
+  tenant is applied before the query. `LIKE` is given an explicit escape character, because the
+  `[%]` form is SQL Server's alone. Fuzzy `~` and regex are refused with a reason.
+- **Where it shows up.** The queue has a search box: the address carries `q`, results replace the
+  overviews, and bulk changes work on them. The API has `GET /tickets/search` and the CLI
+  `entkube tickets search`; there are no MCP tools, as for every ticket route.
+- **The customer card.** Zammad's customer and organisation sidebars are one card here, because
+  our Customer is the organisation. It shows open tickets, tickets in the last 12 months, the age
+  of the oldest open ticket, the customer's other open tickets, and the reporter's ticket count,
+  with links into search.
+- **Not done:** quick search across customers and the knowledge base (the KB doesn't exist until
+  Phase 5); separate customer and organisation pages (the card and a search cover what they
+  showed); SQLite lower-cases only ASCII, so case-insensitive matching of `Å`, `Ä` and `Ö` works on
+  Postgres and SQL Server but not in SQLite development databases.
+
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
 We run on three providers and N instances, so a node-local index (even the Lucene.NET

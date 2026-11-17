@@ -73,6 +73,10 @@ public sealed record TicketView(
     IReadOnlyList<TicketLinkSummary> Links,
     IReadOnlyList<TicketEntry> History);
 
+/// <summary>What a search found.</summary>
+/// <param name="Truncated">There were more than the limit; narrow the search.</param>
+public sealed record TicketSearchOutcome(IReadOnlyList<TicketSummary> Tickets, bool Truncated);
+
 /// <summary>What a merge did.</summary>
 /// <param name="RecordedAsResponse">The duplicate had no response, and the merge became it.</param>
 /// <param name="ResponseWasLate">That response, or an earlier one, missed its deadline.</param>
@@ -103,6 +107,13 @@ public interface ITicketApi
         Guid tenantId, TicketQueueView view, CancellationToken ct = default);
 
     Task<TicketView?> GetTicketAsync(Guid tenantId, int number, CancellationToken ct = default);
+
+    /// <summary>
+    /// Searches the tenant's tickets, open and closed, newest first, with Zammad's syntax
+    /// (<c>tag:vpn status:open</c>, <c>reported:&gt;now-7d</c>). A query that cannot be read throws
+    /// <see cref="TicketActionRefused"/> saying why.
+    /// </summary>
+    Task<TicketSearchOutcome> SearchAsync(Guid tenantId, string query, CancellationToken ct = default);
 
     /// <returns>The ticket's tags afterwards, or null when there is no such ticket.</returns>
     Task<IReadOnlyList<string>?> AddTagAsync(

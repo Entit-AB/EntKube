@@ -73,6 +73,21 @@ public sealed class TicketApi(
             [.. history]);
     }
 
+    public async Task<TicketSearchOutcome> SearchAsync(Guid tenantId, string query, CancellationToken ct = default)
+    {
+        try
+        {
+            TicketService.SearchResult result = await tickets.SearchAsync(tenantId, query, DateTime.UtcNow, ct);
+            return new TicketSearchOutcome(
+                [.. result.Tickets.Select(s => Summarise(s, [.. s.Ticket.Tags.Select(t => t.Name).Order(StringComparer.Ordinal)]))],
+                result.Truncated);
+        }
+        catch (TicketSearchException ex)
+        {
+            throw new TicketActionRefused(ex.Message);
+        }
+    }
+
     public async Task<IReadOnlyList<string>?> AddTagAsync(
         Guid tenantId, int number, string tag, string actor, CancellationToken ct = default)
     {

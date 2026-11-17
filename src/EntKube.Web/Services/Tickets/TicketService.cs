@@ -1249,6 +1249,93 @@ public class TicketService(
         return candidates;
     }
 
+    /// <summary>What the ticket sidebar says about the customer and the reporter.</summary>
+    /// <param name="OtherOpen">The customer's other open tickets, worst first, at most five.</param>
+    /// <param name="ReporterTickets">How many tickets the same reporter address has raised.</param>
+    public sealed record CustomerSummary(
+        string Customer, int Open, int LastTwelveMonths, TimeSpan? OldestOpenAge,
+        IReadOnlyList<(int Number, string Title, TicketPriority Priority)> OtherOpen, int ReporterTickets);
+
+    /// <summary>
+    /// Zammad's customer and organisation sidebars in one — here the customer IS the organisation —
+    /// with the stats Zammad shows: tickets in the last twelve months, open now, oldest open.
+    /// </summary>
+    public async Task<CustomerSummary?> CustomerSummaryAsync(Guid tenantId, Guid ticketId, DateTime now, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.AsNoTracking().Include(t => t.Customer)
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        IQueryable<Ticket> theirs = db.Tickets.AsNoTracking()
+            .Where(t => t.TenantId == tenantId && t.CustomerId == ticket.CustomerId);
+
+        IQueryable<Ticket> open = theirs.Where(t =>
+            t.Status != TicketStatus.Closed && t.Status != TicketStatus.Rejected && t.Status != TicketStatus.Merged);
+
+        DateTime? oldest = await open.OrderBy(t => t.ReportedAt).Select(t => (DateTime?)t.ReportedAt).FirstOrDefaultAsync(ct);
+
+        var others = await open.Where(t => t.Id != ticket.Id)
+            .OrderBy(t => t.Priority).ThenBy(t => t.ReportedAt)
+            .Take(5).Select(t => new { t.Number, t.Title, t.Priority }).ToListAsync(ct);
+
+        string? email = ticket.RequestedByEmail?.Trim().ToLower();
+
+        return new CustomerSummary(
+            ticket.Customer.Name,
+            await open.CountAsync(ct),
+            await theirs.CountAsync(t => t.ReportedAt >= now.AddMonths(-12), ct),
+            oldest is DateTime o ? now - o : null,
+            [.. others.Select(x => (x.Number, x.Title, x.Priority))],
+            email is null ? 0 : await theirs.CountAsync(t => t.RequestedByEmail != null && t.RequestedByEmail.ToLower() == email, ct));
+    }
+
+    /// <summary>The most tickets one search returns.</summary>
+    public const int SearchLimit = 200;
+
+    /// <summary>What a search found: the tickets, newest first, and whether there were more.</summary>
+    public readonly record struct SearchResult(List<TicketSlaStatus> Tickets, bool Truncated);
+
+    /// <summary>
+    /// Searches a tenant's tickets — open and closed — with Zammad's syntax (<see cref="TicketSearch"/>).
+    /// The tenant is applied before the query, so nothing a query says can reach another tenant's.
+    /// </summary>
+    /// <exception cref="TicketSearchException">The query could not be read, and why.</exception>
+    public async Task<SearchResult> SearchAsync(Guid tenantId, string query, DateTime now, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new SearchResult([], false);
+        }
+
+        System.Linq.Expressions.Expression<Func<Ticket, bool>> condition =
+            TicketSearch.Compile(TicketSearch.Parse(query), now);
+
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        List<Ticket> found = await db.Tickets
+            .Where(t => t.TenantId == tenantId)
+            .Where(condition)
+            .OrderByDescending(t => t.ReportedAt)
+            .Take(SearchLimit + 1)
+            .Include(t => t.Pauses)
+            .Include(t => t.Events)
+            .Include(t => t.Customer)
+            .Include(t => t.Tags)
+            .AsSplitQuery()
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        bool truncated = found.Count > SearchLimit;
+
+        return new SearchResult([.. found.Take(SearchLimit).Select(t => StatusOf(t, now))], truncated);
+    }
+
     /// <summary>
     /// A ticket's id from its number, within one tenant — what a ticket's address carries. A
     /// number belonging to another tenant's ticket is no ticket here.

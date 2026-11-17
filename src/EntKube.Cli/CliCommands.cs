@@ -345,6 +345,16 @@ public static class CliCommands
         },
         new CliCommand
         {
+            // Zammad's syntax: tag:vpn status:open, customer:"Vårdbolaget" reported:>now-7d.
+            Path = ["tickets", "search"],
+            Description = "Search all tickets, open and closed (--query <query>)",
+            BuildPath = a => "/api/v1/tickets/search" + Query(("q", a.Required("query"))),
+            Columns = [("#", "number"), ("PRIO", "priority"), ("STATUS", "status"), ("TITLE", "title"),
+                       ("CUSTOMER", "customer"), ("HOLDER", "assignee"), ("REPORTED", "reportedAt"), ("TAGS", "tags")],
+            RowsProperty = "tickets",
+        },
+        new CliCommand
+        {
             Path = ["tickets", "show"],
             Description = "Show one ticket with its links and history (--ticket <number>)",
             BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}",
