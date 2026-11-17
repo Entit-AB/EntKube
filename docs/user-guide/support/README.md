@@ -24,9 +24,10 @@ things work differently from a general helpdesk. These chapters say where.
 9. [Text modules](text-modules.md): reusable text with placeholders.
 10. [Macros](macros.md): several changes in one click.
 11. [Checklist](checklist.md): the steps of a ticket's work.
-12. [Time accounting](time-accounting.md): logging the time a ticket took.
-13. [Drafts](shared-drafts.md): your note saved as you type, and drafts left for colleagues.
-14. [Attachments](attachments.md): files from customers' mail, and your own.
-15. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
+12. [Knowledge base](knowledge-base.md): help answers for customers and for replies.
+13. [Time accounting](time-accounting.md): logging the time a ticket took.
+14. [Drafts](shared-drafts.md): your note saved as you type, and drafts left for colleagues.
+15. [Attachments](attachments.md): files from customers' mail, and your own.
+16. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
 
 More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).

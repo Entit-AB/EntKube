@@ -275,6 +275,7 @@ public static partial class ModuleMap
         [typeof(EntKube.Web.Services.Tickets.OutOfOfficeService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketPresenceService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.CalendarFeedService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.KnowledgeBaseService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUp)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUpSweep)] = Module.Support,
         [typeof(EntKube.Web.Services.Time.TimeService)] = Module.Support,

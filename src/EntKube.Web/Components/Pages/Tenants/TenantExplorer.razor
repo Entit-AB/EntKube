@@ -531,7 +531,8 @@ else
         new("Ticket tools", "bi-tools",
         [ new("text-modules", "Text modules", "bi-card-text"),
           new("macros", "Macros", "bi-lightning"),
-          new("ticket-templates", "Templates", "bi-files") ]),
+          new("ticket-templates", "Templates", "bi-files"),
+          new("knowledge-base", "Knowledge base", "bi-book") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -1081,6 +1082,7 @@ else
                 break;
             case "support-personal": builder.OpenComponent<SupportPersonalTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "knowledge-base": builder.OpenComponent<KnowledgeBaseTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

@@ -1,0 +1,56 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Tickets
+@inject KnowledgeBaseService KnowledgeBase
+
+@* Help articles for a customer (docs/helpdesk.md, phase 5): public answers, published, written
+   for everyone or for this customer. Each one opened is asked for again by id under the same
+   rules, and its HTML is sanitised again before it is shown. *@
+
+<div data-test="portal-knowledge">
+    <div class="input-group input-group-sm mb-3" style="max-width: 32rem">
+        <span class="input-group-text"><i class="bi bi-search"></i></span>
+        <input class="form-control" placeholder="Search help articles" @bind="query" @bind:event="oninput" @onkeyup="SearchAsync" />
+    </div>
+
+    @if (open is { } shown)
+    {
+        <button class="btn btn-sm btn-link p-0 mb-2" @onclick="() => open = null"><i class="bi bi-arrow-left me-1"></i>All articles</button>
+        <h5>@shown.Title</h5>
+        <div class="text-muted small mb-3">Updated @shown.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd")</div>
+        <div class="kb-answer">@((MarkupString)RichText.Sanitize(shown.BodyHtml))</div>
+    }
+    else
+    {
+        @if (answers.Count == 0)
+        {
+            <div class="text-muted small">@(string.IsNullOrWhiteSpace(query) ? "There are no help articles yet." : "No article matches.")</div>
+        }
+        <div class="list-group">
+            @foreach (KbAnswer a in answers)
+            {
+                <button type="button" class="list-group-item list-group-item-action" @onclick="() => OpenAsync(a.Id)">
+                    <div class="fw-semibold">@a.Title</div>
+                    <div class="small text-muted">@Snippet(a.BodyText)</div>
+                </button>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    private string query = "";
+    private List<KbAnswer> answers = [];
+    private KbAnswer? open;
+
+    protected override Task OnParametersSetAsync() => SearchAsync();
+
+    private async Task SearchAsync() =>
+        answers = await KnowledgeBase.ForCustomerAsync(Customer.TenantId, Customer.Id, query, DateTime.UtcNow);
+
+    private async Task OpenAsync(Guid id) =>
+        open = await KnowledgeBase.GetForCustomerAsync(Customer.TenantId, Customer.Id, id, DateTime.UtcNow);
+
+    private static string Snippet(string text) => text.Length > 160 ? text[..160] + "…" : text;
+}

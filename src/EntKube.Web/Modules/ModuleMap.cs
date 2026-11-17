@@ -215,6 +215,8 @@ public static partial class ModuleMap
         [typeof(OutOfOffice)] = Module.Support,
         [typeof(TicketPresence)] = Module.Support,
         [typeof(CalendarFeed)] = Module.Support,
+        [typeof(KbCategory)] = Module.Support,
+        [typeof(KbAnswer)] = Module.Support,
         [typeof(TicketBridgeConnection)] = Module.Support,
         [typeof(ExternalTicketLink)] = Module.Support,
         [typeof(SupportMailbox)] = Module.Support,

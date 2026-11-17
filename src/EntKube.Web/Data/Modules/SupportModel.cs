@@ -69,6 +69,8 @@ internal static class SupportModel
         builder.Entity<OutOfOffice>().ToTable("OutOfOffices");
         builder.Entity<TicketPresence>().ToTable("TicketPresences");
         builder.Entity<CalendarFeed>().ToTable("CalendarFeeds");
+        builder.Entity<KbCategory>().ToTable("KbCategories");
+        builder.Entity<KbAnswer>().ToTable("KbAnswers");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -348,6 +350,30 @@ internal static class SupportModel
 
         // ── Staying informed (docs/helpdesk.md, phase 4). Tenants are columns, not keys to
         //    Tenant: the purge deletes these itself, and no second cascade path is created. ──
+
+        // ── The knowledge base (phase 5). Tenant as a column, like the rest of the helpdesk tables. ──
+
+        builder.Entity<KbCategory>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(200);
+            entity.HasIndex(c => new { c.TenantId, c.ParentId });
+
+            // Restrict: a category with children cannot be deleted out from under them; the
+            // service refuses a non-empty delete with a reason before the database has to.
+            entity.HasOne<KbCategory>().WithMany().HasForeignKey(c => c.ParentId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<KbAnswer>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.Property(a => a.Title).HasMaxLength(300);
+            entity.Property(a => a.Language).HasMaxLength(10);
+            entity.Property(a => a.Keywords).HasMaxLength(500);
+            entity.HasIndex(a => new { a.TenantId, a.Visibility });
+            entity.HasIndex(a => a.CategoryId);
+            entity.HasOne(a => a.Category).WithMany().HasForeignKey(a => a.CategoryId).OnDelete(DeleteBehavior.Restrict);
+        });
 
         builder.Entity<UserNotification>(entity =>
         {

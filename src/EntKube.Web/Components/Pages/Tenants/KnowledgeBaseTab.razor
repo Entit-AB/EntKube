@@ -1,0 +1,339 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@implements IAsyncDisposable
+@inject KnowledgeBaseService KnowledgeBase
+@inject TicketTemplateService Templates
+@inject CurrentActor ActorService
+@inject IJSRuntime JS
+@inject ToastService Toasts
+
+@* The help-answer library (docs/helpdesk.md, phase 5). Public answers appear in customers'
+   portals; internal ones are offered to agents only (?? in a reply). Bodies are sanitised on save. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="row g-3" data-test="knowledge-base">
+        <div class="col-lg-3 small">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>Categories</strong>
+                <button class="btn btn-sm btn-link p-0" @onclick="() => SelectCategory(null)">all answers</button>
+            </div>
+            <ul class="list-unstyled mb-2">
+                @foreach ((KbCategory c, int depth) in Tree())
+                {
+                    <li style="padding-left: @(depth)rem" class="d-flex justify-content-between">
+                        <button class="btn btn-sm btn-link p-0 text-start @(c.Id == categoryId ? "fw-semibold" : "")" @onclick="() => SelectCategory(c.Id)">@c.Name</button>
+                        <button class="btn btn-sm btn-link text-muted p-0" title="Rename or move" @onclick="() => EditCategory(c)"><i class="bi bi-pencil"></i></button>
+                    </li>
+                }
+                @if (categories.Count == 0) { <li class="text-muted">none yet</li> }
+            </ul>
+            <div class="border rounded p-2">
+                <input class="form-control form-control-sm mb-1" placeholder="Category name" @bind="categoryName" />
+                <select class="form-select form-select-sm mb-1" @bind="categoryParent" aria-label="Parent category">
+                    <option value="">at the top</option>
+                    @foreach ((KbCategory c, int depth) in Tree().Where(t => t.Category.Id != editingCategory))
+                    {
+                        <option value="@c.Id">@(new string('·', depth * 2)) @c.Name</option>
+                    }
+                </select>
+                <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="SaveCategoryAsync">@(editingCategory is null ? "Add category" : "Save category")</AsyncButton>
+                @if (editingCategory is Guid id)
+                {
+                    <button class="btn btn-sm btn-link" @onclick="() => { editingCategory = null; categoryName = string.Empty; categoryParent = string.Empty; }">Cancel</button>
+                    <button class="btn btn-sm btn-link text-danger" @onclick="() => DeleteCategoryAsync(id)">Delete</button>
+                }
+            </div>
+        </div>
+
+        <div class="col-lg-9">
+            @if (answer is null)
+            {
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong class="small">@(categoryId is null ? "All answers" : categories.FirstOrDefault(c => c.Id == categoryId)?.Name)</strong>
+                    <button class="btn btn-sm btn-primary" @onclick="NewAnswer" disabled="@(categories.Count == 0)"><i class="bi bi-plus me-1"></i>New answer</button>
+                </div>
+                <table class="table table-sm small align-middle">
+                    <thead class="table-light"><tr><th>Title</th><th>Language</th><th>State</th><th>For</th><th>Updated</th></tr></thead>
+                    <tbody>
+                        @foreach (KbAnswer a in answers)
+                        {
+                            <tr style="cursor: pointer" @onclick="() => OpenAnswer(a)">
+                                <td>@a.Title</td>
+                                <td>@a.Language</td>
+                                <td><span class="badge @StateClass(KnowledgeBaseService.StateOf(a, DateTime.UtcNow))">@KnowledgeBaseService.StateOf(a, DateTime.UtcNow)</span></td>
+                                <td>@(a.CustomerId is Guid c ? customers.FirstOrDefault(x => x.Id == c).Name : "everyone")</td>
+                                <td class="text-muted">@a.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd") @a.UpdatedBy</td>
+                            </tr>
+                        }
+                        @if (answers.Count == 0) { <tr><td colspan="5" class="text-muted">No answers here yet.</td></tr> }
+                    </tbody>
+                </table>
+            }
+            else
+            {
+                <div class="border rounded p-3 small" data-test="answer-editor">
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-6"><label class="form-label text-muted">Title</label><input class="form-control form-control-sm" @bind="answer.Title" /></div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted">Category</label>
+                            <select class="form-select form-select-sm" value="@answer.CategoryId" @onchange="e => answer.CategoryId = Guid.TryParse(e.Value?.ToString(), out Guid g) ? g : answer.CategoryId">
+                                @foreach ((KbCategory c, int depth) in Tree())
+                                {
+                                    <option value="@c.Id">@(new string('·', depth * 2)) @c.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted">Language</label>
+                            <input class="form-control form-control-sm" list="kb-languages" @bind="answer.Language" />
+                            <datalist id="kb-languages"><option value="sv"></option><option value="en"></option><option value="fi"></option><option value="no"></option><option value="da"></option></datalist>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted">Who sees it</label>
+                            <select class="form-select form-select-sm" @bind="answer.Visibility">
+                                <option value="@KbVisibility.Draft">Draft — nobody yet</option>
+                                <option value="@KbVisibility.Internal">Internal — agents only</option>
+                                <option value="@KbVisibility.Public">Public — customers too</option>
+                                <option value="@KbVisibility.Archived">Archived — nobody</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted">Publish from (Swedish time)</label>
+                            <input class="form-control form-control-sm" type="datetime-local" @bind="publishLocal" @bind:format="yyyy-MM-ddTHH:mm"
+                                   disabled="@(answer.Visibility != KbVisibility.Public)" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted">For</label>
+                            <select class="form-select form-select-sm" @bind="customerChoice">
+                                <option value="">every customer</option>
+                                @foreach ((Guid customerOptionId, string name) in customers)
+                                {
+                                    <option value="@customerOptionId">@name only</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3"><label class="form-label text-muted">Keywords</label><input class="form-control form-control-sm" @bind="answer.Keywords" /></div>
+                    </div>
+                    <div @ref="editor" style="min-height: 12rem" class="bg-white mb-2"></div>
+                    <div class="d-flex justify-content-between">
+                        <span>
+                            @if (answer.Id != Guid.Empty)
+                            {
+                                <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteAnswerAsync">Delete</button>
+                            }
+                        </span>
+                        <span>
+                            <button class="btn btn-sm btn-link" @onclick="CloseAnswer">Cancel</button>
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAnswerAsync">Save</AsyncButton>
+                        </span>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<KbCategory> categories = [];
+    private List<KbAnswer> answers = [];
+    private List<(Guid Id, string Name)> customers = [];
+    private Guid? categoryId;
+    private Guid? editingCategory;
+    private string categoryName = "";
+    private string categoryParent = "";
+    private KbAnswer? answer;
+    private DateTime? publishLocal;
+    private string customerChoice = "";
+    private ElementReference editor;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<KnowledgeBaseTab>? self;
+    private bool editorPending;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            categories = await KnowledgeBase.CategoriesAsync(TenantId);
+            customers = await Templates.CustomersAsync(TenantId);
+            answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!editorPending || answer is null)
+        {
+            return;
+        }
+
+        editorPending = false;
+
+        try
+        {
+            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-editor.js");
+            self ??= DotNetObjectReference.Create(this);
+            await module.InvokeVoidAsync("create", editor, self, "Write the answer…");
+            await module.InvokeVoidAsync("setHtml", editor, RichText.Sanitize(answer.BodyHtml));
+        }
+        catch (JSException ex)
+        {
+            Toasts.Error($"The editor could not start: {ex.Message}");
+        }
+    }
+
+    // The shared editor module reports its triggers; this editor has no use for them.
+    [JSInvokable] public Task OnTextModuleTrigger(string? query) => Task.CompletedTask;
+    [JSInvokable] public Task OnKnowledgeTrigger(string? query) => Task.CompletedTask;
+
+    /// <summary>The categories as a tree, depth-first, each with its depth.</summary>
+    private IEnumerable<(KbCategory Category, int Depth)> Tree()
+    {
+        IEnumerable<(KbCategory, int)> Walk(Guid? parent, int depth) =>
+            categories.Where(c => c.ParentId == parent).SelectMany(c => new[] { (c, depth) }.Concat(Walk(c.Id, depth + 1)));
+        return Walk(null, 0);
+    }
+
+    private async Task SelectCategory(Guid? id)
+    {
+        categoryId = id;
+        answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+    }
+
+    private void EditCategory(KbCategory c)
+    {
+        editingCategory = c.Id;
+        categoryName = c.Name;
+        categoryParent = c.ParentId?.ToString() ?? "";
+    }
+
+    private async Task SaveCategoryAsync()
+    {
+        Guid? parent = Guid.TryParse(categoryParent, out Guid p) && categories.Any(c => c.Id == p) ? p : null;
+
+        try
+        {
+            await KnowledgeBase.SaveCategoryAsync(TenantId, editingCategory, categoryName, parent);
+            editingCategory = null;
+            categoryName = "";
+            categoryParent = "";
+            categories = await KnowledgeBase.CategoriesAsync(TenantId);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteCategoryAsync(Guid id)
+    {
+        try
+        {
+            await KnowledgeBase.DeleteCategoryAsync(TenantId, id);
+            editingCategory = null;
+            categoryName = "";
+            categories = await KnowledgeBase.CategoriesAsync(TenantId);
+            if (categoryId == id) await SelectCategory(null);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private void NewAnswer() => OpenAnswer(new KbAnswer
+    {
+        Title = "", CategoryId = categoryId ?? Tree().First().Category.Id, Visibility = KbVisibility.Draft, Language = "sv",
+    });
+
+    private void OpenAnswer(KbAnswer a)
+    {
+        answer = new KbAnswer
+        {
+            Id = a.Id, Title = a.Title, CategoryId = a.CategoryId, BodyHtml = a.BodyHtml, Language = a.Language,
+            Visibility = a.Visibility, PublishAt = a.PublishAt, CustomerId = a.CustomerId, Keywords = a.Keywords,
+        };
+        publishLocal = a.PublishAt is DateTime p ? BusinessCalendar.ToLocal(p) : null;
+        customerChoice = a.CustomerId?.ToString() ?? "";
+        editorPending = true;
+    }
+
+    private async Task CloseAnswer()
+    {
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("dispose", editor);
+        }
+
+        answer = null;
+    }
+
+    private async Task SaveAnswerAsync()
+    {
+        answer!.BodyHtml = module is null ? answer.BodyHtml : await module.InvokeAsync<string>("html", editor);
+        answer.PublishAt = publishLocal is DateTime local
+            ? TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime)
+            : null;
+        answer.CustomerId = Guid.TryParse(customerChoice, out Guid c) && customers.Any(x => x.Id == c) ? c : null;
+
+        try
+        {
+            await KnowledgeBase.SaveAnswerAsync(TenantId, answer, await ActorService.NameAsync());
+            Toasts.Success("Saved.");
+            await CloseAnswer();
+            answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteAnswerAsync()
+    {
+        await KnowledgeBase.DeleteAnswerAsync(TenantId, answer!.Id);
+        await CloseAnswer();
+        answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+    }
+
+    private static string StateClass(string state) => state switch
+    {
+        "public" => "bg-success",
+        "scheduled" => "bg-info text-dark",
+        "internal" => "bg-warning text-dark",
+        "archived" => "bg-secondary",
+        _ => "bg-light text-dark border",
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (module is not null)
+            {
+                await module.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        self?.Dispose();
+    }
+}
