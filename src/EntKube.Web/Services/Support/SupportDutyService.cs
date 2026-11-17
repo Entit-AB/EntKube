@@ -123,6 +123,21 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
     {
         List<SupportTechnician> active = await GetActiveAsync(tenantId, ct);
 
+        // Out of office today is not here today (docs/helpdesk.md, phase 4). Checked against the
+        // Swedish calendar day, which is what "away until Friday" means. Everybody away leaves
+        // nobody: the ticket waits unassigned rather than landing in an unread inbox.
+        DateOnly today = DateOnly.FromDateTime(BusinessCalendar.ToLocal(DateTime.UtcNow));
+
+        using (ApplicationDbContext away = await dbFactory.CreateDbContextAsync(ct))
+        {
+            HashSet<string> absent = [.. await away.OutOfOffices.AsNoTracking()
+                .Where(o => o.TenantId == tenantId && o.From <= today && o.To >= today)
+                .Select(o => o.UserId)
+                .ToListAsync(ct)];
+
+            active = [.. active.Where(t => !absent.Contains(t.UserId))];
+        }
+
         if (excludeUserId is not null && active.Count > 1)
         {
             active = [.. active.Where(t => t.UserId != excludeUserId)];

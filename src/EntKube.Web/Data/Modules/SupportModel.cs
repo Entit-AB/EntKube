@@ -62,6 +62,13 @@ internal static class SupportModel
         builder.Entity<TicketDraft>().ToTable("TicketDrafts");
         builder.Entity<TicketAttachment>().ToTable("TicketAttachments");
         builder.Entity<SupportAttachmentSetting>().ToTable("SupportAttachmentSettings");
+        builder.Entity<UserNotification>().ToTable("UserNotifications");
+        builder.Entity<NotificationPreference>().ToTable("NotificationPreferences");
+        builder.Entity<NotificationCursor>().ToTable("NotificationCursors");
+        builder.Entity<NotifiedEscalation>().ToTable("NotifiedEscalations");
+        builder.Entity<OutOfOffice>().ToTable("OutOfOffices");
+        builder.Entity<TicketPresence>().ToTable("TicketPresences");
+        builder.Entity<CalendarFeed>().ToTable("CalendarFeeds");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -338,6 +345,60 @@ internal static class SupportModel
         });
 
         builder.Entity<SupportAttachmentSetting>(entity => entity.HasKey(s => s.TenantId));
+
+        // ── Staying informed (docs/helpdesk.md, phase 4). Tenants are columns, not keys to
+        //    Tenant: the purge deletes these itself, and no second cascade path is created. ──
+
+        builder.Entity<UserNotification>(entity =>
+        {
+            entity.HasKey(n => n.Id);
+            entity.Property(n => n.UserId).HasMaxLength(450);
+            entity.Property(n => n.Text).HasMaxLength(500);
+            entity.HasIndex(n => new { n.UserId, n.SeenAt });
+            entity.HasIndex(n => n.TenantId);
+            entity.HasOne(n => n.Ticket).WithMany().HasForeignKey(n => n.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<NotificationPreference>(entity =>
+        {
+            entity.HasKey(p => new { p.UserId, p.TenantId });
+            entity.Property(p => p.UserId).HasMaxLength(450);
+        });
+
+        builder.Entity<NotificationCursor>(entity => entity.HasKey(c => c.TenantId));
+
+        builder.Entity<NotifiedEscalation>(entity =>
+        {
+            entity.HasKey(e => new { e.TicketId, e.Clock, e.Deadline });
+            entity.HasOne<Ticket>().WithMany().HasForeignKey(e => e.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<OutOfOffice>(entity =>
+        {
+            entity.HasKey(o => o.Id);
+            entity.Property(o => o.UserId).HasMaxLength(450);
+            entity.Property(o => o.SubstituteUserId).HasMaxLength(450);
+            entity.Property(o => o.Note).HasMaxLength(300);
+            entity.HasIndex(o => new { o.TenantId, o.UserId });
+        });
+
+        builder.Entity<TicketPresence>(entity =>
+        {
+            entity.HasKey(p => new { p.TicketId, p.UserId });
+            entity.Property(p => p.UserId).HasMaxLength(450);
+            entity.Property(p => p.Name).HasMaxLength(200);
+            entity.HasIndex(p => p.SeenAt);
+            entity.HasOne(p => p.Ticket).WithMany().HasForeignKey(p => p.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CalendarFeed>(entity =>
+        {
+            entity.HasKey(f => f.Id);
+            entity.Property(f => f.UserId).HasMaxLength(450);
+            entity.Property(f => f.TokenHash).HasMaxLength(64);
+            entity.HasIndex(f => f.TokenHash).IsUnique();
+            entity.HasIndex(f => new { f.TenantId, f.UserId });
+        });
 
         builder.Entity<TicketAttachment>(entity =>
         {

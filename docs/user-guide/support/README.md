@@ -15,16 +15,18 @@ things work differently from a general helpdesk. These chapters say where.
 4. [Work with tickets](work-with-tickets.md): answering, notes, assigning, reminders and
    following, alone or many tickets at once.
 5. [Replying by mail](replying.md): reply, reply all and forward, in rich text.
+6. [Notifications, absence and your calendar](notifications.md): the bell, out of office, who's on a ticket, and a calendar feed.
+7. [Dashboard](dashboard.md): your figures beside the tenant's.
 
 ## Advanced
 
-6. [Ticket actions](ticket-actions.md): merge, split and link.
-7. [Text modules](text-modules.md): reusable text with placeholders.
-8. [Macros](macros.md): several changes in one click.
-9. [Checklist](checklist.md): the steps of a ticket's work.
-10. [Time accounting](time-accounting.md): logging the time a ticket took.
-11. [Drafts](shared-drafts.md): your note saved as you type, and drafts left for colleagues.
-12. [Attachments](attachments.md): files from customers' mail, and your own.
-13. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
+8. [Ticket actions](ticket-actions.md): merge, split and link.
+9. [Text modules](text-modules.md): reusable text with placeholders.
+10. [Macros](macros.md): several changes in one click.
+11. [Checklist](checklist.md): the steps of a ticket's work.
+12. [Time accounting](time-accounting.md): logging the time a ticket took.
+13. [Drafts](shared-drafts.md): your note saved as you type, and drafts left for colleagues.
+14. [Attachments](attachments.md): files from customers' mail, and your own.
+15. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
 
 More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).

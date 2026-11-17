@@ -103,6 +103,8 @@
     <div class="row">
     <div class="col-xl-9">
 
+    <TicketPresenceBar TenantId="TenantId" TicketId="ticket.Id" Name="@Actor" Editing="@(showNote || showComposer)" />
+
     @* ───────────── Clocks ───────────── *@
     <div class="row g-3 mb-4">
         <div class="col-md-4">@ClockCard("Response time", status.Response, "§14.6 pays 10% of the window fee for a missed P1/P2 response")</div>

@@ -639,8 +639,10 @@ public class TicketServiceTests : IDisposable
         await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
         await tickets.AssignAsync(tenantId, ticket.Id, "karin", "nils", Tue(11));
 
+        // Assigned, not Note, since phase 4: the notification sweep tells "it is yours now" apart
+        // from other news by this kind (docs/helpdesk.md).
         List<TicketEvent> notes = [.. db.Set<TicketEvent>()
-            .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note)];
+            .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Assigned)];
 
         notes.Should().Contain(e => e.Detail!.Contains("Assigned to nils"));
         notes.Should().Contain(e => e.Detail!.Contains("Reassigned from nils to karin"));

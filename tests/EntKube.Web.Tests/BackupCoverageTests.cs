@@ -44,6 +44,13 @@ public class BackupCoverageTests
         ["AlertIncident"] = "re-raised by the evaluator from live state",
         ["NotificationDelivery"] = "the log of sends from the old server",
 
+        // The support queue's transient state (docs/helpdesk.md, phase 4). Preferences, out of
+        // office and calendar feeds ARE backed up; these are what the sweep and the screens make.
+        ["UserNotification"] = "the bell's feed from the old server; the history it was made from is backed up",
+        ["NotificationCursor"] = "where the old server's sweep had got to; a restore starts from now rather than re-notifying the past",
+        ["NotifiedEscalation"] = "which escalations were announced; the restored server announces the ones still current once",
+        ["TicketPresence"] = "who had a ticket open in the last minute; nobody does on a server just restored",
+
         ["ExternalRouteHealthHistory"] = "probes the new server repeats",
         ["ResourceUsageSnapshot"] = "measurements of the old installation's own clusters",
 

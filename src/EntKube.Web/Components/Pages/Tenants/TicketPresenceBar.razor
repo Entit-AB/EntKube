@@ -1,0 +1,92 @@
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@implements IAsyncDisposable
+@inject TicketPresenceService Presence
+@inject AuthenticationStateProvider AuthState
+
+@* Who else has this ticket open (docs/helpdesk.md, phase 4) — advisory, as in Zammad: nothing is
+   locked. Refreshed every fifteen seconds through the database, so colleagues on another
+   instance behind the load balancer are seen too. *@
+
+@if (others.Count > 0)
+{
+    <div class="small text-muted mb-2" data-test="presence">
+        <i class="bi bi-people me-1"></i>
+        @foreach ((string name, bool editing) in others)
+        {
+            <span class="badge bg-light text-dark border me-1" title="@(editing ? $"{name} is writing on this ticket" : $"{name} has this ticket open")">
+                @name@(editing ? " ✎" : "")
+            </span>
+        }
+        @(others.Any(o => o.Editing) ? "— somebody is writing here too" : "also here")
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+
+    /// <summary>Whether this person is writing a note or a mail on the ticket.</summary>
+    [Parameter] public bool Editing { get; set; }
+
+    private List<(string Name, bool Editing)> others = [];
+    private string? userId;
+    private Timer? timer;
+    private Guid ticketShown;
+
+    protected override async Task OnInitializedAsync()
+    {
+        userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        timer = new Timer(_ => InvokeAsync(BeatAsync), null, TimeSpan.Zero, TimeSpan.FromSeconds(15));
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (ticketShown != Guid.Empty && ticketShown != TicketId && userId is not null)
+        {
+            await Presence.LeaveAsync(ticketShown, userId);
+        }
+
+        ticketShown = TicketId;
+    }
+
+    private async Task BeatAsync()
+    {
+        try
+        {
+            if (userId is not null)
+            {
+                await Presence.HeartbeatAsync(TenantId, TicketId, userId, Name, Editing);
+            }
+
+            others = await Presence.OthersAsync(TenantId, TicketId, userId, DateTime.UtcNow);
+            StateHasChanged();
+        }
+        catch
+        {
+            // Presence is a courtesy; a missed beat is the next beat's job.
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        timer?.Dispose();
+
+        if (userId is not null)
+        {
+            try
+            {
+                await Presence.LeaveAsync(ticketShown, userId);
+            }
+            catch
+            {
+                // Leaving early is tidiness; the row ages out of the window on its own.
+            }
+        }
+    }
+}

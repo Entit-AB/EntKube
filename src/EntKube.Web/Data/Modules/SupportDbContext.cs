@@ -27,6 +27,13 @@ public class SupportDbContext(DbContextOptions<SupportDbContext> options) : Modu
     public DbSet<TicketDraft> TicketDrafts => Set<TicketDraft>();
     public DbSet<TicketAttachment> TicketAttachments => Set<TicketAttachment>();
     public DbSet<SupportAttachmentSetting> SupportAttachmentSettings => Set<SupportAttachmentSetting>();
+    public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
+    public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
+    public DbSet<NotificationCursor> NotificationCursors => Set<NotificationCursor>();
+    public DbSet<NotifiedEscalation> NotifiedEscalations => Set<NotifiedEscalation>();
+    public DbSet<OutOfOffice> OutOfOffices => Set<OutOfOffice>();
+    public DbSet<TicketPresence> TicketPresences => Set<TicketPresence>();
+    public DbSet<CalendarFeed> CalendarFeeds => Set<CalendarFeed>();
     public DbSet<TicketBridgeConnection> TicketBridgeConnections => Set<TicketBridgeConnection>();
     public DbSet<ExternalTicketLink> ExternalTicketLinks => Set<ExternalTicketLink>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();

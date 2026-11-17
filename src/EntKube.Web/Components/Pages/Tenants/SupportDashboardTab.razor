@@ -1,0 +1,97 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@inject TicketOverviews Overviews
+@inject CurrentActor ActorService
+@inject AuthenticationStateProvider AuthState
+
+@* The agent dashboard (docs/helpdesk.md, phase 4): your figures beside the tenant's, computed on
+   read from the same queue the overviews use. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading && d is not null)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0">Support dashboard</h6>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+    </div>
+
+    <div class="row g-3 mb-3" data-test="dashboard">
+        @Tile("My open tickets", d.MyOpen.ToString(), $"{d.Unassigned} unassigned in the tenant", "tickets", "Mine")
+        @Tile("My reminders due", d.MyRemindersDue.ToString(), "", "tickets", "MyReminders")
+        @Tile("Escalated", $"{d.MyEscalated} mine", $"{d.Escalated} in the tenant", "tickets", "Escalated")
+        @Tile("First response today", Minutes(d.MyFirstResponseToday), $"tenant {Minutes(d.FirstResponseToday)} — inside the support window", null, null)
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-4">
+            <div class="card h-100"><div class="card-body small">
+                <div class="text-muted mb-2">New tickets in the last 7 days, by channel</div>
+                @foreach ((TicketChannel channel, int count) in d.ChannelsLastWeek)
+                {
+                    <div class="d-flex justify-content-between"><span>@channel</span><strong>@count</strong></div>
+                }
+                @if (d.ChannelsLastWeek.Count == 0) { <div class="text-muted">none</div> }
+                <div class="text-muted mt-3">Reopened in the last 7 days: <strong>@d.ReopenedLastWeek</strong></div>
+            </div></div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card h-100"><div class="card-body small">
+                <div class="text-muted mb-2">What colleagues did lately</div>
+                @foreach ((int number, string title, string actor, string what, DateTime at) in d.Activity)
+                {
+                    <div class="mb-1">
+                        <span class="text-muted">@at.ToLocalTime().ToString("MMM d HH:mm")</span>
+                        <strong>@actor</strong> — @what on <a href="@($"/tenants/{TenantSlug}?section=tickets&ticket={number}")">#@number</a> @title
+                    </div>
+                }
+                @if (d.Activity.Count == 0) { <div class="text-muted">nothing yet</div> }
+            </div></div>
+        </div>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter] public string? TenantSlug { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private SupportDashboard? d;
+
+    protected override Task OnParametersSetAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+                .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            d = await Overviews.DashboardAsync(TenantId, new OverviewViewer(userId, await ActorService.NameAsync()), DateTime.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static string Minutes(TimeSpan? span) => span is TimeSpan s ? $"{(int)s.TotalMinutes} min" : "—";
+
+    private RenderFragment Tile(string label, string value, string beside, string? section, string? overview) => __builder =>
+    {
+        <div class="col-sm-6 col-lg-3">
+            <div class="border rounded p-3 h-100">
+                <div class="small text-muted">@label</div>
+                <div class="fs-5 fw-semibold">@value</div>
+                <div class="small text-muted">@beside</div>
+            </div>
+        </div>
+    };
+}

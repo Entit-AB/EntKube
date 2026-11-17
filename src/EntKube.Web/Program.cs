@@ -797,6 +797,21 @@ public class Program
                 file.Meta.FileName);
         }).RequireAuthorization();
 
+        // A personal calendar feed of ticket deadlines (docs/helpdesk.md, phase 4). Anonymous by
+        // necessity: a calendar app presents nothing but the address, so the address carries a
+        // random 256-bit token, of which only a hash is stored. An unknown token is a plain 404 —
+        // nothing says whether it ever existed.
+        app.MapGet("/support/calendar/{token}.ics", async (
+            string token, EntKube.Web.Services.Tickets.CalendarFeedService feeds, HttpContext httpContext, CancellationToken ct) =>
+        {
+            string? ics = await feeds.FeedAsync(token, DateTime.UtcNow, ct);
+            if (ics is null)
+                return Results.NotFound();
+
+            httpContext.Response.Headers.CacheControl = "private, max-age=300";
+            return Results.Text(ics, "text/calendar; charset=utf-8");
+        }).AllowAnonymous();
+
         // Backup download — streams a gzip-compressed JSON bundle of the full app state.
         // Requires the Admin role; the bundle contains plaintext secrets so access is restricted.
         app.MapGet("/api/admin/backup", async (BackupService backupService, HttpContext httpContext) =>
