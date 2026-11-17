@@ -15,6 +15,8 @@
 @inject TextModuleService TextModules
 @inject MacroService Macros
 @inject TicketReference References
+@inject TicketDraftService Drafts
+@inject EntKube.Web.Services.Time.TimeService Time
 @inject IJSRuntime JS
 @inject NavigationManager Nav
 
@@ -240,7 +242,7 @@
                     <i class="bi bi-flag me-1"></i>
                     @(ticket.PriorityConfirmedAt is null ? "Confirm priority" : "Reprioritise")
                 </button>
-                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNote = !showNote">
+                <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleNoteAsync">
                     <i class="bi bi-chat-left-text me-1"></i>Add a note
                 </button>
                 @if (moveTargets.Count > 0)
@@ -314,6 +316,44 @@
                     </span>
                 }
             </div>
+
+            @if (sharedDraft is { } shared)
+            {
+                <div class="border rounded p-2 mb-2 small bg-light" data-test="shared-draft">
+                    <i class="bi bi-file-earmark-text me-1"></i>
+                    <strong>Draft available</strong>
+                    <span class="text-muted">— left by @(shared.By ?? "somebody"), @shared.At.ToLocalTime().ToString("MMM d HH:mm")</span>
+                    <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => previewShared = !previewShared">@(previewShared ? "Hide" : "Preview")</button>
+                    @if (previewShared)
+                    {
+                        <div class="border rounded bg-white p-2 my-2" style="white-space: pre-wrap">@shared.Text</div>
+                        <div class="text-muted mb-1">@(shared.CustomerVisible ? "Marked: the customer sees this." : "Marked: internal.")</div>
+                        <button class="btn btn-sm btn-outline-primary me-1" @onclick="LoadSharedDraftAsync">
+                            @(loadOverwrites ? "Replace what you have typed" : "Load into the note")
+                        </button>
+                        <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteSharedDraftAsync">Delete the draft</button>
+                    }
+                </div>
+            }
+
+            @if (timePrompt)
+            {
+                <div class="border rounded p-2 mb-2 small" data-test="time-prompt">
+                    <div class="mb-1"><i class="bi bi-stopwatch me-1"></i>Time spent on this? <span class="text-muted">Optional.</span></div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <input class="form-control form-control-sm" style="width: 6rem" type="number" min="1" max="1440" placeholder="minutes" @bind="timeMinutes" />
+                        <select class="form-select form-select-sm w-auto" @bind="timeKind">
+                            <option value="@EntKube.Web.Data.WorkKind.Management">Management</option>
+                            <option value="@EntKube.Web.Data.WorkKind.IncidentAssessment">First assessment</option>
+                            <option value="@EntKube.Web.Data.WorkKind.Development">Development (§15)</option>
+                            <option value="@EntKube.Web.Data.WorkKind.Travel">Travel</option>
+                        </select>
+                        <input class="form-control form-control-sm flex-grow-1" style="min-width: 12rem" @bind="timeDescription" placeholder="What was done — the customer validates this (§20)" />
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="LogPromptedTimeAsync">Log</AsyncButton>
+                        <button class="btn btn-sm btn-link" @onclick="() => timePrompt = false">Skip</button>
+                    </div>
+                </div>
+            }
 
             @if (guardedAction is not null)
             {
@@ -528,8 +568,8 @@
             @if (showNote)
             {
                 <div class="border rounded p-3 mb-2">
-                    <textarea class="form-control form-control-sm mb-2" rows="3" @bind="formReason"
-                              placeholder="A status update, or a working note"></textarea>
+                    <textarea class="form-control form-control-sm mb-2" rows="3" value="@formReason"
+                              @oninput="OnNoteInputAsync" placeholder="A status update, or a working note"></textarea>
                     <div class="input-group input-group-sm mb-2" data-test="text-module-picker">
                         <span class="input-group-text"><i class="bi bi-card-text"></i></span>
                         <input class="form-control" placeholder="Insert a text module — type to find one" @bind="moduleQuery" @bind:event="oninput" />
@@ -569,8 +609,18 @@
                             <input class="form-check-input" type="checkbox" id="visible" @bind="formCustomerVisible" />
                             <label class="form-check-label small" for="visible">The customer sees this</label>
                         </div>
-                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="AddNoteAsync">Add</AsyncButton>
+                        <span>
+                            <button class="btn btn-sm btn-link" @onclick="ShareDraftAsync"
+                                    title="Leave this note on the ticket for a colleague to finish">
+                                @(confirmOverwrite ? "Replace the shared draft" : "Save as shared draft")
+                            </button>
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="AddNoteAsync">Add</AsyncButton>
+                        </span>
                     </div>
+                    @if (draftSavedAt is DateTime savedAt)
+                    {
+                        <div class="form-text">Draft saved @savedAt.ToLocalTime().ToString("HH:mm:ss") — it is here if you come back.</div>
+                    }
                 </div>
             }
 
@@ -693,6 +743,20 @@
     private Func<Task>? guardedAction;
     private string guardedLabel = "";
 
+    // ---- Phase 2b: drafts and the time prompt ----
+    private string? userId;
+    private NoteDraft? sharedDraft;
+    private bool previewShared;
+    private bool loadOverwrites;
+    private bool confirmOverwrite;
+    private bool fromSharedDraft;
+    private DateTime? draftSavedAt;
+    private CancellationTokenSource? autosave;
+    private bool timePrompt;
+    private int? timeMinutes;
+    private EntKube.Web.Data.WorkKind timeKind = EntKube.Web.Data.WorkKind.Management;
+    private string timeDescription = "";
+
     // ---- Moving it somewhere else ----
     //
     // The tenants this person can already reach, read once on the server. They are the only
@@ -720,6 +784,8 @@
     {
         resolvedActor = await ActorService.NameAsync();
         moveTargets = await ReachableTenantsAsync();
+        userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
     }
 
     /// <summary>
@@ -953,6 +1019,7 @@
 
                 mergedEntries = await Work.GetMergedHistoryAsync(TenantId, ticket.Id);
                 offeredModules = await TextModules.OfferedAsync(TenantId, ticket.CustomerId);
+                sharedDraft = await Drafts.GetSharedNoteAsync(TenantId, ticket.Id);
                 macros = await Macros.ListAsync(TenantId, activeOnly: true);
                 mergedInto = await MergedIntoAsync();
 
@@ -1143,6 +1210,16 @@
             .Where(c => mentioned.Contains(c.UserId))
             .Select(c => new TicketWorkService.Mentioned(c.UserId, c.Name, c.Email!))];
 
+        autosave?.Cancel();
+        PromptForTime(formReason);
+
+        // Not conditional on knowing who this is: a shared draft the note was made from goes
+        // either way, and an empty id simply matches no personal draft.
+        await Drafts.NoteAddedAsync(TenantId, TicketId, userId ?? "", fromSharedDraft);
+
+        fromSharedDraft = false;
+        draftSavedAt = null;
+
         if (named.Count == 0)
         {
             await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
@@ -1160,6 +1237,145 @@
         await AfterChangeAsync(missed.Count == 0
             ? $"Note added; {string.Join(", ", named.Select(n => n.Name))} told."
             : $"Note added. Could not mail {string.Join(", ", missed)} — they follow the ticket but have not been told.");
+    }
+
+    /// <summary>Opens the note form, bringing back what this person was typing here last time.</summary>
+    private async Task ToggleNoteAsync()
+    {
+        showNote = !showNote;
+
+        if (showNote && string.IsNullOrWhiteSpace(formReason) && userId is not null
+            && await Drafts.GetPersonalNoteAsync(TenantId, TicketId, userId) is { } mine)
+        {
+            formReason = mine.Text;
+            formCustomerVisible = mine.CustomerVisible;
+            draftSavedAt = mine.At;
+        }
+    }
+
+    /// <summary>
+    /// Saves the note as it is typed, a second after the last keystroke — on the server, so it
+    /// survives a reload, a dropped connection or a move to another instance.
+    /// </summary>
+    private Task OnNoteInputAsync(ChangeEventArgs e)
+    {
+        formReason = e.Value?.ToString() ?? "";
+        return NoteTypedAsync();
+    }
+
+    private async Task NoteTypedAsync()
+    {
+        if (!showNote || userId is null)
+        {
+            return;
+        }
+
+        autosave?.Cancel();
+        autosave = new CancellationTokenSource();
+        CancellationToken token = autosave.Token;
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), token);
+            await Drafts.SavePersonalNoteAsync(TenantId, TicketId, userId, formReason, formCustomerVisible, token);
+            draftSavedAt = string.IsNullOrWhiteSpace(formReason) ? null : DateTime.UtcNow;
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer keystroke took over.
+        }
+    }
+
+    private async Task ShareDraftAsync()
+    {
+        try
+        {
+            await Drafts.ShareNoteAsync(TenantId, TicketId, formReason, formCustomerVisible, Actor, overwrite: confirmOverwrite);
+            confirmOverwrite = false;
+            sharedDraft = await Drafts.GetSharedNoteAsync(TenantId, TicketId);
+            Toasts.Success("Left on the ticket as a shared draft.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Overwriting is final, so the first press only asks.
+            confirmOverwrite = true;
+            Toasts.Info($"{ex.Message} Press again to replace it.");
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task LoadSharedDraftAsync()
+    {
+        if (sharedDraft is not { } shared)
+        {
+            return;
+        }
+
+        // Loading over what you have typed is asked about first.
+        if (!string.IsNullOrWhiteSpace(formReason) && formReason != shared.Text && !loadOverwrites)
+        {
+            loadOverwrites = true;
+            return;
+        }
+
+        loadOverwrites = false;
+        showNote = true;
+        formReason = shared.Text;
+        formCustomerVisible = shared.CustomerVisible;
+        fromSharedDraft = true;
+        previewShared = false;
+        await NoteTypedAsync();
+    }
+
+    private async Task DeleteSharedDraftAsync()
+    {
+        await Drafts.DeleteSharedNoteAsync(TenantId, TicketId);
+        sharedDraft = null;
+        previewShared = false;
+        Toasts.Info("Shared draft deleted.");
+    }
+
+    /// <summary>Zammad's time accounting: after a note, ask — optionally — how long it took.</summary>
+    private void PromptForTime(string note)
+    {
+        timePrompt = true;
+        timeMinutes = null;
+        string first = note.Split('\n', 2)[0].Trim();
+        timeDescription = first.Length > 120 ? first[..120] : first;
+    }
+
+    private async Task LogPromptedTimeAsync()
+    {
+        if (timeMinutes is not int minutes || minutes < 1 || minutes > 24 * 60)
+        {
+            Toasts.Error("Say how many minutes, or skip.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(timeDescription))
+        {
+            Toasts.Error("§20 wants the work described so the customer can validate it.");
+            return;
+        }
+
+        DateTime end = DateTime.UtcNow;
+
+        try
+        {
+            await Time.LogAsync(TenantId, ticket!.CustomerId, ticket.AppId, ticket.Id,
+                end.AddMinutes(-minutes), end, timeKind, timeDescription.Trim(), Actor);
+
+            timePrompt = false;
+            Toasts.Success($"{minutes} min logged.");
+            await LoadAsync();
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
     }
 
     private void ToggleMention(string userId, ChangeEventArgs e)

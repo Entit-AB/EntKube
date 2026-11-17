@@ -205,6 +205,7 @@ public static partial class ModuleMap
         [typeof(TicketChecklist)] = Module.Support,
         [typeof(TicketChecklistItem)] = Module.Support,
         [typeof(ChecklistTemplate)] = Module.Support,
+        [typeof(TicketDraft)] = Module.Support,
         [typeof(TicketBridgeConnection)] = Module.Support,
         [typeof(ExternalTicketLink)] = Module.Support,
         [typeof(SupportMailbox)] = Module.Support,

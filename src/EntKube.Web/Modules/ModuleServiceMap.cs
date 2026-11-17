@@ -268,6 +268,7 @@ public static partial class ModuleMap
         [typeof(EntKube.Web.Services.Tickets.TicketTemplateService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.MacroService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketChecklistService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketDraftService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUp)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUpSweep)] = Module.Support,
         [typeof(EntKube.Web.Services.Time.TimeService)] = Module.Support,

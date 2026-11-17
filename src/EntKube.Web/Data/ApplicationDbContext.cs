@@ -46,6 +46,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketChecklist> TicketChecklists => Set<TicketChecklist>();
     public DbSet<TicketChecklistItem> TicketChecklistItems => Set<TicketChecklistItem>();
     public DbSet<ChecklistTemplate> ChecklistTemplates => Set<ChecklistTemplate>();
+    public DbSet<TicketDraft> TicketDrafts => Set<TicketDraft>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();

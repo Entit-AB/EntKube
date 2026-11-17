@@ -197,8 +197,21 @@ registered at all, and templates had nothing to fill. Decisions:
   binding expected them. The Phase 1 reminder picker therefore silently did nothing. All three
   pickers now bind `yyyy-MM-ddTHH:mm`, pinned by render tests.
 
-Still to come in Phase 2: **2b** time-accounting prompt and shared drafts; **2c** rich text and
-HTML mail, S3 attachments, reply-all, forward and quoting.
+**Phase 2b done (2026-11-17):** a time prompt after a note (optional, never in bulk, logged as a
+`TimeEntry` against the ticket), personal autosave of the note being typed, one shared note draft
+per ticket, and named shared new-ticket drafts. Drafts live on the server (`TicketDraft`), so
+they survive a reload, a dropped circuit or another instance. They are never on the history. Also:
+
+- **The time log stored Swedish times as if they were the server's.** It used `ToUniversalTime()`,
+  which applies the host's offset, so a UTC container recorded a Swedish 09:00 as 09:00 UTC. It
+  now converts from Swedish time, and its pickers carry the format fix.
+- **Build hazard:** `@bind:event="oninput" @bind:after=…` inside TicketDetail's deeply nested
+  markup sent the Razor/C# compiler into a spin that ran for over 30 minutes at 200% CPU. A plain
+  `value=` plus `@oninput` handler compiles in about 90 seconds. Avoid `@bind:after` in that
+  component.
+
+Still to come in Phase 2: **2c** rich text and HTML mail, S3 attachments, reply-all, forward and
+quoting.
 
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.

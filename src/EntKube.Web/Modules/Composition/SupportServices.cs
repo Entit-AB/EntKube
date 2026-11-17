@@ -45,6 +45,7 @@ internal static class SupportServices
         services.AddScoped<EntKube.Web.Services.Tickets.TicketTemplateService>();
         services.AddScoped<EntKube.Web.Services.Tickets.MacroService>();
         services.AddScoped<EntKube.Web.Services.Tickets.TicketChecklistService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketDraftService>();
         services.AddScoped<EntKube.Web.Services.Tickets.TicketFollowUp>();
         services.AddSingletonWork<EntKube.Web.Services.Tickets.TicketFollowUpSweep>();
         services.AddScoped<EntKube.Web.Services.Time.TimeService>();

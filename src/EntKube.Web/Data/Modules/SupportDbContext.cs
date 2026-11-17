@@ -24,6 +24,7 @@ public class SupportDbContext(DbContextOptions<SupportDbContext> options) : Modu
     public DbSet<TicketChecklist> TicketChecklists => Set<TicketChecklist>();
     public DbSet<TicketChecklistItem> TicketChecklistItems => Set<TicketChecklistItem>();
     public DbSet<ChecklistTemplate> ChecklistTemplates => Set<ChecklistTemplate>();
+    public DbSet<TicketDraft> TicketDrafts => Set<TicketDraft>();
     public DbSet<TicketBridgeConnection> TicketBridgeConnections => Set<TicketBridgeConnection>();
     public DbSet<ExternalTicketLink> ExternalTicketLinks => Set<ExternalTicketLink>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();

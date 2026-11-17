@@ -72,6 +72,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, work));
         Services.AddSingleton(new TicketTemplateService(factory));
+        Services.AddSingleton(new TicketDraftService(factory));
         Services.AddSingleton(new TimeService(factory, contracts));
         Services.AddSingleton(duty);
         Services.AddSingleton(new ToastService());
@@ -88,11 +89,15 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private sealed class SignedInAs(string name) : AuthenticationStateProvider
+    private sealed class SignedInAs(string name, string? userId = null) : AuthenticationStateProvider
     {
         public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
             Task.FromResult(new AuthenticationState(new ClaimsPrincipal(
-                new ClaimsIdentity([new Claim(ClaimTypes.Name, name)], "test"))));
+                new ClaimsIdentity(
+                    userId is null
+                        ? [new Claim(ClaimTypes.Name, name)]
+                        : [new Claim(ClaimTypes.Name, name), new Claim(ClaimTypes.NameIdentifier, userId)],
+                    "test"))));
     }
 
     private Task<Ticket> Raise(string title = "Journalen svarar inte", DateTime? at = null) =>
@@ -346,5 +351,120 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         db.ChangeTracker.Clear();
         db.Tickets.Single(t => t.Id == ticket.Id).ReminderAt.Should().Be(TimeZoneInfo.ConvertTimeToUtc(
             new DateTime(2026, 9, 23, 9, 30, 0, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime));
+    }
+
+    // ───────────────────────────── Phase 2b ─────────────────────────────
+
+    private async Task AddNoteThroughTheScreenAsync(IRenderedComponent<TicketDetail> detail, string text)
+    {
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
+        await detail.InvokeAsync(() => detail.Find("textarea[placeholder='A status update, or a working note']").Input(text));
+        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
+    }
+
+    [Fact]
+    public async Task After_a_note_the_time_it_took_can_be_logged_against_the_ticket()
+    {
+        Ticket ticket = await Raise();
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        await AddNoteThroughTheScreenAsync(detail, "Restarted the VPN gateway.");
+
+        IElement prompt = detail.Find("[data-test=time-prompt]");
+        prompt.QuerySelector("input[type=number]")!.Change("25");
+        await detail.InvokeAsync(() => detail.Find("[data-test=time-prompt] button").Click());
+
+        db.ChangeTracker.Clear();
+        TimeEntry entry = db.TimeEntries.Single(e => e.TicketId == ticket.Id);
+        (entry.EndedAt - entry.StartedAt).Should().Be(TimeSpan.FromMinutes(25));
+        entry.Description.Should().Be("Restarted the VPN gateway.");
+        entry.PerformedBy.Should().Be("nils");
+    }
+
+    [Fact]
+    public async Task Skipping_the_prompt_logs_nothing()
+    {
+        Ticket ticket = await Raise();
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        await AddNoteThroughTheScreenAsync(detail, "Looked at it.");
+        await detail.InvokeAsync(() => detail.FindAll("[data-test=time-prompt] button").First(b => b.TextContent.Trim() == "Skip").Click());
+
+        detail.FindAll("[data-test=time-prompt]").Should().BeEmpty();
+        db.TimeEntries.AsNoTracking().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task What_was_being_typed_is_there_again_when_the_note_is_reopened()
+    {
+        Ticket ticket = await Raise();
+        await new TicketDraftService(new TestDbContextFactory(connection))
+            .SavePersonalNoteAsync(tenantId, ticket.Id, "user-nils", "Half written", false);
+
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
+
+        detail.Find("textarea[placeholder='A status update, or a working note']").GetAttribute("value").Should().Be("Half written");
+    }
+
+    [Fact]
+    public async Task A_shared_draft_is_offered_and_goes_once_a_note_is_made_from_it()
+    {
+        Ticket ticket = await Raise();
+        TicketDraftService drafts = new(new TestDbContextFactory(connection));
+        await drafts.ShareNoteAsync(tenantId, ticket.Id, "Anna's draft answer", true, "anna", false);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        detail.Find("[data-test=shared-draft]").TextContent.Should().Contain("Draft available").And.Contain("anna");
+
+        await detail.InvokeAsync(() => detail.Find("[data-test=shared-draft] button").Click());
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Load into the note").Click());
+        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
+
+        db.ChangeTracker.Clear();
+        db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Detail == "Anna's draft answer").CustomerVisible.Should().BeTrue();
+        (await drafts.GetSharedNoteAsync(tenantId, ticket.Id)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// ⚠️ The time log converted the picked time with ToUniversalTime(), which on a time with no
+    /// zone applies the SERVER's offset. On this developer's machine (Swedish time) the two agree,
+    /// so this passes either way here — it is a CI (UTC) regression test, which is where a Swedish
+    /// 09:00 used to be stored as 09:00 UTC.
+    /// </summary>
+    [Fact]
+    public async Task Time_logged_by_hand_is_read_as_swedish_time()
+    {
+        Ticket ticket = await Raise();
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Log time").Click());
+        // The time log's two pickers come first; the side panel's reminder picker follows them.
+        detail.FindAll("input[type=datetime-local]")[0].Change("2026-09-22T09:00");
+        detail.FindAll("input[type=datetime-local]")[1].Change("2026-09-22T10:00");
+        detail.Find("input[placeholder^='Appears on the specification']").Change("Investigated the outage");
+        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Log").Click());
+
+        db.ChangeTracker.Clear();
+        db.TimeEntries.Single(e => e.TicketId == ticket.Id).StartedAt.Should().Be(Tue(9));
+    }
+
+    [Fact]
+    public async Task A_new_ticket_left_as_a_shared_draft_can_be_finished_by_somebody_else()
+    {
+        TicketDraftService drafts = new(new TestDbContextFactory(connection));
+        TicketDraft left = await drafts.SaveNewTicketDraftAsync(tenantId, null, "Anna's call",
+            new NewTicketDraft { Title = "Printer offline", Description = "Floor 3", CustomerId = customerId, Tags = "printer" }, "anna");
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p.Add(c => c.TenantId, tenantId));
+        await queue.InvokeAsync(() => ButtonSaying(queue, "New ticket").Click());
+
+        await queue.InvokeAsync(() => queue.FindAll("[data-test=new-ticket-drafts] button").First(b => b.TextContent.Trim() == "Load").Click());
+        await queue.InvokeAsync(() => queue.Find("[data-test=new-ticket] .text-end button").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Include(t => t.Tags).Single(t => t.Title == "Printer offline").Tags.Select(t => t.Name).Should().Equal("printer");
+        (await drafts.ListNewTicketDraftsAsync(tenantId)).Should().NotContain(d => d.Id == left.Id, "creating the ticket uses the draft up");
     }
 }

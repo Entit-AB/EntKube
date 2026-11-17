@@ -5,6 +5,7 @@
 @inject TicketService Tickets
 @inject TicketWorkService Work
 @inject TicketTemplateService Templates
+@inject TicketDraftService Drafts
 @inject CurrentActor ActorService
 @inject ToastService Toasts
 
@@ -102,6 +103,31 @@
                     </div>
                     <div class="form-text">Fills only the fields that are still empty.</div>
                 }
+
+                <div class="text-muted mt-3 mb-1">Shared drafts</div>
+                <div data-test="new-ticket-drafts">
+                    @foreach (TicketDraft d in drafts)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span title="@($"{d.UpdatedBy}, {d.UpdatedAt.ToLocalTime():MMM d HH:mm}")">
+                                @d.Name @if (d.Id == loadedDraftId) { <span class="badge bg-light text-dark border">loaded</span> }
+                            </span>
+                            <span>
+                                <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => LoadDraft(d)">@(confirmLoad == d.Id ? "Replace the form" : "Load")</button>
+                                <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteDraftAsync(d)">Delete</button>
+                            </span>
+                        </div>
+                    }
+                    @if (drafts.Count == 0)
+                    {
+                        <div class="text-muted">None.</div>
+                    }
+                    <div class="input-group input-group-sm mt-2">
+                        <input class="form-control" placeholder="Name" @bind="draftName" />
+                        <button class="btn btn-outline-secondary" @onclick="SaveDraftAsync">Save</button>
+                    </div>
+                    <div class="form-text">Leave the form half-filled for a colleague. Saving a loaded draft under a new name makes a copy; creating the ticket removes the draft it came from.</div>
+                </div>
             </div>
         </div>
     </div>
@@ -124,11 +150,71 @@
     private string priorityChoice = "";
     private string templateChoice = "";
     private DateTime? reportedLocal = BusinessCalendar.ToLocal(DateTime.UtcNow);
+    private List<TicketDraft> drafts = [];
+    private Guid? loadedDraftId;
+    private string? loadedDraftName;
+    private string draftName = "";
+    private Guid? confirmLoad;
 
     protected override async Task OnInitializedAsync()
     {
         customers = await Templates.CustomersAsync(TenantId);
         templates = await Templates.ListAsync(TenantId, activeOnly: true);
+        drafts = await Drafts.ListNewTicketDraftsAsync(TenantId);
+    }
+
+    private bool FormHasContent =>
+        !string.IsNullOrWhiteSpace(draft.Title) || !string.IsNullOrWhiteSpace(draft.Description) || draft.CustomerId is not null;
+
+    /// <summary>Loading replaces the form, so over a form with something in it, it asks first.</summary>
+    private async Task LoadDraft(TicketDraft d)
+    {
+        if (FormHasContent && confirmLoad != d.Id)
+        {
+            confirmLoad = d.Id;
+            return;
+        }
+
+        confirmLoad = null;
+        TicketDraftService.Load(d, draft);
+        priorityChoice = draft.Priority?.ToString() ?? "";
+        apps = draft.CustomerId is Guid customerId ? await Templates.AppsAsync(TenantId, customerId) : [];
+        loadedDraftId = d.Id;
+        loadedDraftName = d.Name;
+        draftName = d.Name ?? "";
+    }
+
+    private async Task SaveDraftAsync()
+    {
+        draft.Priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
+
+        // Same name as the loaded draft updates it; a new name is a copy (Zammad's rule).
+        Guid? id = loadedDraftId is not null && draftName.Trim() == loadedDraftName ? loadedDraftId : null;
+
+        try
+        {
+            TicketDraft saved = await Drafts.SaveNewTicketDraftAsync(TenantId, id, draftName, draft, await ActorService.NameAsync());
+            loadedDraftId = saved.Id;
+            loadedDraftName = saved.Name;
+            drafts = await Drafts.ListNewTicketDraftsAsync(TenantId);
+            Toasts.Success("Saved as a shared draft.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteDraftAsync(TicketDraft d)
+    {
+        await Drafts.DeleteNewTicketDraftAsync(TenantId, d.Id);
+        if (loadedDraftId == d.Id)
+        {
+            loadedDraftId = null;
+            loadedDraftName = null;
+        }
+
+        drafts = await Drafts.ListNewTicketDraftsAsync(TenantId);
     }
 
     private async Task OnCustomerChangedAsync(ChangeEventArgs e)
@@ -215,6 +301,11 @@
             {
                 refused.Add(tag);
             }
+        }
+
+        if (loadedDraftId is Guid usedDraft)
+        {
+            await Drafts.DeleteNewTicketDraftAsync(TenantId, usedDraft);
         }
 
         Toasts.Success(refused.Count == 0

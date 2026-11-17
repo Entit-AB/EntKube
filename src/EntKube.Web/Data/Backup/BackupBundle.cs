@@ -30,7 +30,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 15;
+    public const int CurrentVersion = 16;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -234,6 +234,7 @@ public class BackupBundle
     public List<TicketChecklist> TicketChecklists { get; set; } = [];
     public List<TicketChecklistItem> TicketChecklistItems { get; set; } = [];
     public List<ChecklistTemplate> ChecklistTemplates { get; set; } = [];
+    public List<TicketDraft> TicketDrafts { get; set; } = [];
     public List<TimeEntry> TimeEntries { get; set; } = [];
     public List<WorkAuthorisation> WorkAuthorisations { get; set; } = [];
 

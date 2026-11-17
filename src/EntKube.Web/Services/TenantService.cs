@@ -166,6 +166,9 @@ public class TenantService(
         // Ticket links: the far end is NO ACTION (SQL Server will not take two cascade paths
         // into one table), so they go before the customers whose tickets they join.
         await db.TicketLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
+        // Drafts carry the tenant as a column (a second cascade path is one SQL Server refuses);
+        // note drafts would go with their tickets, but new-ticket drafts have no ticket.
+        await db.TicketDrafts.Where(d => d.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
