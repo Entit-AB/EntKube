@@ -147,7 +147,8 @@ public class AlertTicketBridge(
             .Where(t => t.AlertIncidentId != null
                         && ids.Contains(t.AlertIncidentId!.Value)
                         && t.Status != TicketStatus.Closed
-                        && t.Status != TicketStatus.Rejected)
+                        && t.Status != TicketStatus.Rejected
+                        && t.Status != TicketStatus.Merged)
             .ToListAsync(ct);
 
         foreach (Ticket ticket in open)

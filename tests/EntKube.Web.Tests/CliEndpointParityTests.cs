@@ -96,6 +96,7 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
                 [
                     "--cluster", "{}", "--id", "{}", "--app", "{}", "--query", "{}",
                     "--workload", "{}", "--environment", "{}", "--namespace", "{}", "--name", "{}",
+                    "--ticket", "{}", "--tag", "{}", "--link", "{}",
                 ])));
             }
             catch (CliUsageException)
@@ -110,6 +111,7 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
             {
                 CliVerb.Get => "GET",
                 CliVerb.Post => "POST",
+                CliVerb.Put => "PUT",
                 CliVerb.Delete => "DELETE",
                 _ => throw new InvalidOperationException(
                     $"CliVerb.{command.Verb} is not mapped here; add it rather than letting it "

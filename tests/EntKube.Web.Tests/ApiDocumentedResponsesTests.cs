@@ -46,8 +46,12 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
     /// <para>⚠️ Pinned precisely because a 204 is the one excuse from describing a body. Left
     /// unpinned, the count above could be driven to 0 by declaring success bodyless rather than
     /// by describing it.</para>
+    ///
+    /// <para>2 → 4: removing a ticket link and clearing a ticket's reminder are deletions with
+    /// nothing to return. Removing a <em>tag</em> is not among them: it answers the tags left, which
+    /// is what a caller adjusting a set needs to see.</para>
     /// </summary>
-    private const int BodylessSuccesses = 2;
+    private const int BodylessSuccesses = 4;
 
     /// <param name="StatedScope">
     /// Null when the document says any live token suffices — the case where the filter has

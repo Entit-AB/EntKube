@@ -2,6 +2,7 @@
 @using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Time
+@using EntKube.Web.Services.Support
 @using Microsoft.EntityFrameworkCore
 @inject TimeService Time
 @inject IDbContextFactory<SupportDbContext> DbFactory
@@ -32,11 +33,11 @@
         <div class="row g-2 align-items-end">
             <div class="col-md-3">
                 <label class="form-label small text-muted">From</label>
-                <input type="datetime-local" class="form-control form-control-sm" @bind="from" />
+                <input type="datetime-local" class="form-control form-control-sm" @bind="from" @bind:format="yyyy-MM-ddTHH:mm" />
             </div>
             <div class="col-md-3">
                 <label class="form-label small text-muted">To</label>
-                <input type="datetime-local" class="form-control form-control-sm" @bind="to" />
+                <input type="datetime-local" class="form-control form-control-sm" @bind="to" @bind:format="yyyy-MM-ddTHH:mm" />
             </div>
             <div class="col-md-3">
                 <label class="form-label small text-muted">Kind</label>
@@ -82,9 +83,9 @@ else
                 {
                     <tr>
                         <td class="small">
-                            @entry.StartedAt.ToLocalTime().ToString("MMM d HH:mm")
+                            @BusinessCalendar.ToLocal(entry.StartedAt).ToString("MMM d HH:mm")
                             –
-                            @entry.EndedAt.ToLocalTime().ToString("HH:mm")
+                            @BusinessCalendar.ToLocal(entry.EndedAt).ToString("HH:mm")
                         </td>
                         <td class="small">@Hours((decimal)(entry.EndedAt - entry.StartedAt).TotalHours)</td>
                         <td class="small text-muted">@entry.Kind</td>
@@ -133,8 +134,10 @@ else
     private List<TimeEntry> entries = [];
     private bool logging;
 
-    private DateTime? from = DateTime.Now.AddHours(-1);
-    private DateTime? to = DateTime.Now;
+    // Swedish wall-clock time, which is what the person entering it counts in — not the server's
+    // own zone, which in a container is UTC.
+    private DateTime? from = BusinessCalendar.ToLocal(DateTime.UtcNow).AddHours(-1);
+    private DateTime? to = BusinessCalendar.ToLocal(DateTime.UtcNow);
     private WorkKind kind = WorkKind.Management;
     private string description = "";
 
@@ -186,7 +189,10 @@ else
         {
             await Time.LogAsync(
                 Ticket.TenantId, Ticket.CustomerId, Ticket.AppId, Ticket.Id,
-                from.Value.ToUniversalTime(), to.Value.ToUniversalTime(),
+                // ⚠️ Not ToUniversalTime(): on a time with no zone that applies the SERVER's offset,
+                // so on a UTC host a Swedish 09:00 was stored as 09:00 UTC — billable work one or
+                // two hours off. The picker's value is Swedish time, and is converted as such.
+                Swedish(from.Value), Swedish(to.Value),
                 kind, description, Actor);
 
             logging = false;
@@ -210,4 +216,7 @@ else
     }
 
     private static string Hours(decimal hours) => $"{hours:0.##} h";
+
+    private static DateTime Swedish(DateTime wallClock) =>
+        TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(wallClock, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime);
 }

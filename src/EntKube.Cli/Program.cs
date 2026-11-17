@@ -54,9 +54,11 @@ public static class Program
         }
 
         string path;
+        object? body;
         try
         {
             path = command.BuildPath(parsed);
+            body = command.BuildBody?.Invoke(parsed);
         }
         catch (CliUsageException ex)
         {
@@ -66,12 +68,19 @@ public static class Program
 
         using EntKubeApiClient api = new(baseUrl, token);
 
-        ApiResult result = command.Verb switch
-        {
-            CliVerb.Post => await api.PostAsync(path),
-            CliVerb.Delete => await api.DeleteAsync(path),
-            _ => await api.GetAsync(path),
-        };
+        ApiResult result = body is not null
+            ? await api.SendJsonAsync(command.Verb switch
+                {
+                    CliVerb.Put => HttpMethod.Put,
+                    CliVerb.Delete => HttpMethod.Delete,
+                    _ => HttpMethod.Post,
+                }, path, body)
+            : command.Verb switch
+            {
+                CliVerb.Post => await api.PostAsync(path),
+                CliVerb.Delete => await api.DeleteAsync(path),
+                _ => await api.GetAsync(path),
+            };
 
         return Render(result, parsed, command, Console.Out, Console.Error);
     }

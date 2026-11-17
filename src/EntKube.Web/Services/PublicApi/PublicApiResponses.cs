@@ -1800,3 +1800,86 @@ public sealed record DrGapResponse(
             Detail: gap.Detail,
             Remediation: gap.Remediation);
 }
+
+// ── Tickets (docs/helpdesk.md, phase 1b) ─────────────────────────────────────────────────
+//
+// Mapped by hand from the Support contract's records, for the reason ClusterRateResponse is:
+// a published wire shape should not move because an internal record gained a field.
+
+/// <summary>One of a ticket's agreement clocks.</summary>
+/// <param name="Deadline">When it runs out; null when this priority sets no target.</param>
+/// <param name="MetAt">When it was met, if it was.</param>
+/// <param name="Breached">Missed — met late, or still open past the deadline.</param>
+/// <param name="Paused">Stopped while another party is waited on (§14.4).</param>
+public sealed record TicketClockResponse(DateTime? Deadline, DateTime? MetAt, bool Breached, bool Paused)
+{
+    public static TicketClockResponse From(EntKube.Contracts.Support.TicketClock c) =>
+        new(c.Deadline, c.MetAt, c.Breached, c.Paused);
+}
+
+/// <summary>A ticket as the queue lists it.</summary>
+public sealed record TicketSummaryResponse(
+    Guid Id,
+    int Number,
+    string Title,
+    string Status,
+    string Priority,
+    bool PriorityConfirmed,
+    Guid CustomerId,
+    string Customer,
+    string? Assignee,
+    IEnumerable<string> Tags,
+    DateTime ReportedAt,
+    DateTime? ReminderAt,
+    TicketClockResponse Response,
+    TicketClockResponse Resolution,
+    DateTime? UpdateDue,
+    bool PenaltyDeviation)
+{
+    public static TicketSummaryResponse From(EntKube.Contracts.Support.TicketSummary t) =>
+        new(t.Id, t.Number, t.Title, t.Status, t.Priority, t.PriorityConfirmed, t.CustomerId, t.Customer,
+            t.Assignee, [.. t.Tags], t.ReportedAt, t.ReminderAt,
+            TicketClockResponse.From(t.Response), TicketClockResponse.From(t.Resolution),
+            t.UpdateDue, t.PenaltyDeviation);
+}
+
+/// <summary>One entry on a ticket's history.</summary>
+/// <param name="FromMergedNumber">The duplicate it came from, when it was merged into this ticket.</param>
+public sealed record TicketEntryResponse(
+    Guid Id, DateTime At, string Kind, string? Actor, string Detail, bool CustomerVisible, int? FromMergedNumber)
+{
+    public static TicketEntryResponse From(EntKube.Contracts.Support.TicketEntry e) =>
+        new(e.Id, e.At, e.Kind, e.Actor, e.Detail, e.CustomerVisible, e.FromMergedNumber);
+}
+
+/// <summary>A link to another ticket, seen from this one.</summary>
+/// <param name="Role">What the other ticket is to this one: related, parent or child.</param>
+public sealed record TicketLinkResponse(Guid LinkId, string Role, int Number, string Title, string Status)
+{
+    public static TicketLinkResponse From(EntKube.Contracts.Support.TicketLinkSummary l) =>
+        new(l.LinkId, l.Role, l.Number, l.Title, l.Status);
+}
+
+/// <summary>One ticket in full: the summary, its description, links and whole history.</summary>
+/// <param name="MergedInto">For a merged duplicate, the number of the ticket it went into.</param>
+public sealed record TicketResponse(
+    TicketSummaryResponse Ticket,
+    string Description,
+    string? ReminderNote,
+    DateTime? AutoCloseAt,
+    int? MergedInto,
+    IEnumerable<TicketLinkResponse> Links,
+    IEnumerable<TicketEntryResponse> History)
+{
+    public static TicketResponse From(EntKube.Contracts.Support.TicketView v) =>
+        new(TicketSummaryResponse.From(v.Summary), v.Description, v.ReminderNote, v.AutoCloseAt, v.MergedInto,
+            [.. v.Links.Select(TicketLinkResponse.From)], [.. v.History.Select(TicketEntryResponse.From)]);
+}
+
+/// <summary>A ticket's tags after a change.</summary>
+public sealed record TicketTagsResponse(int Number, IEnumerable<string> Tags);
+
+/// <summary>What a merge did.</summary>
+/// <param name="RecordedAsResponse">The duplicate had no response; the merge became its first.</param>
+/// <param name="ResponseWasLate">That response, or an earlier one, missed its deadline. A merge never erases that.</param>
+public sealed record TicketMergeResponse(int Duplicate, int Original, bool RecordedAsResponse, bool ResponseWasLate);

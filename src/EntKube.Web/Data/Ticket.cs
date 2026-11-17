@@ -79,6 +79,14 @@ public enum TicketStatus
     /// still billable and it does not count as an SLA deviation.
     /// </summary>
     Rejected = 5,
+
+    /// <summary>
+    /// A duplicate, folded into another ticket (<see cref="Ticket.MergedIntoTicketId"/>).
+    /// Terminal, like <see cref="Closed"/>: its clocks stop at the merge, but its own record —
+    /// its first response, any breach — stands. A merge never erases a §14.6 deviation;
+    /// excluding the duplicate from the SLA is a separate act with a reason and a name.
+    /// </summary>
+    Merged = 6,
 }
 
 /// <summary>Who a paused ticket is waiting for (§14.4).</summary>
@@ -263,6 +271,33 @@ public class Ticket
 
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// When somebody wants to be reminded to look at this again — Zammad's "pending
+    /// reminder". Deliberately an attribute and not a status: it must never stop a §14.4
+    /// clock, because only the agreement decides what stops the clock (a documented
+    /// <see cref="TicketPause"/>). Null is "no reminder".
+    /// </summary>
+    public DateTime? ReminderAt { get; set; }
+
+    /// <summary>What the reminder is for, in the words of whoever set it.</summary>
+    public string? ReminderNote { get; set; }
+
+    /// <summary>
+    /// When the reminder mail went out. Claimed with a conditional update, so that with
+    /// several instances running exactly one of them sends it. Cleared whenever the
+    /// reminder is set again.
+    /// </summary>
+    public DateTime? ReminderSentAt { get; set; }
+
+    /// <summary>
+    /// For a <see cref="TicketStatus.Resolved"/> ticket: when it closes by itself unless it
+    /// is reopened first — Zammad's "pending close". Null means it waits for a person.
+    /// </summary>
+    public DateTime? AutoCloseAt { get; set; }
+
+    /// <summary>The ticket this one was merged into, when its status is <see cref="TicketStatus.Merged"/>.</summary>
+    public Guid? MergedIntoTicketId { get; set; }
+
     // Navigation
     public Tenant Tenant { get; set; } = null!;
     public Customer Customer { get; set; } = null!;
@@ -270,6 +305,7 @@ public class Ticket
     public List<TicketEvent> Events { get; set; } = [];
     public List<TicketPause> Pauses { get; set; } = [];
     public List<TicketAffectedApp> AffectedApps { get; set; } = [];
+    public List<TicketTag> Tags { get; set; } = [];
 }
 
 /// <summary>

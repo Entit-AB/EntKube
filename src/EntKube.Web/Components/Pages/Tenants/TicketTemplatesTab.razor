@@ -1,0 +1,232 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketTemplateService Templates
+@inject TicketChecklistService Checklists
+@inject TenantService TenantService
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* Ticket templates (for the agent's new-ticket form) and checklist templates (for a ticket's
+   checklist) — both describe a kind of work rather than one piece of it. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Ticket templates</h6>
+            <div class="text-muted small">Prefill the new-ticket form. Applying one fills only the fields still empty.</div>
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="() => EditTemplate(new TicketTemplate { Name = string.Empty })"><i class="bi bi-plus me-1"></i>New template</button>
+    </div>
+
+    @if (template is not null)
+    {
+        <div class="card mb-3" data-test="ticket-template-form">
+            <div class="card-body small">
+                <div class="row g-2">
+                    <div class="col-md-4"><label class="form-label text-muted">Name</label><input class="form-control form-control-sm" @bind="template.Name" /></div>
+                    <div class="col-md-8"><label class="form-label text-muted">Title</label><input class="form-control form-control-sm" @bind="template.Title" /></div>
+                    <div class="col-12"><label class="form-label text-muted">Description</label><textarea class="form-control form-control-sm" rows="3" @bind="template.Description"></textarea></div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted">Proposed priority</label>
+                        <select class="form-select form-select-sm" @bind="priorityChoice">
+                            <option value="">none</option>
+                            @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                            {
+                                <option value="@p">@p</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label text-muted">Customer</label>
+                        <select class="form-select form-select-sm" @bind="customerChoice">
+                            <option value="">none</option>
+                            @foreach (Customer c in customers)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-4"><label class="form-label text-muted">Tags</label><input class="form-control form-control-sm" @bind="template.Tags" /></div>
+                    <div class="col-12 d-flex justify-content-between">
+                        <div class="form-check"><input class="form-check-input" type="checkbox" id="tt-active" @bind="template.IsActive" /><label class="form-check-label" for="tt-active">Active</label></div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => template = null">Cancel</button>
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveTemplateAsync">Save</AsyncButton>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    <table class="table table-sm align-middle small mb-4">
+        <thead class="table-light"><tr><th>Name</th><th>Title</th><th>Active</th><th></th></tr></thead>
+        <tbody>
+            @foreach (TicketTemplate t in templates)
+            {
+                <tr>
+                    <td>@t.Name</td><td class="text-muted">@t.Title</td><td>@(t.IsActive ? "yes" : "no")</td>
+                    <td class="text-end">
+                        <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => EditTemplate(t)">Edit</button>
+                        <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTemplateAsync(t)">Delete</button>
+                    </td>
+                </tr>
+            }
+            @if (templates.Count == 0)
+            {
+                <tr><td colspan="4" class="text-muted">None yet.</td></tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Checklist templates</h6>
+            <div class="text-muted small">The steps of a kind of work, one per line. A line naming a ticket (<code>#1042</code>) is done when that ticket is.</div>
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="() => checklist = new ChecklistTemplate { Name = string.Empty }"><i class="bi bi-plus me-1"></i>New checklist template</button>
+    </div>
+
+    @if (checklist is not null)
+    {
+        <div class="card mb-3" data-test="checklist-template-form">
+            <div class="card-body small">
+                <label class="form-label text-muted">Name</label>
+                <input class="form-control form-control-sm mb-2" @bind="checklist.Name" />
+                <label class="form-label text-muted">Items, one per line</label>
+                <textarea class="form-control form-control-sm mb-2" rows="5" @bind="checklist.Items"></textarea>
+                <div class="d-flex justify-content-between">
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="ct-active" @bind="checklist.IsActive" /><label class="form-check-label" for="ct-active">Active</label></div>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => checklist = null">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveChecklistAsync">Save</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    <table class="table table-sm align-middle small">
+        <thead class="table-light"><tr><th>Name</th><th>Items</th><th>Active</th><th></th></tr></thead>
+        <tbody>
+            @foreach (ChecklistTemplate c in checklistTemplates)
+            {
+                <tr>
+                    <td>@c.Name</td><td class="text-muted">@c.Items.Split('\n').Length</td><td>@(c.IsActive ? "yes" : "no")</td>
+                    <td class="text-end">
+                        <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => checklist = new ChecklistTemplate { Id = c.Id, Name = c.Name, Items = c.Items, IsActive = c.IsActive }">Edit</button>
+                        <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteChecklistAsync(c)">Delete</button>
+                    </td>
+                </tr>
+            }
+            @if (checklistTemplates.Count == 0)
+            {
+                <tr><td colspan="4" class="text-muted">None yet.</td></tr>
+            }
+        </tbody>
+    </table>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<TicketTemplate> templates = [];
+    private List<ChecklistTemplate> checklistTemplates = [];
+    private List<Customer> customers = [];
+    private TicketTemplate? template;
+    private ChecklistTemplate? checklist;
+    private string priorityChoice = "";
+    private string customerChoice = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            customers = await TenantService.GetCustomersAsync(TenantId);
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        templates = await Templates.ListAsync(TenantId);
+        checklistTemplates = await Checklists.ListTemplatesAsync(TenantId);
+    }
+
+    private void EditTemplate(TicketTemplate t)
+    {
+        template = new TicketTemplate
+        {
+            Id = t.Id, Name = t.Name, Title = t.Title, Description = t.Description, Priority = t.Priority,
+            CustomerId = t.CustomerId, AppId = t.AppId, Tags = t.Tags, IsActive = t.IsActive,
+        };
+        priorityChoice = t.Priority?.ToString() ?? "";
+        customerChoice = t.CustomerId?.ToString() ?? "";
+    }
+
+    private async Task SaveTemplateAsync()
+    {
+        template!.Priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
+        Guid? customerId = Guid.TryParse(customerChoice, out Guid id) && customers.Any(c => c.Id == id) ? id : null;
+
+        if (customerId != template.CustomerId)
+        {
+            template.AppId = null;
+        }
+
+        template.CustomerId = customerId;
+
+        try
+        {
+            await Templates.SaveAsync(TenantId, template, await ActorService.NameAsync());
+            template = null;
+            await ReloadAsync();
+            Toasts.Success("Saved.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteTemplateAsync(TicketTemplate t)
+    {
+        await Templates.DeleteAsync(TenantId, t.Id);
+        await ReloadAsync();
+    }
+
+    private async Task SaveChecklistAsync()
+    {
+        try
+        {
+            await Checklists.SaveTemplateAsync(TenantId, checklist!, await ActorService.NameAsync());
+            checklist = null;
+            await ReloadAsync();
+            Toasts.Success("Saved.");
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteChecklistAsync(ChecklistTemplate c)
+    {
+        await Checklists.DeleteTemplateAsync(TenantId, c.Id);
+        await ReloadAsync();
+    }
+}

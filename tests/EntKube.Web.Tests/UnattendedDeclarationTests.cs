@@ -56,6 +56,7 @@ public class UnattendedDeclarationTests
         "SupplyChainScanService:supply-chain-scan",
         "SupportMailPoller:support-mail-poller",
         "TelemetryAlertEvaluator:telemetry-alert-evaluator",
+        "TicketFollowUpSweep:ticket-follow-up",
         "ErrorScanSweep:error-scan",
         "SloTallySweep:slo-tally",
         "SyntheticCheckRunner:synthetic-check-retention",

@@ -226,6 +226,16 @@ public class BackupService(
             TicketEvents = await db.TicketEvents.AsNoTracking().ToListAsync(),
             TicketPauses = await db.TicketPauses.AsNoTracking().ToListAsync(),
             TicketAffectedApps = await db.TicketAffectedApps.AsNoTracking().ToListAsync(),
+            TicketTags = await db.TicketTags.AsNoTracking().ToListAsync(),
+            TicketLinks = await db.TicketLinks.AsNoTracking().ToListAsync(),
+            TicketSubscriptions = await db.TicketSubscriptions.AsNoTracking().ToListAsync(),
+            TextModules = await db.TextModules.AsNoTracking().ToListAsync(),
+            TicketTemplates = await db.TicketTemplates.AsNoTracking().ToListAsync(),
+            Macros = await db.Macros.AsNoTracking().ToListAsync(),
+            TicketChecklists = await db.TicketChecklists.AsNoTracking().ToListAsync(),
+            TicketChecklistItems = await db.TicketChecklistItems.AsNoTracking().ToListAsync(),
+            ChecklistTemplates = await db.ChecklistTemplates.AsNoTracking().ToListAsync(),
+            TicketDrafts = await db.TicketDrafts.AsNoTracking().ToListAsync(),
             TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
             WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
             AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
@@ -584,6 +594,16 @@ public class BackupService(
             await InsertEntities(db, db.TicketEvents, bundle.TicketEvents);
             await InsertEntities(db, db.TicketPauses, bundle.TicketPauses);
             await InsertEntities(db, db.TicketAffectedApps, bundle.TicketAffectedApps);
+            await InsertEntities(db, db.TicketTags, bundle.TicketTags);
+            await InsertEntities(db, db.TicketLinks, bundle.TicketLinks);
+            await InsertEntities(db, db.TicketSubscriptions, bundle.TicketSubscriptions);
+            await InsertEntities(db, db.TextModules, bundle.TextModules);
+            await InsertEntities(db, db.TicketTemplates, bundle.TicketTemplates);
+            await InsertEntities(db, db.Macros, bundle.Macros);
+            await InsertEntities(db, db.TicketChecklists, bundle.TicketChecklists);
+            await InsertEntities(db, db.TicketChecklistItems, bundle.TicketChecklistItems);
+            await InsertEntities(db, db.ChecklistTemplates, bundle.ChecklistTemplates);
+            await InsertEntities(db, db.TicketDrafts, bundle.TicketDrafts);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);

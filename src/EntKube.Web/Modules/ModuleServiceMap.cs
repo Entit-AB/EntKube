@@ -243,6 +243,7 @@ public static partial class ModuleMap
 
         // ---- Support ---------------------------------------------------------------
         [typeof(Api.SupportApi)] = Module.Support,
+        [typeof(Api.TicketApi)] = Module.Support,
         [typeof(EntKube.Web.Services.Contracts.ContractService)] = Module.Support,
         [typeof(JiraAdapter)] = Module.Support,
         [typeof(EntKube.Web.Services.Knowledge.KnowledgeService)] = Module.Support,
@@ -260,6 +261,16 @@ public static partial class ModuleMap
         [typeof(TicketBridgeService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketNotifier)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketWorkService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketOverviews)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketBulkService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TextModuleService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketTemplateService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.MacroService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketChecklistService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketDraftService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketFollowUp)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketFollowUpSweep)] = Module.Support,
         [typeof(EntKube.Web.Services.Time.TimeService)] = Module.Support,
 
         // ---- Advisor ---------------------------------------------------------------

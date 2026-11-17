@@ -1321,6 +1321,219 @@ public sealed record SyntheticCheckResponse
     public DateTime? LastRunAt { get; init; }
 }
 
+/// <summary>The <c>TicketClockResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketClockResponse
+{
+    [JsonPropertyName("deadline")]
+    public DateTime? Deadline { get; init; }
+
+    [JsonPropertyName("metAt")]
+    public DateTime? MetAt { get; init; }
+
+    [JsonPropertyName("breached")]
+    public bool Breached { get; init; }
+
+    [JsonPropertyName("paused")]
+    public bool Paused { get; init; }
+}
+
+/// <summary>The <c>TicketEntryResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketEntryResponse
+{
+    [JsonPropertyName("id")]
+    public Guid Id { get; init; }
+
+    [JsonPropertyName("at")]
+    public DateTime At { get; init; }
+
+    [JsonPropertyName("kind")]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("actor")]
+    public string? Actor { get; init; }
+
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+
+    [JsonPropertyName("customerVisible")]
+    public bool CustomerVisible { get; init; }
+
+    [JsonPropertyName("fromMergedNumber")]
+    public int? FromMergedNumber { get; init; }
+}
+
+/// <summary>The <c>TicketLinkInput</c> schema, as the document defines it.</summary>
+public sealed record TicketLinkInput
+{
+    [JsonPropertyName("number")]
+    public int Number { get; init; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; init; }
+}
+
+/// <summary>The <c>TicketLinkResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketLinkResponse
+{
+    [JsonPropertyName("linkId")]
+    public Guid LinkId { get; init; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; init; }
+
+    [JsonPropertyName("number")]
+    public int Number { get; init; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
+}
+
+/// <summary>The <c>TicketMergeInput</c> schema, as the document defines it.</summary>
+public sealed record TicketMergeInput
+{
+    [JsonPropertyName("into")]
+    public int Into { get; init; }
+
+    [JsonPropertyName("excludeFromSla")]
+    public bool? ExcludeFromSla { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+}
+
+/// <summary>The <c>TicketMergeResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketMergeResponse
+{
+    [JsonPropertyName("duplicate")]
+    public int Duplicate { get; init; }
+
+    [JsonPropertyName("original")]
+    public int Original { get; init; }
+
+    [JsonPropertyName("recordedAsResponse")]
+    public bool RecordedAsResponse { get; init; }
+
+    [JsonPropertyName("responseWasLate")]
+    public bool ResponseWasLate { get; init; }
+}
+
+/// <summary>The <c>TicketNoteInput</c> schema, as the document defines it.</summary>
+public sealed record TicketNoteInput
+{
+    [JsonPropertyName("text")]
+    public string? Text { get; init; }
+
+    [JsonPropertyName("customerVisible")]
+    public bool? CustomerVisible { get; init; }
+}
+
+/// <summary>The <c>TicketReminderInput</c> schema, as the document defines it.</summary>
+public sealed record TicketReminderInput
+{
+    [JsonPropertyName("at")]
+    public DateTime At { get; init; }
+
+    [JsonPropertyName("note")]
+    public string? Note { get; init; }
+}
+
+/// <summary>The <c>TicketResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketResponse
+{
+    [JsonPropertyName("ticket")]
+    public TicketSummaryResponse? Ticket { get; init; }
+
+    [JsonPropertyName("description")]
+    public string? Description { get; init; }
+
+    [JsonPropertyName("reminderNote")]
+    public string? ReminderNote { get; init; }
+
+    [JsonPropertyName("autoCloseAt")]
+    public DateTime? AutoCloseAt { get; init; }
+
+    [JsonPropertyName("mergedInto")]
+    public int? MergedInto { get; init; }
+
+    [JsonPropertyName("links")]
+    public IReadOnlyList<TicketLinkResponse?>? Links { get; init; }
+
+    [JsonPropertyName("history")]
+    public IReadOnlyList<TicketEntryResponse?>? History { get; init; }
+}
+
+/// <summary>The <c>TicketSummaryResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketSummaryResponse
+{
+    [JsonPropertyName("id")]
+    public Guid Id { get; init; }
+
+    [JsonPropertyName("number")]
+    public int Number { get; init; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
+
+    [JsonPropertyName("priority")]
+    public string? Priority { get; init; }
+
+    [JsonPropertyName("priorityConfirmed")]
+    public bool PriorityConfirmed { get; init; }
+
+    [JsonPropertyName("customerId")]
+    public Guid CustomerId { get; init; }
+
+    [JsonPropertyName("customer")]
+    public string? Customer { get; init; }
+
+    [JsonPropertyName("assignee")]
+    public string? Assignee { get; init; }
+
+    [JsonPropertyName("tags")]
+    public IReadOnlyList<string?>? Tags { get; init; }
+
+    [JsonPropertyName("reportedAt")]
+    public DateTime ReportedAt { get; init; }
+
+    [JsonPropertyName("reminderAt")]
+    public DateTime? ReminderAt { get; init; }
+
+    [JsonPropertyName("response")]
+    public TicketClockResponse? Response { get; init; }
+
+    [JsonPropertyName("resolution")]
+    public TicketClockResponse? Resolution { get; init; }
+
+    [JsonPropertyName("updateDue")]
+    public DateTime? UpdateDue { get; init; }
+
+    [JsonPropertyName("penaltyDeviation")]
+    public bool PenaltyDeviation { get; init; }
+}
+
+/// <summary>The <c>TicketTagInput</c> schema, as the document defines it.</summary>
+public sealed record TicketTagInput
+{
+    [JsonPropertyName("tag")]
+    public string? Tag { get; init; }
+}
+
+/// <summary>The <c>TicketTagsResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketTagsResponse
+{
+    [JsonPropertyName("number")]
+    public int Number { get; init; }
+
+    [JsonPropertyName("tags")]
+    public IReadOnlyList<string?>? Tags { get; init; }
+}
+
 /// <summary>The <c>UpgradeReportResponse</c> schema, as the document defines it.</summary>
 public sealed record UpgradeReportResponse
 {
@@ -1426,6 +1639,36 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
         return ApiResponse<OkResponse>.From(result);
     }
 
+    /// <summary><c>POST /api/v1/tickets/{number}/notes</c></summary>
+    public async Task<ApiResponse<OkResponse>> AddTicketNoteAsync(
+        int number, TicketNoteInput body, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/notes";
+
+        ApiResult result = await transport.SendJsonAsync(HttpMethod.Post, path, body, ct);
+        return ApiResponse<OkResponse>.From(result);
+    }
+
+    /// <summary><c>POST /api/v1/tickets/{number}/tags</c></summary>
+    public async Task<ApiResponse<TicketTagsResponse>> AddTicketTagAsync(
+        int number, TicketTagInput body, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/tags";
+
+        ApiResult result = await transport.SendJsonAsync(HttpMethod.Post, path, body, ct);
+        return ApiResponse<TicketTagsResponse>.From(result);
+    }
+
+    /// <summary><c>DELETE /api/v1/tickets/{number}/reminder</c></summary>
+    public async Task<ApiResponse> ClearTicketReminderAsync(
+        int number, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/reminder";
+
+        ApiResult result = await transport.DeleteAsync(path, ct);
+        return ApiResponse.From(result);
+    }
+
     /// <summary><c>DELETE /api/v1/cost-rates/{clusterId}</c></summary>
     public async Task<ApiResponse> DeleteCostRateAsync(
         Guid clusterId, CancellationToken ct = default)
@@ -1482,6 +1725,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
         return ApiResponse<IReadOnlyList<DrStatusResponse?>>.From(result);
     }
 
+    /// <summary><c>GET /api/v1/tickets/{number}</c></summary>
+    public async Task<ApiResponse<TicketResponse>> GetTicketAsync(
+        int number, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}";
+
+        ApiResult result = await transport.GetAsync(path, ct);
+        return ApiResponse<TicketResponse>.From(result);
+    }
+
     /// <summary><c>GET /api/v1/whoami</c></summary>
     public async Task<ApiResponse<WhoAmIResponse>> GetWhoamiAsync(
         CancellationToken ct = default)
@@ -1490,6 +1743,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
 
         ApiResult result = await transport.GetAsync(path, ct);
         return ApiResponse<WhoAmIResponse>.From(result);
+    }
+
+    /// <summary><c>POST /api/v1/tickets/{number}/links</c></summary>
+    public async Task<ApiResponse<TicketLinkResponse>> LinkTicketAsync(
+        int number, TicketLinkInput body, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/links";
+
+        ApiResult result = await transport.SendJsonAsync(HttpMethod.Post, path, body, ct);
+        return ApiResponse<TicketLinkResponse>.From(result);
     }
 
     /// <summary><c>GET /api/v1/advisor/findings</c></summary>
@@ -1657,6 +1920,17 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
         return ApiResponse<IReadOnlyList<SyntheticCheckResponse?>>.From(result);
     }
 
+    /// <summary><c>GET /api/v1/tickets</c></summary>
+    public async Task<ApiResponse<IReadOnlyList<TicketSummaryResponse?>>> ListTicketsAsync(
+        string? view = null, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets" + EntKubeApiClient.QueryString(
+            ("view", view));
+
+        ApiResult result = await transport.GetAsync(path, ct);
+        return ApiResponse<IReadOnlyList<TicketSummaryResponse?>>.From(result);
+    }
+
     /// <summary><c>GET /api/v1/upgrades</c></summary>
     public async Task<ApiResponse<UpgradeReportResponse>> ListUpgradesAsync(
         CancellationToken ct = default)
@@ -1675,6 +1949,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
 
         ApiResult result = await transport.GetAsync(path, ct);
         return ApiResponse<VirtualMachineListResponse>.From(result);
+    }
+
+    /// <summary><c>POST /api/v1/tickets/{number}/merge</c></summary>
+    public async Task<ApiResponse<TicketMergeResponse>> MergeTicketAsync(
+        int number, TicketMergeInput body, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/merge";
+
+        ApiResult result = await transport.SendJsonAsync(HttpMethod.Post, path, body, ct);
+        return ApiResponse<TicketMergeResponse>.From(result);
     }
 
     /// <summary><c>POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/migrate</c></summary>
@@ -1708,6 +1992,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
 
         ApiResult result = await transport.GetAsync(path, ct);
         return ApiResponse<LogQueryResponse>.From(result);
+    }
+
+    /// <summary><c>DELETE /api/v1/tickets/{number}/tags/{tag}</c></summary>
+    public async Task<ApiResponse<TicketTagsResponse>> RemoveTicketTagAsync(
+        int number, string tag, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/tags/{Uri.EscapeDataString(tag)}";
+
+        ApiResult result = await transport.DeleteAsync(path, ct);
+        return ApiResponse<TicketTagsResponse>.From(result);
     }
 
     /// <summary><c>POST /api/v1/deployments/{deploymentId}/restart</c></summary>
@@ -1814,6 +2108,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
         return ApiResponse<ClusterRateResponse>.From(result);
     }
 
+    /// <summary><c>PUT /api/v1/tickets/{number}/reminder</c></summary>
+    public async Task<ApiResponse<OkResponse>> SetTicketReminderAsync(
+        int number, TicketReminderInput body, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/reminder";
+
+        ApiResult result = await transport.SendJsonAsync(HttpMethod.Put, path, body, ct);
+        return ApiResponse<OkResponse>.From(result);
+    }
+
     /// <summary><c>POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/start</c></summary>
     public async Task<ApiResponse<VirtualMachineActionResponse>> StartVirtualMachineAsync(
         Guid clusterId, string ns, string name, CancellationToken ct = default)
@@ -1853,6 +2157,16 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
 
         ApiResult result = await transport.PostAsync(path, ct);
         return ApiResponse<DeploymentSyncResponse>.From(result);
+    }
+
+    /// <summary><c>DELETE /api/v1/tickets/{number}/links/{linkId}</c></summary>
+    public async Task<ApiResponse> UnlinkTicketAsync(
+        int number, Guid linkId, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/{Uri.EscapeDataString(number.ToString())}/links/{Uri.EscapeDataString(linkId.ToString())}";
+
+        ApiResult result = await transport.DeleteAsync(path, ct);
+        return ApiResponse.From(result);
     }
 
     /// <summary><c>POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/unpause</c></summary>

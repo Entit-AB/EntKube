@@ -14,6 +14,9 @@ namespace EntKube.Web.Data.Modules;
 /// </summary>
 internal static class SupportModel
 {
+    /// <summary>The longest tag name stored. Long enough for a phrase, short enough to be a label.</summary>
+    internal const int TicketTagNameMaxLength = 50;
+
     internal static void Configure(ModelBuilder builder)
     {
         // Table names, stated rather than inferred.
@@ -47,6 +50,16 @@ internal static class SupportModel
         builder.Entity<TicketAffectedApp>().ToTable("TicketAffectedApps");
         builder.Entity<TicketBridgeConnection>().ToTable("TicketBridgeConnections");
         builder.Entity<TicketEvent>().ToTable("TicketEvents");
+        builder.Entity<TicketLink>().ToTable("TicketLinks");
+        builder.Entity<TicketSubscription>().ToTable("TicketSubscriptions");
+        builder.Entity<TicketTag>().ToTable("TicketTags");
+        builder.Entity<TextModule>().ToTable("TextModules");
+        builder.Entity<TicketTemplate>().ToTable("TicketTemplates");
+        builder.Entity<Macro>().ToTable("Macros");
+        builder.Entity<TicketChecklist>().ToTable("TicketChecklists");
+        builder.Entity<TicketChecklistItem>().ToTable("TicketChecklistItems");
+        builder.Entity<ChecklistTemplate>().ToTable("ChecklistTemplates");
+        builder.Entity<TicketDraft>().ToTable("TicketDrafts");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -180,6 +193,14 @@ internal static class SupportModel
             // monthly report reads for a period.
             entity.HasIndex(t => new { t.CustomerId, t.Status, t.Priority });
             entity.HasIndex(t => new { t.TenantId, t.ReportedAt });
+
+            // The follow-up sweep's two questions, per tenant: whose reminder is due, and
+            // which resolved ticket closes now.
+            entity.HasIndex(t => new { t.TenantId, t.ReminderAt });
+            entity.HasIndex(t => new { t.TenantId, t.AutoCloseAt });
+            entity.HasIndex(t => t.MergedIntoTicketId);
+
+            entity.Property(t => t.ReminderNote).HasMaxLength(500);
             entity.HasIndex(t => t.AppId);
 
             entity.HasOne(t => t.Tenant)
@@ -210,6 +231,121 @@ internal static class SupportModel
                   .WithMany(t => t.Events)
                   .HasForeignKey(e => e.TicketId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketTag>(entity =>
+        {
+            entity.HasKey(t => new { t.TicketId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(TicketTagNameMaxLength);
+
+            // The vocabulary is read per tenant through the ticket; this one serves "which
+            // tickets carry this tag", which overviews and search ask.
+            entity.HasIndex(t => t.Name);
+
+            entity.HasOne(t => t.Ticket)
+                  .WithMany(t => t.Tags)
+                  .HasForeignKey(t => t.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+            entity.HasIndex(l => new { l.FromTicketId, l.ToTicketId, l.Kind }).IsUnique();
+            entity.HasIndex(l => l.ToTicketId);
+            entity.HasIndex(l => l.TenantId);
+
+            // Cascade from both ends. SQL Server refuses two cascade paths into one table, so
+            // the second end is NoAction there and the service deletes those rows itself —
+            // which it does anyway, because a ticket is never deleted while it has links
+            // through anything but a tenant purge, and that deletes in its own order.
+            entity.HasOne(l => l.FromTicket)
+                  .WithMany()
+                  .HasForeignKey(l => l.FromTicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(l => l.ToTicket)
+                  .WithMany()
+                  .HasForeignKey(l => l.ToTicketId)
+                  .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<TicketSubscription>(entity =>
+        {
+            entity.HasKey(s => new { s.TicketId, s.UserId });
+            entity.Property(s => s.UserId).HasMaxLength(450);
+            entity.HasIndex(s => s.UserId);
+
+            entity.HasOne(s => s.Ticket)
+                  .WithMany()
+                  .HasForeignKey(s => s.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── Ticket tools (docs/helpdesk.md, phase 2a) ──
+
+        builder.Entity<TextModule>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.TenantId, m.Name });
+            entity.Property(m => m.Name).HasMaxLength(200);
+            entity.Property(m => m.Keywords).HasMaxLength(500);
+            entity.HasOne(m => m.Tenant).WithMany().HasForeignKey(m => m.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketTemplate>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => new { t.TenantId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(200);
+            entity.Property(t => t.Tags).HasMaxLength(500);
+            entity.HasOne(t => t.Tenant).WithMany().HasForeignKey(t => t.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<Macro>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.TenantId, m.Name });
+            entity.Property(m => m.Name).HasMaxLength(200);
+            entity.Property(m => m.AddTags).HasMaxLength(500);
+            entity.Property(m => m.RemoveTags).HasMaxLength(500);
+            entity.HasOne(m => m.Tenant).WithMany().HasForeignKey(m => m.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketChecklist>(entity =>
+        {
+            entity.HasKey(c => c.TicketId);
+            entity.Property(c => c.Title).HasMaxLength(200);
+            entity.HasOne(c => c.Ticket).WithOne().HasForeignKey<TicketChecklist>(c => c.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketChecklistItem>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+            entity.HasIndex(i => new { i.TicketId, i.SortOrder });
+            entity.Property(i => i.Text).HasMaxLength(500);
+            entity.HasOne(i => i.Checklist).WithMany(c => c.Items).HasForeignKey(i => i.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ChecklistTemplate>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => new { t.TenantId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(200);
+            entity.HasOne(t => t.Tenant).WithMany().HasForeignKey(t => t.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketDraft>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.HasIndex(d => new { d.TicketId, d.Kind, d.OwnerUserId });
+            entity.HasIndex(d => new { d.TenantId, d.Kind });
+            entity.Property(d => d.OwnerUserId).HasMaxLength(450);
+            entity.Property(d => d.Name).HasMaxLength(200);
+            entity.Property(d => d.Title).HasMaxLength(500);
+            entity.Property(d => d.Tags).HasMaxLength(500);
+
+            entity.HasOne(d => d.Ticket).WithMany().HasForeignKey(d => d.TicketId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TicketPause>(entity =>

@@ -130,6 +130,35 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
             // caller's tenant when nothing matches — so the id is never joined to the tenant's
             // computed finding set, and an arbitrary key creates a junk row rather than a 404.
             // Confined because the row carries the caller's own tenant either way.
+            ["GET /api/v1/tickets"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "TicketOverviews reads the token tenant's queue; there is no tenant parameter."),
+            ["GET /api/v1/tickets/{number}"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The number is resolved inside the token's tenant (FindByNumberAsync); another "
+                 + "tenant's number is no ticket here and answers 404."),
+            ["POST /api/v1/tickets/{number}/tags"] =
+                (TenantReach.ConfinedToTheTokenTenant, "Number resolved inside the token's tenant first."),
+            ["DELETE /api/v1/tickets/{number}/tags/{tag}"] =
+                (TenantReach.ConfinedToTheTokenTenant, "Number resolved inside the token's tenant first."),
+            ["POST /api/v1/tickets/{number}/links"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Both numbers are looked up inside the token's tenant; a link to another tenant's "
+                 + "ticket is refused as no such ticket."),
+            ["DELETE /api/v1/tickets/{number}/links/{linkId}"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The link row is matched on the token's tenant as well as on the ticket."),
+            ["POST /api/v1/tickets/{number}/merge"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Both the duplicate and the original are looked up inside the token's tenant, and "
+                 + "a merge across customers is refused besides."),
+            ["PUT /api/v1/tickets/{number}/reminder"] =
+                (TenantReach.ConfinedToTheTokenTenant, "Number resolved inside the token's tenant first."),
+            ["DELETE /api/v1/tickets/{number}/reminder"] =
+                (TenantReach.ConfinedToTheTokenTenant, "Number resolved inside the token's tenant first."),
+            ["POST /api/v1/tickets/{number}/notes"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Number resolved inside the token's tenant; AddEventAsync checks the tenant again."),
             ["POST /api/v1/advisor/findings/{findingId}/acknowledge"] =
                 (TenantReach.ConfinedToTheTokenTenant,
                  "The state row is written with the caller's own tenant id; an unknown finding "
@@ -236,8 +265,12 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// <summary>
     /// How many times <c>PublicApiEndpoints.cs</c> reads the API principal: once per /api/v1
     /// operation. Measured, not bounded — see the assertion for why a bound was not enough.
+    ///
+    /// <para>36 → 47 with the ten ticket routes: one read each for the tenant, and one in the
+    /// shared <c>Actor(ctx)</c> helper that names the token on the ticket's history. The helper
+    /// reads only the token's name, never a tenant.</para>
     /// </summary>
-    private const int ApiV1PrincipalReads = 36;
+    private const int ApiV1PrincipalReads = 47;
 
     private IReadOnlyList<string> DocumentedOperations()
     {
@@ -306,7 +339,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
          + "from every assertion in this file");
 
         Reaches.Values.Count(v => v.Reach == TenantReach.ConfinedToTheTokenTenant)
-            .Should().Be(35, "the three counts have to add up to the operation count, or a row "
+            .Should().Be(45, "the three counts have to add up to the operation count, or a row "
                 + "has gone missing from the arithmetic");
     }
 
@@ -529,7 +562,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
 
         PrincipalReads(Path.Combine("src", "EntKube.Web", "Services", "PublicApi", "PublicApiEndpoints.cs"))
             .Should().Be(ApiV1PrincipalReads,
-                "the 29 /api/v1 operations read the principal exactly once each — measured, not "
+                "the /api/v1 operations read the principal exactly once each (plus the ticket routes' Actor helper) — measured, not "
                 + "assumed. This was BeGreaterThan(20), which left three routes free to stop "
                 + "scoping themselves with nothing noticing, and the doc never stated the real "
                 + "number so a reader could not see the slack was 12.5%. ⚠️ A legitimate "

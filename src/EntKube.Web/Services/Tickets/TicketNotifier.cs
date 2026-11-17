@@ -179,6 +179,54 @@ public class TicketNotifier(
     }
 
     /// <summary>
+    /// Tells one of our own people something about a ticket — a mention, a reminder that has
+    /// come due, a digest of what happened on a ticket they follow.
+    ///
+    /// <para><b>Deliberately without the reply cut line</b> that <see cref="Internal"/> puts at
+    /// the top of the assignment mail. A reply to that mail is relayed to the customer; a
+    /// reply to this one must not be, and <c>SupportReplyBody</c> finding no line is exactly
+    /// what makes the relay refuse and ask a person instead. The body says so, so nobody
+    /// expects otherwise.</para>
+    ///
+    /// <para>Returns whether it left. Never throws.</para>
+    /// </summary>
+    public async Task<bool> NotifyColleagueAsync(
+        Ticket ticket, string toEmail, string subject, string body, CancellationToken ct = default)
+    {
+        try
+        {
+            using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
+
+            if (!settings.IsConfigured)
+            {
+                logger.LogWarning(
+                    "Could not tell {To} about ticket #{Number}: there is nowhere to send from ({Source}).",
+                    toEmail, ticket.Number, settings.Source);
+                return false;
+            }
+
+            string from = await SenderAddressAsync(db, ticket, settings, ct);
+
+            string text =
+                body.TrimEnd()
+                + "\n\n— \nThis is an internal notice. Replying to it does not reach the customer; "
+                + $"answer them from ticket {references.For(ticket.Number)} instead.";
+
+            return await SendAsync(
+                settings, from, toEmail,
+                new Acknowledgement($"{references.For(ticket.Number)} {subject}", text),
+                ticket, await SenderNameAsync(db, ticket, ct), ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not tell {To} about ticket #{Number}.", toEmail, ticket.Number);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Sends one of our own people's words on to the customer, from the support address.
     ///
     /// <para><b>Why it goes to the §14.1 contacts and not only to the reporter.</b> The

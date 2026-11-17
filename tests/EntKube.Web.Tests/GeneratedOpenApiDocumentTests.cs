@@ -95,7 +95,10 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
         // The document writes `{clusterId}`; the server wants a value. Any value will do: the
         // scope check runs before the handler looks anything up, so a row that does not exist
         // produces a 404 — which is still, decisively, not a 403.
-        string url = Regex.Replace(operation.Path, @"\{[^}]+\}", _ => Guid.NewGuid().ToString());
+        //
+        // A number where the document says the parameter is one (see IntegerPathParameters).
+        string url = Regex.Replace(operation.Path, @"\{([^}]+)\}", m =>
+            operation.IntegerPathParameters?.Contains(m.Groups[1].Value) == true ? "1" : Guid.NewGuid().ToString());
 
         // ⚠️ And a required query parameter must be supplied, for the same reason the stub body
         // below exists: binding runs first, so omitting `workload` on a deployment restart answers
@@ -275,6 +278,10 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
                    operation.Value.Security?.Count ?? 0,
                    [.. from parameter in operation.Value.Parameters ?? []
                        where parameter.In == ParameterLocation.Query && parameter.Required
+                       select parameter.Name ?? ""],
+                   [.. from parameter in operation.Value.Parameters ?? []
+                       where parameter.In == ParameterLocation.Path
+                             && parameter.Schema?.Type is { } type && type.HasFlag(JsonSchemaType.Integer)
                        select parameter.Name ?? ""])
         ];
 
@@ -389,9 +396,15 @@ public sealed class ApiSurfaceCollection : ICollectionFixture<GeneratedOpenApiDo
 /// Query parameters the document marks required. A request that omits one is rejected by
 /// parameter binding before the scope check runs, so a probe must supply them.
 /// </param>
+/// <param name="IntegerPathParameters">
+/// Path parameters the document types as integers. A probe must put a number there: a route
+/// constrained to <c>{number:int}</c> does not match a GUID, so the request is unrouted and answers
+/// 404 before the scope check ever runs — which reads as "not refused" and proves nothing.
+/// </param>
 public sealed record DocumentedOperation(
     string Method, string Path, string Description, int SecurityRequirements,
-    IReadOnlyList<string> RequiredQueryParameters)
+    IReadOnlyList<string> RequiredQueryParameters,
+    IReadOnlyList<string>? IntegerPathParameters = null)
 {
     /// <summary>
     /// The scope the document claims this operation needs, or null when it claims any live token

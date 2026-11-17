@@ -378,6 +378,24 @@ public class TicketService(
 
         bool windowChanged = window != ticket.SupportWindow;
 
+        if (destination.TenantId != ticket.TenantId)
+        {
+            // Links join tickets of one tenant. Carried across, each side would show the
+            // other tenant's ticket title to people who cannot otherwise see it.
+            List<TicketLink> links = await db.TicketLinks
+                .Where(l => l.FromTicketId == ticket.Id || l.ToTicketId == ticket.Id)
+                .ToListAsync(ct);
+
+            if (links.Count > 0)
+            {
+                db.TicketLinks.RemoveRange(links);
+                db.TicketEvents.Add(Event(
+                    ticket.Id, TicketEventKind.Linked, at, actor,
+                    $"{links.Count} link(s) to other tickets removed by the move to another tenant.",
+                    customerVisible: false));
+            }
+        }
+
         ticket.TenantId = destination.TenantId;
         ticket.CustomerId = toCustomerId;
         ticket.AppId = toAppId;
@@ -755,9 +773,17 @@ public class TicketService(
             return null;
         }
 
+        if (ticket.Status == TicketStatus.Merged)
+        {
+            // Already terminal, and closing it would overwrite the moment it was merged.
+            return ticket;
+        }
+
         ticket.Status = TicketStatus.Closed;
         ticket.ClosedAt = at;
         ticket.ResolvedAt ??= at;
+        ticket.ReminderAt = null;
+        ticket.AutoCloseAt = null;
         ticket.UpdatedAt = at;
 
         db.TicketEvents.Add(Event(ticket.Id, TicketEventKind.Closed, at, actor, "Closed."));
@@ -787,6 +813,8 @@ public class TicketService(
 
         ticket.Status = TicketStatus.Rejected;
         ticket.ClosedAt = at;
+        ticket.ReminderAt = null;
+        ticket.AutoCloseAt = null;
         ticket.Resolution = reason;
         ticket.ExcludedFromSla = true;
         ticket.SlaExclusionReason = $"Rejected under §14.4 — the fault lay outside the agreement. {reason}";
@@ -821,9 +849,18 @@ public class TicketService(
             return null;
         }
 
+        if (ticket.Status == TicketStatus.Merged)
+        {
+            // Its matter lives on the ticket it was merged into; reopening the duplicate would
+            // make two places to answer again, which is what the merge undid.
+            throw new InvalidOperationException(
+                "This ticket was merged into another one. Reopen that ticket instead.");
+        }
+
         ticket.Status = TicketStatus.InProgress;
         ticket.ResolvedAt = null;
         ticket.ClosedAt = null;
+        ticket.AutoCloseAt = null;
         ticket.UpdatedAt = at;
 
         db.TicketEvents.Add(Event(ticket.Id, TicketEventKind.Note, at, actor,
@@ -1028,8 +1065,24 @@ public class TicketService(
             .Include(t => t.Events)
             .Include(t => t.Pauses)
             .Include(t => t.AffectedApps)
+            .Include(t => t.Tags)
+            .Include(t => t.Customer)
             .AsNoTracking()
             .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+    }
+
+    /// <summary>
+    /// A ticket's id from its number, within one tenant — what a ticket's address carries. A
+    /// number belonging to another tenant's ticket is no ticket here.
+    /// </summary>
+    public async Task<Guid?> FindByNumberAsync(Guid tenantId, int number, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.Tickets.AsNoTracking()
+            .Where(t => t.TenantId == tenantId && t.Number == number)
+            .Select(t => (Guid?)t.Id)
+            .FirstOrDefaultAsync(ct);
     }
 
     /// <summary>Where a ticket stands against every §14 clock.</summary>
@@ -1093,7 +1146,8 @@ public class TicketService(
             .AsNoTracking()
             .Where(t => t.CustomerId == customerId && t.TenantId == tenantId
                         && t.Status != TicketStatus.Closed
-                        && t.Status != TicketStatus.Rejected)
+                        && t.Status != TicketStatus.Rejected
+                        && t.Status != TicketStatus.Merged)
             .OrderBy(t => t.Priority)
             .ThenBy(t => t.ReportedAt)
             .ToListAsync(ct);
@@ -1122,10 +1176,12 @@ public class TicketService(
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
             .Include(t => t.Customer)
+            .Include(t => t.Tags)
             .AsNoTracking()
             .Where(t => t.TenantId == tenantId
                         && t.Status != TicketStatus.Closed
-                        && t.Status != TicketStatus.Rejected)
+                        && t.Status != TicketStatus.Rejected
+                        && t.Status != TicketStatus.Merged)
             .OrderBy(t => t.Priority)
             .ThenBy(t => t.ReportedAt)
             .ToListAsync(ct);

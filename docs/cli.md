@@ -52,6 +52,16 @@ vms restart          Restart a running VM
 vms pause            Freeze a running VM in memory
 vms unpause          Resume a paused VM where it was
 vms migrate          Live-migrate a running VM to another node
+tickets list         Open support tickets, worst first ([--view open|unassigned|reminders|escalated])
+tickets show         One ticket with its links and history (--ticket <number>)
+tickets tag          Add a tag (--ticket <number> --tag <tag>)
+tickets untag        Remove a tag (--ticket <number> --tag <tag>)
+tickets link         Link to another ticket (--ticket <number> --to <number> [--role related|parent|child])
+tickets unlink       Remove a link (--ticket <number> --link <link-id>)
+tickets merge        Merge a duplicate (--ticket <duplicate> --into <original> [--exclude-from-sla --reason <why>])
+tickets reminder set    Set a reminder (--ticket <number> --at <UTC time> [--note <text>])
+tickets reminder clear  Clear it (--ticket <number>)
+tickets note         Add a note; internal unless --customer-visible (--ticket <number> --text <text>)
 ```
 
 These commands change something; everything else is read-only:
@@ -62,6 +72,11 @@ These commands change something; everything else is read-only:
 | `vms start`, `stop`, `restart`, `pause`, `unpause`, `migrate` | `vms:write` |
 | `advisor ack` | `ops:write` |
 | `cost rates clear` | `config:write` |
+| `tickets tag`, `untag`, `link`, `unlink`, `merge`, `reminder set`, `reminder clear`, `note` | `tickets:write` |
+
+`tickets list` and `tickets show` need `tickets:read`. **A ticket carries what customers wrote**,
+which for the support agreement includes patient data, so a token with `tickets:read` is a
+token that can read it. The MCP server has no ticket tools for that reason.
 
 A read-only token cannot invoke any of them, even by accident. There is no `vms delete`:
 deleting a VM destroys the disks it imported, so it stays in the UI, which also refuses it

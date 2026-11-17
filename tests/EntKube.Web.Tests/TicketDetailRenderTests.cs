@@ -88,7 +88,18 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         // The detail renders the time log, which wants its own service — one of the things
         // only a render finds, since nothing else knows the two are related.
         Services.AddSingleton(new TimeService(factory, contracts));
-        Services.AddSingleton(new SupportDutyService(factory));
+        SupportDutyService duty = new(factory);
+        Services.AddSingleton(duty);
+
+        // The ticket's side panel: tags, links, reminders, followers (docs/helpdesk.md).
+        Services.AddSingleton(new TicketWorkService(factory, tickets, SilentTicketNotifier.For(factory), duty));
+
+        // Phase 2a: text modules, macros and checklists on the ticket (docs/helpdesk.md).
+        Services.AddSingleton(new TextModuleService(factory));
+        Services.AddSingleton(new TicketChecklistService(factory));
+        Services.AddSingleton(new TicketDraftService(factory));
+        Services.AddSingleton(TestTicketReference.Instance);
+        Services.AddSingleton(new MacroService(factory, tickets, new TicketWorkService(factory, tickets, SilentTicketNotifier.For(factory), duty)));
         Services.AddSingleton(new ToastService());
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));
         Services.AddScoped<CurrentActor>();

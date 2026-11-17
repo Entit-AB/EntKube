@@ -110,7 +110,7 @@
             </div>
         }
 
-        @if (CanWrite && selected.Status is not (TicketStatus.Closed or TicketStatus.Rejected))
+        @if (CanWrite && selected.Status is not (TicketStatus.Closed or TicketStatus.Rejected or TicketStatus.Merged))
         {
             <div class="card mb-3">
                 <div class="card-body">
@@ -293,7 +293,7 @@
                 .Include(t => t.Pauses)
                 .AsNoTracking()
                 .Where(t => t.CustomerId == Customer.Id)
-                .OrderBy(t => t.Status == TicketStatus.Closed || t.Status == TicketStatus.Rejected)
+                .OrderBy(t => t.Status == TicketStatus.Closed || t.Status == TicketStatus.Rejected || t.Status == TicketStatus.Merged)
                 .ThenBy(t => t.Priority)
                 .ThenByDescending(t => t.ReportedAt)
                 .Take(200)

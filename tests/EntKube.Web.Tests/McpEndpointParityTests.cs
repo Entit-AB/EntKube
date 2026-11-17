@@ -42,6 +42,10 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// asked for, not inferred from a parity count. <b>Symmetry is not a reason to hand a model a
     /// capability.</b></para>
     /// </summary>
+    private const string TicketsAreNotForAModel =
+        "tickets carry customers' correspondence, which here includes patient data; passing it to "
+        + "a language model is processing that needs a DPA (§17) and the customer's approval (§18)";
+
     private static readonly Dictionary<string, string> NoToolByDesign = new(StringComparer.Ordinal)
     {
         // ⚠️ This reason USED to be "the shared client has no body-carrying verb at all, so
@@ -67,6 +71,25 @@ public class McpEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
         ["POST /api/v1/apps/{}/secrets/sync"] =
             "this writes Secrets into live clusters. The read tools exist so a model can explain "
             + "and propose; applying credentials is the operator's move",
+
+        // ── Tickets: one reason, ten operations ──
+        //
+        // A ticket is customer correspondence, and for the agreement the support module was built
+        // for that includes patient data. Handing it to a language model is exactly the processing
+        // §17 (DPA) and §18 (processor approval) govern, and the reason the support mail analyst
+        // has no model behind it (docs/application-management.md). The read routes are the
+        // dangerous half — a model reading the queue IS the transfer — so they are exempt with the
+        // writes, not instead of them. Lifting this is a decision for whoever signs the agreement.
+        ["GET /api/v1/tickets"] = TicketsAreNotForAModel,
+        ["GET /api/v1/tickets/{}"] = TicketsAreNotForAModel,
+        ["POST /api/v1/tickets/{}/tags"] = TicketsAreNotForAModel,
+        ["DELETE /api/v1/tickets/{}/tags/{}"] = TicketsAreNotForAModel,
+        ["POST /api/v1/tickets/{}/links"] = TicketsAreNotForAModel,
+        ["DELETE /api/v1/tickets/{}/links/{}"] = TicketsAreNotForAModel,
+        ["POST /api/v1/tickets/{}/merge"] = TicketsAreNotForAModel,
+        ["PUT /api/v1/tickets/{}/reminder"] = TicketsAreNotForAModel,
+        ["DELETE /api/v1/tickets/{}/reminder"] = TicketsAreNotForAModel,
+        ["POST /api/v1/tickets/{}/notes"] = TicketsAreNotForAModel,
 
         // ── SCIM: one reason, seven operations ──
         //

@@ -1,0 +1,321 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@inject TicketWorkService Work
+@inject SupportDutyService Duty
+@inject ToastService Toasts
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   The ticket's working side panel — what Zammad keeps in its ticket
+   sidebar: tags, linked tickets, reminders and automatic close, and
+   who follows the ticket. None of it is shown to the customer, and none
+   of it moves a §14 clock (docs/helpdesk.md).
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card mb-3">
+    <div class="card-body small">
+
+        @* ───────────── Tags ───────────── *@
+        <div class="text-muted mb-1">Tags</div>
+        <div class="d-flex flex-wrap gap-1 mb-2" data-test="tags">
+            @foreach (string tag in tags)
+            {
+                <span class="badge bg-light text-dark border">
+                    @tag
+                    <button type="button" class="btn-close ms-1" style="font-size: .5rem"
+                            aria-label="@($"Remove tag {tag}")" @onclick="() => RemoveTagAsync(tag)"></button>
+                </span>
+            }
+            @if (tags.Count == 0)
+            {
+                <span class="text-muted">none</span>
+            }
+        </div>
+        <div class="input-group input-group-sm mb-3">
+            <input class="form-control" list="ticket-tag-vocabulary" placeholder="Add a tag"
+                   @bind="newTag" @bind:event="oninput" @onkeydown="OnTagKeyAsync" />
+            <button class="btn btn-outline-secondary" @onclick="AddTagAsync" disabled="@string.IsNullOrWhiteSpace(newTag)">
+                <i class="bi bi-plus"></i>
+            </button>
+        </div>
+        <datalist id="ticket-tag-vocabulary">
+            @foreach (TicketTagUse use in vocabulary)
+            {
+                <option value="@use.Name">@use.Name (@use.Tickets)</option>
+            }
+        </datalist>
+
+        @* ───────────── Linked tickets ───────────── *@
+        <div class="text-muted mb-1">Linked tickets</div>
+        @if (links.Count == 0)
+        {
+            <div class="text-muted mb-2">none</div>
+        }
+        <ul class="list-unstyled mb-2" data-test="links">
+            @foreach (TicketLinkView link in links)
+            {
+                <li class="d-flex justify-content-between align-items-start mb-1">
+                    <span>
+                        <span class="badge bg-light text-muted border me-1">@RoleLabel(link.Role)</span>
+                        <a href="@TicketHref(link.OtherNumber)">#@link.OtherNumber</a>
+                        <span class="@(TicketWorkService.IsSettled(link.OtherStatus) ? "text-decoration-line-through text-muted" : "")">@link.OtherTitle</span>
+                    </span>
+                    <button type="button" class="btn btn-sm btn-link text-muted p-0 ms-2" title="Remove link"
+                            @onclick="() => UnlinkAsync(link.LinkId)"><i class="bi bi-x"></i></button>
+                </li>
+            }
+        </ul>
+        <div class="input-group input-group-sm mb-3">
+            <select class="form-select" style="max-width: 7.5rem" @bind="linkRole">
+                <option value="@TicketLinkRole.Related">Related</option>
+                <option value="@TicketLinkRole.Parent">Parent is</option>
+                <option value="@TicketLinkRole.Child">Child is</option>
+            </select>
+            <span class="input-group-text">#</span>
+            <input class="form-control" type="number" min="1" placeholder="number" @bind="linkNumber" />
+            <button class="btn btn-outline-secondary" @onclick="LinkAsync" disabled="@(linkNumber is null)">Link</button>
+        </div>
+
+        @* ───────────── Follow-up ───────────── *@
+        <div class="text-muted mb-1">Reminder</div>
+        @if (Ticket.ReminderAt is DateTime reminder)
+        {
+            <div class="mb-1 @(reminder <= DateTime.UtcNow ? "text-danger fw-semibold" : "")">
+                <i class="bi bi-alarm me-1"></i>@BusinessCalendar.ToLocal(reminder).ToString("yyyy-MM-dd HH:mm")
+                @if (Ticket.ReminderNote is string note)
+                {
+                    <span class="text-muted">— @note</span>
+                }
+                <button type="button" class="btn btn-sm btn-link p-0 ms-1" @onclick="ClearReminderAsync">clear</button>
+            </div>
+        }
+        @if (!TicketWorkService.IsSettled(Ticket.Status))
+        {
+            <div class="input-group input-group-sm mb-1">
+                <input class="form-control" type="datetime-local" @bind="reminderLocal" @bind:format="yyyy-MM-ddTHH:mm" />
+                <button class="btn btn-outline-secondary" @onclick="SetReminderAsync" disabled="@(reminderLocal is null)">Set</button>
+            </div>
+            <input class="form-control form-control-sm mb-1" placeholder="What for (optional)" @bind="reminderNote" />
+            <div class="form-text mb-3">Mails whoever has the ticket when it comes due. It never stops a §14 clock — only a documented pause does.</div>
+        }
+
+        @if (Ticket.Status == TicketStatus.Resolved)
+        {
+            <div class="text-muted mb-1">Close automatically</div>
+            @if (Ticket.AutoCloseAt is DateTime closeAt)
+            {
+                <div class="mb-1">
+                    <i class="bi bi-hourglass-split me-1"></i>@BusinessCalendar.ToLocal(closeAt).ToString("yyyy-MM-dd HH:mm")
+                    <button type="button" class="btn btn-sm btn-link p-0 ms-1" @onclick="() => SetAutoCloseAsync(null)">cancel</button>
+                </div>
+            }
+            else
+            {
+                <div class="d-flex flex-wrap gap-1 mb-1">
+                    @foreach (int days in new[] { 3, 5, 10 })
+                    {
+                        <button class="btn btn-sm btn-outline-secondary"
+                                @onclick="() => SetAutoCloseAsync(BusinessCalendar.WorkingDaysDeadline(DateTime.UtcNow, days))">
+                            after @days working days
+                        </button>
+                    }
+                </div>
+            }
+            <div class="form-text mb-3">Closes the ticket unless it is reopened first. The customer sees the close.</div>
+        }
+
+        @* ───────────── Followers ───────────── *@
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <span class="text-muted">Following</span>
+            @if (me is { } self)
+            {
+                @if (followers.Any(f => f.UserId == self.UserId))
+                {
+                    <button class="btn btn-sm btn-link p-0" @onclick="UnfollowAsync">Stop following</button>
+                }
+                else
+                {
+                    <button class="btn btn-sm btn-link p-0" @onclick="FollowAsync"
+                            disabled="@string.IsNullOrWhiteSpace(self.Email)"
+                            title="@(string.IsNullOrWhiteSpace(self.Email) ? "Your account has no e-mail address" : "Be mailed what happens on this ticket")">
+                        Follow
+                    </button>
+                }
+            }
+        </div>
+        @if (followers.Count == 0)
+        {
+            <div class="text-muted">nobody</div>
+        }
+        @foreach (TicketFollower f in followers)
+        {
+            <div>
+                <i class="bi bi-bell me-1"></i>@f.Name
+                @if (f.Reason == TicketSubscriptionReason.Mentioned)
+                {
+                    <span class="text-muted">(mentioned)</span>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+
+    /// <summary>The tenant's slug, for linking to another ticket by URL.</summary>
+    [Parameter] public string? TenantSlug { get; set; }
+
+    [Parameter, EditorRequired] public string Actor { get; set; } = "";
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private List<string> tags = [];
+    private List<TicketTagUse> vocabulary = [];
+    private List<TicketLinkView> links = [];
+    private List<TicketFollower> followers = [];
+    private SupportTechnician? me;
+
+    private string newTag = "";
+    private TicketLinkRole linkRole = TicketLinkRole.Related;
+    private int? linkNumber;
+    private DateTime? reminderLocal;
+    private string? reminderNote;
+
+    /// <summary>
+    /// Which ticket, as of which change, the lists below were read for. The parent passes a
+    /// fresh <see cref="Ticket"/> on every render of its own — opening a form, typing — and
+    /// re-reading three lists each time would be three queries per keystroke elsewhere.
+    /// </summary>
+    private (Guid Id, DateTime UpdatedAt)? loadedFor;
+
+    /// <summary>Set by this panel's own changes, which do not all touch the ticket's UpdatedAt.</summary>
+    private bool stale = true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        tags = [.. Ticket.Tags.Select(t => t.Name).Order(StringComparer.Ordinal)];
+
+        if (!stale && loadedFor == (Ticket.Id, Ticket.UpdatedAt))
+        {
+            return;
+        }
+
+        vocabulary = await Work.GetTagVocabularyAsync(TenantId);
+        links = await Work.GetLinksAsync(TenantId, Ticket.Id);
+        followers = await Work.GetFollowersAsync(TenantId, Ticket.Id);
+        me ??= await WhoAmIAsync();
+
+        loadedFor = (Ticket.Id, Ticket.UpdatedAt);
+        stale = false;
+    }
+
+    /// <summary>
+    /// The signed-in person as the roster knows them — which is where their address comes
+    /// from. Null for somebody who is not a member of the tenant (a global admin looking in),
+    /// who therefore cannot follow its tickets.
+    /// </summary>
+    private async Task<SupportTechnician?> WhoAmIAsync()
+    {
+        AuthenticationState state = await AuthState.GetAuthenticationStateAsync();
+        string? userId = state.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        if (userId is null)
+        {
+            return null;
+        }
+
+        return (await Duty.GetRosterAsync(TenantId))
+            .Cast<SupportTechnician?>()
+            .FirstOrDefault(t => t!.Value.UserId == userId);
+    }
+
+    private string TicketHref(int number) =>
+        TenantSlug is null ? $"#ticket-{number}" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+
+    private static string RoleLabel(TicketLinkRole role) => role switch
+    {
+        TicketLinkRole.Parent => "parent",
+        TicketLinkRole.Child => "child",
+        _ => "related",
+    };
+
+    private async Task Act(Func<Task> action, string? done = null)
+    {
+        try
+        {
+            await action();
+            stale = true;
+
+            if (done is not null)
+            {
+                Toasts.Success(done);
+            }
+
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task OnTagKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key is "Enter" or "Tab" && !string.IsNullOrWhiteSpace(newTag))
+        {
+            await AddTagAsync();
+        }
+    }
+
+    private Task AddTagAsync() => Act(async () =>
+    {
+        await Work.AddTagAsync(TenantId, Ticket.Id, newTag, Actor, DateTime.UtcNow);
+        newTag = "";
+    });
+
+    private Task RemoveTagAsync(string tag) =>
+        Act(() => Work.RemoveTagAsync(TenantId, Ticket.Id, tag, Actor, DateTime.UtcNow));
+
+    private Task LinkAsync() => Act(async () =>
+    {
+        await Work.LinkAsync(TenantId, Ticket.Id, linkNumber!.Value, linkRole, Actor, DateTime.UtcNow);
+        linkNumber = null;
+    }, "Linked.");
+
+    private Task UnlinkAsync(Guid linkId) =>
+        Act(() => Work.UnlinkAsync(TenantId, Ticket.Id, linkId, Actor, DateTime.UtcNow), "Link removed.");
+
+    /// <summary>
+    /// The picker gives a wall-clock time with no zone; it is Swedish time, which is what the
+    /// agreement and everybody using this screen count in.
+    /// </summary>
+    private Task SetReminderAsync() => Act(async () =>
+    {
+        DateTime utc = TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(reminderLocal!.Value, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime);
+
+        await Work.SetReminderAsync(TenantId, Ticket.Id, utc, reminderNote, Actor, DateTime.UtcNow);
+        reminderLocal = null;
+        reminderNote = null;
+    }, "Reminder set.");
+
+    private Task ClearReminderAsync() =>
+        Act(() => Work.SetReminderAsync(TenantId, Ticket.Id, null, null, Actor, DateTime.UtcNow), "Reminder cleared.");
+
+    private Task SetAutoCloseAsync(DateTime? at) =>
+        Act(() => Work.SetAutoCloseAsync(TenantId, Ticket.Id, at, Actor, DateTime.UtcNow),
+            at is null ? "It will wait for a person to close it." : "It will close by itself unless reopened.");
+
+    private Task FollowAsync() => Act(() => Work.SubscribeAsync(
+        TenantId, Ticket.Id, me!.Value.UserId, me.Value.Name, me.Value.Email ?? "",
+        TicketSubscriptionReason.Subscribed, Actor, DateTime.UtcNow), "You follow this ticket.");
+
+    private Task UnfollowAsync() =>
+        Act(() => Work.UnsubscribeAsync(TenantId, Ticket.Id, me!.Value.UserId), "You no longer follow this ticket.");
+}

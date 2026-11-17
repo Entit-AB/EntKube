@@ -352,10 +352,15 @@ public class SupportMailService(
             : await db.Tickets.AsNoTracking()
                 .Where(t => t.CustomerId == customer.Id
                             && t.Status != TicketStatus.Closed
-                            && t.Status != TicketStatus.Rejected)
+                            && t.Status != TicketStatus.Rejected
+                            && t.Status != TicketStatus.Merged)
                 .ToListAsync(ct);
 
-        await AddTicketsThisMessageNamesAsync(db, message, openTickets, references, ct);
+        // A reply quoting a merged duplicate is filed on the ticket it went into; this is how
+        // the analyst learns which number now means which ticket.
+        Dictionary<int, int> mergedInto = [];
+
+        await AddTicketsThisMessageNamesAsync(db, message, openTickets, references, mergedInto, ct);
 
         bool bankSpent = false;
 
@@ -387,14 +392,14 @@ public class SupportMailService(
         if ((ours || message.IsDeliveryReport) && customer is null)
         {
             candidates = [];
-            await AddTicketsThisMessageNamesAsync(db, message, candidates, references, ct);
+            await AddTicketsThisMessageNamesAsync(db, message, candidates, references, mergedInto, ct);
         }
 
         return await analyst.AnalyseAsync(
             new MailContext(
                 message, customer, apps, candidates, bankSpent, ruleSet,
                 placedOnTheSendersWord, placedOnTheFromAddress, ours,
-                message.IsDeliveryReport),
+                message.IsDeliveryReport, mergedInto),
             ct);
     }
 
@@ -434,7 +439,7 @@ public class SupportMailService(
     /// </summary>
     private static async Task AddTicketsThisMessageNamesAsync(
         ApplicationDbContext db, InboundMailMessage message, List<Ticket> candidates,
-        TicketReference references, CancellationToken ct)
+        TicketReference references, Dictionary<int, int> mergedInto, CancellationToken ct)
     {
         int? threaded = SupportMessageId.TicketNumberIn(message.InReplyTo);
         SubjectReference? quoted = references.InSubject(message.Subject);
@@ -447,6 +452,10 @@ public class SupportMailService(
 
         string sender = message.FromAddress.Trim().ToLowerInvariant();
 
+        // Merged tickets are read too, and stand in for the ticket they were merged into: the
+        // reporter was told the duplicate's number and goes on quoting it, and the matter now
+        // lives on the target. The capability is judged on the ticket the message actually
+        // names — its thread, its proven reference, its reporter — and only then followed.
         List<Ticket> named = await db.Tickets.AsNoTracking()
             .Where(t => (t.Number == threaded || t.Number == quotedNumber)
                         && t.Status != TicketStatus.Closed
@@ -455,18 +464,57 @@ public class SupportMailService(
 
         foreach (Ticket ticket in named)
         {
-            bool alreadyThere = candidates.Any(t => t.Id == ticket.Id);
-
             bool mayReach = ticket.Number == threaded
                 || (quoted is { Proven: true } proven && ticket.Number == proven.Number)
                 || (ticket.RequestedByEmail != null
                     && ticket.RequestedByEmail.Trim().ToLowerInvariant() == sender);
 
-            if (!alreadyThere && mayReach)
+            if (!mayReach)
             {
-                candidates.Add(ticket);
+                continue;
+            }
+
+            Ticket? reached = ticket.Status == TicketStatus.Merged
+                ? await MergeTargetAsync(db, ticket, ct)
+                : ticket;
+
+            if (reached is null)
+            {
+                continue;
+            }
+
+            if (reached.Id != ticket.Id)
+            {
+                mergedInto[ticket.Number] = reached.Number;
+            }
+
+            if (candidates.All(t => t.Id != reached.Id))
+            {
+                candidates.Add(reached);
             }
         }
+    }
+
+    /// <summary>
+    /// Where a merged ticket's mail should go: the ticket it was merged into, in the same
+    /// tenant, while that one is still open. Followed once — a merge into a ticket that was
+    /// itself merged is refused, so there is no chain to walk — and null when the target has
+    /// since closed, so the reply opens a new ticket rather than reopening one by the back door.
+    /// </summary>
+    private static async Task<Ticket?> MergeTargetAsync(
+        ApplicationDbContext db, Ticket merged, CancellationToken ct)
+    {
+        if (merged.MergedIntoTicketId is not Guid targetId)
+        {
+            return null;
+        }
+
+        return await db.Tickets.AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == targetId
+                                      && t.TenantId == merged.TenantId
+                                      && t.Status != TicketStatus.Closed
+                                      && t.Status != TicketStatus.Rejected
+                                      && t.Status != TicketStatus.Merged, ct);
     }
 
     /// <summary>

@@ -1,0 +1,153 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketChecklistService Checklists
+@inject ToastService Toasts
+
+@* A ticket's checklist: the steps of the work. An item naming another ticket (#1042) is done
+   when that ticket is, and is not ticked by hand. Never shown to the customer. *@
+
+<div class="card mb-3" data-test="checklist">
+    <div class="card-body small">
+        @if (view is null)
+        {
+            <div class="text-muted mb-1">Checklist</div>
+            @if (Editable)
+            {
+                <div class="input-group input-group-sm">
+                    <select class="form-select" @bind="templateChoice">
+                        <option value="">empty</option>
+                        @foreach (ChecklistTemplate t in templates)
+                        {
+                            <option value="@t.Id">@t.Name</option>
+                        }
+                    </select>
+                    <button class="btn btn-outline-secondary" @onclick="CreateAsync">Add checklist</button>
+                </div>
+            }
+            else
+            {
+                <div class="text-muted">none</div>
+            }
+        }
+        else
+        {
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="fw-semibold">@view.Title</span>
+                <span class="text-muted">@(view.Lines.Count - view.Open)/@view.Lines.Count</span>
+            </div>
+            <ul class="list-unstyled mb-2">
+                @foreach (ChecklistLine line in view.Lines)
+                {
+                    <li class="d-flex align-items-start gap-1 mb-1">
+                        @if (line.ReferencedNumber is int n)
+                        {
+                            <i class="bi @(line.Done ? "bi-check-circle-fill text-success" : "bi-circle text-muted") mt-1"
+                               title="@(line.ReferenceFound ? $"Done when #{n} is closed" : $"No ticket #{n} here")"></i>
+                        }
+                        else
+                        {
+                            <input class="form-check-input mt-1" type="checkbox" checked="@line.Done" disabled="@(!Editable)"
+                                   aria-label="@line.Text" @onchange="e => ToggleAsync(line, e)" />
+                        }
+                        <span class="flex-grow-1 @(line.Done ? "text-decoration-line-through text-muted" : "")"
+                              title="@(line.CheckedBy is string by ? $"Ticked by {by}" : null)">@line.Text</span>
+                        @if (Editable)
+                        {
+                            <button class="btn btn-sm btn-link text-muted p-0" title="Move up" @onclick="() => MoveAsync(line, -1)"><i class="bi bi-arrow-up"></i></button>
+                            <button class="btn btn-sm btn-link text-muted p-0" title="Remove" @onclick="() => RemoveAsync(line)"><i class="bi bi-x"></i></button>
+                        }
+                    </li>
+                }
+            </ul>
+            @if (Editable)
+            {
+                <div class="input-group input-group-sm mb-1">
+                    <input class="form-control" placeholder="Add an item (#1042 to follow a ticket)" @bind="newItem" @onkeydown="OnItemKeyAsync" />
+                    <button class="btn btn-outline-secondary" @onclick="AddAsync" disabled="@string.IsNullOrWhiteSpace(newItem)"><i class="bi bi-plus"></i></button>
+                </div>
+                <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteAsync">Remove the checklist</button>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+
+    /// <summary>False on a closed ticket: its checklist is part of what was done, and stays as it was.</summary>
+    [Parameter] public bool Editable { get; set; } = true;
+
+    [Parameter, EditorRequired] public string Actor { get; set; } = "";
+
+    /// <summary>Told how many items are still open, so the detail can guard a close.</summary>
+    [Parameter] public EventCallback<int> OnOpenItems { get; set; }
+
+    private ChecklistView? view;
+    private List<ChecklistTemplate> templates = [];
+    private string templateChoice = "";
+    private string newItem = "";
+    private Guid? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor != TicketId)
+        {
+            loadedFor = TicketId;
+            templates = await Checklists.ListTemplatesAsync(TenantId, activeOnly: true);
+            await ReloadAsync();
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        view = await Checklists.GetAsync(TenantId, TicketId);
+        await OnOpenItems.InvokeAsync(view?.Open ?? 0);
+    }
+
+    private async Task Act(Func<Task> action)
+    {
+        try
+        {
+            await action();
+            await ReloadAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private Task CreateAsync() => Act(() => Checklists.CreateAsync(
+        TenantId, TicketId,
+        Guid.TryParse(templateChoice, out Guid id) && templates.Any(t => t.Id == id) ? id : null,
+        Actor));
+
+    private Task ToggleAsync(ChecklistLine line, ChangeEventArgs e) =>
+        Act(() => Checklists.SetCheckedAsync(TenantId, TicketId, line.Id, e.Value is true, Actor));
+
+    private async Task OnItemKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await AddAsync();
+        }
+    }
+
+    private Task AddAsync() => Act(async () =>
+    {
+        if (!string.IsNullOrWhiteSpace(newItem))
+        {
+            await Checklists.AddItemAsync(TenantId, TicketId, newItem);
+            newItem = "";
+        }
+    });
+
+    private Task MoveAsync(ChecklistLine line, int by) => Act(() => Checklists.MoveItemAsync(TenantId, TicketId, line.Id, by));
+
+    private Task RemoveAsync(ChecklistLine line) => Act(() => Checklists.RemoveItemAsync(TenantId, TicketId, line.Id));
+
+    private Task DeleteAsync() => Act(() => Checklists.DeleteAsync(TenantId, TicketId));
+}

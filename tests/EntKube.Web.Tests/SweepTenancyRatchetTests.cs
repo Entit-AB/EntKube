@@ -79,6 +79,7 @@ public class SweepTenancyRatchetTests
         "SupportMailPoller",
         "SyntheticCheckRunner",
         "SupplyChainScanService",
+        "TicketFollowUpSweep",
         "TelemetryAlertEvaluator",
         "UptimeTrackingService",
     ];

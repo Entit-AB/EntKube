@@ -38,6 +38,16 @@ internal static class SupportServices
         services.AddScoped<OnCallService>();
         services.AddScoped<EntKube.Web.Services.Contracts.ContractService>();
         services.AddScoped<EntKube.Web.Services.Tickets.TicketService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketWorkService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketOverviews>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketBulkService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TextModuleService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketTemplateService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.MacroService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketChecklistService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketDraftService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketFollowUp>();
+        services.AddSingletonWork<EntKube.Web.Services.Tickets.TicketFollowUpSweep>();
         services.AddScoped<EntKube.Web.Services.Time.TimeService>();
         services.AddScoped<EntKube.Web.Services.Knowledge.KnowledgeService>();
         services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
@@ -54,6 +64,7 @@ internal static class SupportServices
         services.AddSingletonWork<EntKube.Web.Services.Mail.SupportMailPoller>();
         services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         services.AddScoped<EntKube.Contracts.Support.ISupportApi, EntKube.Web.Modules.Api.SupportApi>();
+        services.AddScoped<EntKube.Contracts.Support.ITicketApi, EntKube.Web.Modules.Api.TicketApi>();
 
         return services;
     }
