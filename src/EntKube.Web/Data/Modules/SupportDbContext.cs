@@ -36,6 +36,9 @@ public class SupportDbContext(DbContextOptions<SupportDbContext> options) : Modu
     public DbSet<CalendarFeed> CalendarFeeds => Set<CalendarFeed>();
     public DbSet<KbCategory> KbCategories => Set<KbCategory>();
     public DbSet<KbAnswer> KbAnswers => Set<KbAnswer>();
+    public DbSet<IssueTracker> IssueTrackers => Set<IssueTracker>();
+    public DbSet<TicketIssueLink> TicketIssueLinks => Set<TicketIssueLink>();
+    public DbSet<TicketHighlight> TicketHighlights => Set<TicketHighlight>();
     public DbSet<TicketBridgeConnection> TicketBridgeConnections => Set<TicketBridgeConnection>();
     public DbSet<ExternalTicketLink> ExternalTicketLinks => Set<ExternalTicketLink>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();

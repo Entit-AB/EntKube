@@ -1148,3 +1148,19 @@ h1:focus {
 
 .pane-meter-fill.partial { background: hsl(var(--warning)); }
 .pane-meter-fill.poor { background: hsl(var(--destructive)); }
+
+/* The ticket highlighter (helpdesk phase 6, wwwroot/js/ticket-highlights.js). Painted with the
+   CSS Custom Highlight API, so the colours are here and the markup is never touched. */
+::highlight(entkube-yellow) { background-color: #fff176; color: inherit; }
+::highlight(entkube-green)  { background-color: #b9f6ca; color: inherit; }
+::highlight(entkube-blue)   { background-color: #b3e5fc; color: inherit; }
+::highlight(entkube-pink)   { background-color: #f8bbd0; color: inherit; }
+::highlight(entkube-purple) { background-color: #e1bee7; color: inherit; }
+.highlight-swatch { display: inline-block; width: .9rem; height: .9rem; border-radius: 50%; border: 1px solid rgba(0,0,0,.2); vertical-align: middle; }
+.highlight-swatch.yellow { background: #fff176; } .highlight-swatch.green { background: #b9f6ca; }
+.highlight-swatch.blue { background: #b3e5fc; } .highlight-swatch.pink { background: #f8bbd0; }
+.highlight-swatch.purple { background: #e1bee7; }
+/* Light colours under light text would be unreadable in dark mode; the marked words go dark. */
+[data-bs-theme="dark"] ::highlight(entkube-yellow), [data-bs-theme="dark"] ::highlight(entkube-green),
+[data-bs-theme="dark"] ::highlight(entkube-blue), [data-bs-theme="dark"] ::highlight(entkube-pink),
+[data-bs-theme="dark"] ::highlight(entkube-purple) { color: #111; }

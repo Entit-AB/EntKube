@@ -62,7 +62,9 @@ public partial class ModuleBoundaryTests
         [(Module.Secrets, Module.Delivery)] = 4,
         [(Module.Secrets, Module.Fleet)] = 2,
         [(Module.Secrets, Module.Identity)] = 3,
-        [(Module.Secrets, Module.Support)] = 1,
+        // 1 → 2 (helpdesk phase 6): an issue tracker's token is a vault secret owned by the tracker
+        // row, cascading with it — the same arrangement as the support mailbox's password.
+        [(Module.Secrets, Module.Support)] = 2,
         [(Module.Support, Module.Delivery)] = 11,
         // 28 → 32: text modules, ticket templates, macros and checklist templates each belong to a
         // tenant by foreign key, like every other tenant-owned Support table — the tenant purge

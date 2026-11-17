@@ -4779,6 +4779,41 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("IncidentNotes", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.IssueTracker", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Host")
+                        .IsUnique();
+
+                    b.ToTable("IssueTrackers", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.JitGrant", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9255,6 +9290,84 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("TicketEvents", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketHighlight", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("By")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Color")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EventId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("TicketHighlights", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketIssueLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("AddedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AddedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Reference")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId", "Url")
+                        .IsUnique();
+
+                    b.ToTable("TicketIssueLinks", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketLink", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9604,6 +9717,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("GitRepositoryId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("IssueTrackerId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("KafkaClusterId")
                         .HasColumnType("uuid");
 
@@ -9692,6 +9808,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("EnvironmentId");
 
                     b.HasIndex("GitRepositoryId");
+
+                    b.HasIndex("IssueTrackerId");
 
                     b.HasIndex("KafkaClusterId");
 
@@ -12830,6 +12948,28 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Ticket");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketHighlight", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.TicketEvent", "Event")
+                        .WithMany()
+                        .HasForeignKey("EventId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Event");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketIssueLink", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketLink", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Ticket", "FromTicket")
@@ -12989,6 +13129,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasOne("EntKube.Web.Data.GitRepository", "GitRepository")
                         .WithMany()
                         .HasForeignKey("GitRepositoryId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.IssueTracker", null)
+                        .WithMany()
+                        .HasForeignKey("IssueTrackerId")
                         .OnDelete(DeleteBehavior.Cascade);
 
                     b.HasOne("EntKube.Web.Data.KafkaCluster", "KafkaCluster")

@@ -71,6 +71,9 @@ internal static class SupportModel
         builder.Entity<CalendarFeed>().ToTable("CalendarFeeds");
         builder.Entity<KbCategory>().ToTable("KbCategories");
         builder.Entity<KbAnswer>().ToTable("KbAnswers");
+        builder.Entity<IssueTracker>().ToTable("IssueTrackers");
+        builder.Entity<TicketIssueLink>().ToTable("TicketIssueLinks");
+        builder.Entity<TicketHighlight>().ToTable("TicketHighlights");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -373,6 +376,37 @@ internal static class SupportModel
             entity.HasIndex(a => new { a.TenantId, a.Visibility });
             entity.HasIndex(a => a.CategoryId);
             entity.HasOne(a => a.Category).WithMany().HasForeignKey(a => a.CategoryId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ── Phase 6: issue links and the highlighter. Tenant as a column, as above. ──
+
+        builder.Entity<IssueTracker>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.Property(t => t.Host).HasMaxLength(253);
+            entity.Property(t => t.UpdatedBy).HasMaxLength(200);
+            entity.HasIndex(t => new { t.TenantId, t.Host }).IsUnique();
+        });
+
+        builder.Entity<TicketIssueLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+            entity.Property(l => l.Url).HasMaxLength(500); // inside SQL Server's 1700-byte index key
+            entity.Property(l => l.Reference).HasMaxLength(300);
+            entity.Property(l => l.AddedBy).HasMaxLength(200);
+            entity.HasIndex(l => new { l.TicketId, l.Url }).IsUnique();
+            entity.HasIndex(l => l.TenantId);
+            entity.HasOne(l => l.Ticket).WithMany().HasForeignKey(l => l.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketHighlight>(entity =>
+        {
+            entity.HasKey(h => h.Id);
+            entity.Property(h => h.Text).HasMaxLength(1000);
+            entity.Property(h => h.By).HasMaxLength(200);
+            entity.HasIndex(h => h.EventId);
+            entity.HasIndex(h => h.TenantId);
+            entity.HasOne(h => h.Event).WithMany().HasForeignKey(h => h.EventId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<UserNotification>(entity =>

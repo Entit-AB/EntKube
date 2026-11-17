@@ -1,0 +1,181 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject IssueLinkService Issues
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* The GitHub and GitLab hosts agents may link issues on (docs/helpdesk.md, phase 6). EntKube only
+   ever reads from a host listed here, and only reads: title, state, labels, assignees. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <h6 class="mb-0">Issue trackers</h6>
+    <div class="text-muted small mb-3">
+        Agents can link a ticket to issues on these GitHub and GitLab hosts, and see each issue's state beside the ticket.
+        EntKube reads issues; it never changes them. Links are for agents only — customers never see them.
+    </div>
+
+    @if (trackers.Count > 0)
+    {
+        <table class="table table-sm small align-middle" data-test="trackers">
+            <thead><tr><th>Host</th><th>Kind</th><th>Token</th><th>On</th><th></th></tr></thead>
+            <tbody>
+                @foreach (IssueTracker t in trackers)
+                {
+                    <tr>
+                        <td><code>@t.Host</code></td>
+                        <td>@t.Kind</td>
+                        <td>@(hasToken.GetValueOrDefault(t.Id) ? "stored in the vault" : "none — public issues only")</td>
+                        <td>@(t.IsEnabled ? "yes" : "no")</td>
+                        <td class="text-end text-nowrap">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => Edit(t)">Edit</button>
+                            <AsyncButton CssClass="btn-sm btn-link text-danger p-0" OnClick="() => DeleteAsync(t)">Remove</AsyncButton>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <div class="border rounded p-3 small" data-test="tracker-form">
+        <div class="fw-semibold mb-2">@(editing is null ? "Add a tracker" : $"Change {editing.Host}")</div>
+        <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label text-muted">Kind</label>
+                <select class="form-select form-select-sm" @bind="kind">
+                    <option value="@IssueTrackerKind.GitHub">GitHub</option>
+                    <option value="@IssueTrackerKind.GitLab">GitLab</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label text-muted">Host</label>
+                <input class="form-control form-control-sm" @bind="host" placeholder="github.com or gitlab.example.se" aria-label="Host" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label text-muted">API token @(editing is null ? "(optional)" : "(leave empty to keep)")</label>
+                <input type="password" class="form-control form-control-sm" @bind="token" autocomplete="off" aria-label="API token" />
+            </div>
+            <div class="col-md-2">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="tracker-on" @bind="enabled" />
+                    <label class="form-check-label" for="tracker-on">Switched on</label>
+                </div>
+            </div>
+        </div>
+        <div class="form-text small mt-2">
+            A read-only token is enough: on GitHub a fine-grained token with <em>Issues: read</em>; on GitLab a token with
+            <code>read_api</code>. Without one, only public issues can be read. The token is kept in the tenant's vault.
+        </div>
+        <div class="mt-2 text-end">
+            @if (editing is not null)
+            {
+                @if (hasToken.GetValueOrDefault(editing.Id))
+                {
+                    <AsyncButton CssClass="btn-sm btn-outline-danger me-1" OnClick="RemoveTokenAsync">Remove the token</AsyncButton>
+                }
+                <button class="btn btn-sm btn-outline-secondary me-1" @onclick="Reset">Cancel</button>
+            }
+            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">@(editing is null ? "Add" : "Save")</AsyncButton>
+        </div>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<IssueTracker> trackers = [];
+    private Dictionary<Guid, bool> hasToken = [];
+
+    private IssueTracker? editing;
+    private IssueTrackerKind kind = IssueTrackerKind.GitHub;
+    private string host = "";
+    private string token = "";
+    private bool enabled = true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        trackers = await Issues.TrackersAsync(TenantId);
+        hasToken = [];
+
+        foreach (IssueTracker t in trackers)
+        {
+            hasToken[t.Id] = await Issues.HasTokenAsync(TenantId, t.Id);
+        }
+    }
+
+    private void Edit(IssueTracker t)
+    {
+        editing = t;
+        kind = t.Kind;
+        host = t.Host;
+        enabled = t.IsEnabled;
+        token = "";
+    }
+
+    private void Reset()
+    {
+        editing = null;
+        kind = IssueTrackerKind.GitHub;
+        host = "";
+        token = "";
+        enabled = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        // Empty keeps the stored token when changing a tracker; a new tracker simply has none.
+        string? newToken = string.IsNullOrWhiteSpace(token) ? null : token;
+
+        IssueTracker saved = await Issues.SaveTrackerAsync(TenantId, editing?.Id, kind, host, enabled, newToken, await ActorService.NameAsync());
+        Toasts.Success($"{saved.Host} saved.");
+        Reset();
+        await LoadAsync();
+    }
+
+    private async Task RemoveTokenAsync()
+    {
+        if (editing is null)
+        {
+            return;
+        }
+
+        await Issues.SaveTrackerAsync(TenantId, editing.Id, editing.Kind, editing.Host, editing.IsEnabled, "", await ActorService.NameAsync());
+        Toasts.Success($"The token for {editing.Host} was removed.");
+        Reset();
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(IssueTracker t)
+    {
+        await Issues.DeleteTrackerAsync(TenantId, t.Id);
+        Toasts.Success($"{t.Host} removed. Issues already linked on it stay as plain links.");
+
+        if (editing?.Id == t.Id)
+        {
+            Reset();
+        }
+
+        await LoadAsync();
+    }
+}

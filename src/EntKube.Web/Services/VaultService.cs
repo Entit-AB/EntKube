@@ -1034,6 +1034,84 @@ public class VaultService(
     /// </summary>
     public const string SupportMailboxOAuthSecretName = "OAUTH_CLIENT_SECRET";
 
+    // ───────── Issue trackers (helpdesk phase 6): one API token per GitHub/GitLab host ─────────
+
+    /// <summary>The one secret name an issue tracker owns.</summary>
+    public const string IssueTrackerTokenName = "TOKEN";
+
+    /// <summary>Stores an issue tracker's API token, replacing any earlier one (which is versioned).</summary>
+    public async Task SetIssueTrackerTokenAsync(Guid tenantId, Guid trackerId, string token, CancellationToken ct = default)
+    {
+        await InitializeVaultAsync(tenantId, ct);
+
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, token);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.IssueTrackerId == trackerId && s.Name == IssueTrackerTokenName, ct);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+        }
+        else
+        {
+            SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+            db.Set<VaultSecret>().Add(new VaultSecret
+            {
+                Id = Guid.NewGuid(),
+                VaultId = vault.Id,
+                Name = IssueTrackerTokenName,
+                SecretType = VaultSecretType.Opaque,
+                EncryptedValue = ciphertext,
+                Nonce = nonce,
+                IssueTrackerId = trackerId,
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>An issue tracker's API token, or null when none is stored (a public tracker).</summary>
+    public async Task<string?> GetIssueTrackerTokenAsync(Guid tenantId, Guid trackerId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.IssueTrackerId == trackerId && s.Name == IssueTrackerTokenName, ct);
+
+        if (secret is null)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        return encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+    }
+
+    /// <summary>Whether a token is stored, without decrypting it.</summary>
+    public async Task<bool> HasIssueTrackerTokenAsync(Guid tenantId, Guid trackerId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+        return await db.Set<VaultSecret>()
+            .AnyAsync(s => s.Vault.TenantId == tenantId && s.IssueTrackerId == trackerId && s.Name == IssueTrackerTokenName, ct);
+    }
+
+    /// <summary>Removes an issue tracker's token: the tracker is then read without one.</summary>
+    public async Task DeleteIssueTrackerTokenAsync(Guid tenantId, Guid trackerId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+        List<VaultSecret> stored = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId && s.IssueTrackerId == trackerId && s.Name == IssueTrackerTokenName)
+            .ToListAsync(ct);
+        db.Set<VaultSecret>().RemoveRange(stored);
+        await db.SaveChangesAsync(ct);
+    }
+
     /// <summary>
     /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
     /// decrypting each just far enough to read its expiry, and projects the non-secret

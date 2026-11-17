@@ -58,6 +58,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<CalendarFeed> CalendarFeeds => Set<CalendarFeed>();
     public DbSet<KbCategory> KbCategories => Set<KbCategory>();
     public DbSet<KbAnswer> KbAnswers => Set<KbAnswer>();
+    public DbSet<IssueTracker> IssueTrackers => Set<IssueTracker>();
+    public DbSet<TicketIssueLink> TicketIssueLinks => Set<TicketIssueLink>();
+    public DbSet<TicketHighlight> TicketHighlights => Set<TicketHighlight>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();

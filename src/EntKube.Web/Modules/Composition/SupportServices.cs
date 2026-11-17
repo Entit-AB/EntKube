@@ -53,6 +53,12 @@ internal static class SupportServices
         services.AddScoped<EntKube.Web.Services.Tickets.TicketPresenceService>();
         services.AddScoped<EntKube.Web.Services.Tickets.CalendarFeedService>();
         services.AddScoped<EntKube.Web.Services.Tickets.KnowledgeBaseService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.SupportReportService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.IIssueTrackerTokens, EntKube.Web.Services.Tickets.VaultIssueTrackerTokens>();
+        services.AddScoped<EntKube.Web.Services.Tickets.IssueLinkService>();
+        services.AddScoped<EntKube.Web.Services.Tickets.TicketHighlightService>();
+        // Its HttpClient and the memory cache are framework registrations, made in Program.cs
+        // beside the other named clients rather than here (ModuleCompositionTests).
         services.AddScoped<EntKube.Web.Services.Tickets.TicketFollowUp>();
         services.AddSingletonWork<EntKube.Web.Services.Tickets.TicketFollowUpSweep>();
         services.AddScoped<EntKube.Web.Services.Time.TimeService>();

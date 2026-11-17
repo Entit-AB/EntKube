@@ -1,0 +1,128 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Tickets
+@inject TicketHighlightService Highlights
+@inject IJSRuntime JS
+@inject ToastService Toasts
+
+@* The highlighter (docs/helpdesk.md, phase 6). Select words in an entry below, pick a colour.
+   Highlights are kept beside the entries — the history itself is never edited — and only agents
+   see them. *@
+
+<div class="d-flex flex-wrap align-items-center gap-1 small mb-2" data-test="highlighter">
+    <span class="text-muted me-1"><i class="bi bi-highlighter me-1"></i>Highlight the selection:</span>
+    @foreach (HighlightColor c in Enum.GetValues<HighlightColor>())
+    {
+        <button class="btn btn-sm btn-link p-0 me-1" title="@c" aria-label="@($"Highlight in {c.ToString().ToLowerInvariant()}")"
+                @onclick="() => MarkAsync(c)"><span class="highlight-swatch @c.ToString().ToLowerInvariant()"></span></button>
+    }
+    @if (items.Count > 0)
+    {
+        <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => listing = !listing">
+            @items.Count highlight@(items.Count == 1 ? "" : "s")
+        </button>
+    }
+    @if (unsupported)
+    {
+        <span class="text-muted fst-italic ms-2">This browser cannot colour them; they are listed instead.</span>
+    }
+</div>
+
+@if (listing && items.Count > 0)
+{
+    <ul class="list-unstyled small border rounded p-2 mb-2" data-test="highlights">
+        @foreach (TicketHighlight h in items)
+        {
+            <li class="d-flex align-items-start gap-2 py-1">
+                <span class="highlight-swatch @h.Color.ToString().ToLowerInvariant() mt-1"></span>
+                <span class="flex-grow-1">“@(h.Text.Length > 160 ? h.Text[..160] + "…" : h.Text)” <span class="text-muted">— @h.By</span></span>
+                <button class="btn btn-sm btn-link text-muted p-0" aria-label="Remove this highlight" @onclick="() => RemoveAsync(h)"><i class="bi bi-x"></i></button>
+            </li>
+        }
+    </ul>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    /// <summary>The entries on screen, each rendered with <c>data-entry="@@id"</c>.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<Guid> EntryIds { get; set; } = [];
+
+    [Parameter] public string? Actor { get; set; }
+
+    private HashSet<Guid> loadedFor = [];
+    private List<TicketHighlight> items = [];
+    private bool listing;
+    private bool unsupported;
+    private IJSObjectReference? module;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor.SetEquals(EntryIds))
+        {
+            return;
+        }
+
+        loadedFor = [.. EntryIds];
+        items = await Highlights.ForEntriesAsync(TenantId, loadedFor);
+    }
+
+    // Painted after every render: the entries may have been re-rendered, and a painted range
+    // over replaced text nodes would colour nothing.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        try
+        {
+            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-highlights.js");
+            bool painted = await module.InvokeAsync<bool>("paint",
+                items.Select(h => new { entry = h.EventId.ToString(), text = h.Text, color = h.Color.ToString() }).ToList());
+
+            if (!painted && items.Count > 0 && !unsupported)
+            {
+                unsupported = true;
+                listing = true;
+                StateHasChanged();
+            }
+        }
+        catch (Exception)
+        {
+            // Colouring is a convenience; the list still works without script.
+        }
+    }
+
+    private sealed record Selected(string Entry, string Text);
+
+    private async Task MarkAsync(HighlightColor color)
+    {
+        Selected? chosen = null;
+
+        try
+        {
+            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-highlights.js");
+            chosen = await module.InvokeAsync<Selected?>("selection");
+        }
+        catch (Exception)
+        {
+        }
+
+        if (chosen is null || !Guid.TryParse(chosen.Entry, out Guid entry) || !loadedFor.Contains(entry))
+        {
+            Toasts.Info("Select some words inside one entry of the history first.");
+            return;
+        }
+
+        try
+        {
+            items.Add(await Highlights.AddAsync(TenantId, entry, chosen.Text, color, Actor ?? ""));
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Warning(e.Message);
+        }
+    }
+
+    private async Task RemoveAsync(TicketHighlight h)
+    {
+        await Highlights.RemoveAsync(TenantId, h.Id);
+        items.Remove(h);
+    }
+}

@@ -1,0 +1,128 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Tickets
+@inject IssueLinkService Issues
+@inject ToastService Toasts
+
+@* GitHub and GitLab issues linked to this ticket, read live (docs/helpdesk.md, phase 6). Agents
+   only: this panel is on the agent's ticket view and nowhere a customer can reach. Hidden until the
+   tenant has set up a tracker or the ticket has a link. *@
+
+@if (trackerCount > 0 || views.Count > 0)
+{
+    <div class="card mb-3" data-test="issues-panel">
+        <div class="card-body py-2 small">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="fw-semibold"><i class="bi bi-github me-1"></i>Issues</span>
+                @if (reading)
+                {
+                    <span class="text-muted">reading…</span>
+                }
+            </div>
+
+            @foreach (IssueView v in views)
+            {
+                <div class="border-top py-1" data-test="issue">
+                    <div class="d-flex justify-content-between">
+                        <a href="@v.Url" target="_blank" rel="noopener noreferrer" class="text-decoration-none">@v.Reference</a>
+                        <span>
+                            @if (v.IsOpen is bool open)
+                            {
+                                <span class="badge @(open ? "bg-success" : "bg-secondary")">@(open ? "open" : "closed")</span>
+                            }
+                            <button class="btn btn-sm btn-link text-muted p-0 ms-1" aria-label="@($"Unlink {v.Reference}")"
+                                    title="Unlink" @onclick="() => UnlinkAsync(v)"><i class="bi bi-x"></i></button>
+                        </span>
+                    </div>
+                    @if (v.Title is string title)
+                    {
+                        <div>@title</div>
+                    }
+                    @if (v.Labels.Count > 0 || v.Assignees.Count > 0 || v.Milestone is not null)
+                    {
+                        <div class="text-muted" style="font-size: .75rem">
+                            @foreach (string label in v.Labels)
+                            {
+                                <span class="badge bg-light text-dark border me-1">@label</span>
+                            }
+                            @if (v.Assignees.Count > 0)
+                            {
+                                <span class="me-1"><i class="bi bi-person"></i> @string.Join(", ", v.Assignees)</span>
+                            }
+                            @if (v.Milestone is string milestone)
+                            {
+                                <span><i class="bi bi-signpost"></i> @milestone</span>
+                            }
+                        </div>
+                    }
+                    @if (v.Problem is string problem)
+                    {
+                        <div class="text-muted fst-italic" style="font-size: .75rem">@problem</div>
+                    }
+                </div>
+            }
+
+            @if (trackerCount > 0)
+            {
+                <div class="input-group input-group-sm mt-2">
+                    <input class="form-control" placeholder="Paste an issue link" @bind="url" aria-label="Issue link" />
+                    <AsyncButton CssClass="btn-outline-secondary" OnClick="LinkAsync">Link</AsyncButton>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+
+    [Parameter] public string? Actor { get; set; }
+
+    private Guid loadedFor;
+    private int trackerCount;
+    private List<IssueView> views = [];
+    private bool reading;
+    private string url = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == TicketId)
+        {
+            return;
+        }
+
+        loadedFor = TicketId;
+        views = [];
+        trackerCount = (await Issues.TrackersAsync(TenantId)).Count(t => t.IsEnabled);
+        await ReadAsync();
+    }
+
+    private async Task ReadAsync()
+    {
+        reading = true;
+
+        try
+        {
+            views = await Issues.ViewsAsync(TenantId, TicketId);
+        }
+        finally
+        {
+            reading = false;
+        }
+    }
+
+    private async Task LinkAsync()
+    {
+        await Issues.LinkAsync(TenantId, TicketId, url, Actor ?? "");
+        url = "";
+        await ReadAsync();
+    }
+
+    private async Task UnlinkAsync(IssueView v)
+    {
+        await Issues.UnlinkAsync(TenantId, v.LinkId);
+        views.Remove(v);
+        Toasts.Success($"{v.Reference} unlinked.");
+    }
+}

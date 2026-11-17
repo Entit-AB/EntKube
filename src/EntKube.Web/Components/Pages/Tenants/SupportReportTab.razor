@@ -1,0 +1,98 @@
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@inject SupportReportService Reports
+
+@* Reporting (docs/helpdesk.md, phase 6): ticket counts for a period by status, channel and
+   priority, day by day, and the period's tickets as an .xlsx. *@
+
+<div class="d-flex flex-wrap gap-2 align-items-end mb-3 small" data-test="support-report">
+    <div><label class="form-label text-muted mb-0">From</label><input class="form-control form-control-sm" type="date" @bind="first" /></div>
+    <div><label class="form-label text-muted mb-0">To</label><input class="form-control form-control-sm" type="date" @bind="last" /></div>
+    <AsyncButton CssClass="btn-sm btn-primary" OnClick="LoadAsync">Show</AsyncButton>
+    @if (report is not null)
+    {
+        <a class="btn btn-sm btn-outline-secondary" href="@($"/tenants/{TenantSlug}/support/report.xlsx?from={first:yyyy-MM-dd}&to={last:yyyy-MM-dd}")">
+            <i class="bi bi-file-earmark-spreadsheet me-1"></i>Download .xlsx
+        </a>
+        <span class="text-muted">At most @SupportReportService.ExportLimit.ToString("N0") tickets, newest first.</span>
+    }
+</div>
+
+@if (error is string e)
+{
+    <div class="alert alert-warning py-1 small">@e</div>
+}
+
+@if (report is { } r)
+{
+    <div class="row g-3 small">
+        <div class="col-md-3"><div class="border rounded p-3"><div class="text-muted">Opened</div><div class="fs-5 fw-semibold">@r.Created</div></div></div>
+        <div class="col-md-3"><div class="border rounded p-3"><div class="text-muted">Closed</div><div class="fs-5 fw-semibold">@r.Closed</div></div></div>
+        <div class="col-md-6">
+            <div class="border rounded p-3">
+                <div class="text-muted mb-1">Opened, by status now</div>
+                @foreach ((string label, int count) in r.ByStatus) { <span class="badge bg-light text-dark border me-1">@label @count</span> }
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="border rounded p-3">
+                <div class="text-muted mb-1">By channel</div>
+                @foreach ((string label, int count) in r.ByChannel) { @Bar(label, count, r.Created) }
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="border rounded p-3">
+                <div class="text-muted mb-1">By priority</div>
+                @foreach ((string label, int count) in r.ByPriority) { @Bar(label, count, r.Created) }
+            </div>
+        </div>
+        <div class="col-12">
+            <div class="border rounded p-3" style="overflow-x: auto">
+                <div class="text-muted mb-1">Day by day (opened / closed)</div>
+                <table class="table table-sm mb-0">
+                    @foreach ((DateOnly day, int opened, int closedThatDay) in r.Daily)
+                    {
+                        <tr><td class="text-nowrap">@day.ToString("ddd yyyy-MM-dd")</td><td>@Bar("opened", opened, Math.Max(1, r.Daily.Max(d => d.Created)))</td><td class="text-end">@opened / @closedThatDay</td></tr>
+                    }
+                </table>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter] public string? TenantSlug { get; set; }
+
+    private DateOnly first = new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1);
+    private DateOnly last = DateOnly.FromDateTime(BusinessCalendar.ToLocal(DateTime.UtcNow));
+    private SupportReport? report;
+    private string? error;
+
+    protected override Task OnParametersSetAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        error = null;
+
+        if (last < first || last.DayNumber - first.DayNumber > 366)
+        {
+            error = "Choose a period of at most a year, ending after it starts.";
+            return;
+        }
+
+        report = await Reports.ReportAsync(TenantId, first, last);
+    }
+
+    private static RenderFragment Bar(string label, int count, int of) => __builder =>
+    {
+        <div class="d-flex align-items-center gap-2">
+            <span style="width: 7rem">@label</span>
+            <div class="flex-grow-1 bg-light rounded" style="height: .6rem">
+                <div class="bg-primary rounded" style="height: .6rem; width: @(of == 0 ? 0 : count * 100 / of)%"></div>
+            </div>
+            <span style="width: 2.5rem" class="text-end">@count</span>
+        </div>
+    };
+}

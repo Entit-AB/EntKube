@@ -12,6 +12,7 @@
 @inject AuthenticationStateProvider AuthState
 @inject NavigationManager Nav
 @inject ToastService Toasts
+@inject IJSRuntime JS
 
 @* ═══════════════════════════════════════════════════════════════════
    The open queue, worst first, with every §14.4 clock shown as time
@@ -26,25 +27,29 @@
 
 @if (selectedTicketId is not null)
 {
+    @TabStrip()
     <TicketDetail TenantId="DetailTenantId"
                   TicketId="selectedTicketId.Value"
                   TenantSlug="@TenantSlug"
                   OnBack="BackToQueue"
-                  OnChanged="LoadAsync" />
+                  OnChanged="LoadAsync"
+                  OnLoaded="RememberTabAsync" />
 }
 else
 {
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    @* Phone-width (docs/helpdesk.md, phase 6): the header wraps, and the queue keeps the columns
+       that decide what to open next — priority, ticket, status and the two clocks. *@
+    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
         <div>
             <h6 class="mb-0">Open tickets</h6>
             <div class="text-muted small">
                 Response and resolution times run inside each application's support window (§14.4).
             </div>
         </div>
-        <div class="d-flex gap-2 align-items-center">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
             @* Only when there is something to narrow. A queue that is already one customer's has
                nothing to choose between, and a filter offering one option is furniture. *@
             @if (spansCustomers && customers.Count > 1)
@@ -64,12 +69,14 @@ else
             </button>
             @if (TenantId is not null)
             {
-                <button class="btn btn-sm btn-primary" @onclick="() => creating = !creating">
+                <button class="btn btn-sm btn-primary" @onclick="() => creating = !creating" data-shortcut="n">
                     <i class="bi bi-plus me-1"></i>New ticket
                 </button>
             }
         </div>
     </div>
+
+    @TabStrip()
 
     @if (creating && TenantId is Guid creatingFor)
     {
@@ -81,7 +88,7 @@ else
         <div class="input-group input-group-sm mb-2" data-test="ticket-search">
             <span class="input-group-text"><i class="bi bi-search"></i></span>
             <input class="form-control" placeholder="Search all tickets — e.g. tag:vpn status:open, customer:vård reported:>now-7d"
-                   @bind="searchText" @onkeydown="OnSearchKeyAsync" aria-label="Search tickets" />
+                   @bind="searchText" @onkeydown="OnSearchKeyAsync" aria-label="Search tickets" data-shortcut-focus="s" />
             <button class="btn btn-outline-secondary" @onclick="SearchAsync">Search</button>
             @if (searchResults is not null)
             {
@@ -231,18 +238,18 @@ else
                                    checked="@(visible.Count > 0 && visible.All(v => selected.Contains(v.Ticket.Id)))"
                                    @onchange="ToggleAll" />
                         </th>
-                        <th>#</th>
+                        <th class="d-none d-md-table-cell">#</th>
                         <th>Prio</th>
                         <th>Ticket</th>
                         @if (spansCustomers)
                         {
-                            <th>Customer</th>
+                            <th class="d-none d-md-table-cell">Customer</th>
                         }
                         <th>Status</th>
                         <th>Response</th>
                         <th>Resolution</th>
-                        <th>Update</th>
-                        <th>Escalation</th>
+                        <th class="d-none d-md-table-cell">Update</th>
+                        <th class="d-none d-md-table-cell">Escalation</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -255,7 +262,7 @@ else
                                        checked="@selected.Contains(row.Ticket.Id)"
                                        @onchange="e => ToggleOne(row.Ticket.Id, e)" />
                             </td>
-                            <td class="text-muted small">@row.Ticket.Number</td>
+                            <td class="text-muted small d-none d-md-table-cell">@row.Ticket.Number</td>
                             <td>
                                 <span class="badge @PriorityClass(row.Ticket.Priority)">@row.Ticket.Priority</span>
                                 @if (row.Ticket.PriorityConfirmedAt is null)
@@ -267,6 +274,9 @@ else
                                 }
                             </td>
                             <td>
+                                <div class="text-muted d-md-none" style="font-size: .75rem" data-test="narrow-ref">
+                                    #@row.Ticket.Number@(spansCustomers && row.Ticket.Customer is { } c ? $" · {c.Name}" : "")
+                                </div>
                                 <div class="fw-semibold small">
                                     @row.Ticket.Title
                                     @if (TicketOverviews.ReminderDue(row.Ticket, now))
@@ -304,7 +314,7 @@ else
                             </td>
                             @if (spansCustomers)
                             {
-                                <td class="small">@(row.Ticket.Customer?.Name ?? "—")</td>
+                                <td class="small d-none d-md-table-cell">@(row.Ticket.Customer?.Name ?? "—")</td>
                             }
                             <td>
                                 <span class="badge @StatusClass(row.Ticket.Status)">@row.Ticket.Status</span>
@@ -323,7 +333,7 @@ else
                             </td>
                             <td>@ClockCell(row.Response, "responded")</td>
                             <td>@ClockCell(row.Resolution, "resolved")</td>
-                            <td class="small">
+                            <td class="small d-none d-md-table-cell">
                                 @if (row.UpdateDue is null)
                                 {
                                     <span class="text-muted">—</span>
@@ -340,7 +350,7 @@ else
                                     <span class="text-muted">@Remaining(row.UpdateDue)</span>
                                 }
                             </td>
-                            <td class="small">
+                            <td class="small d-none d-md-table-cell">
                                 @if (row.EscalationDue is not null)
                                 {
                                     <span class="@(row.EscalationDue <= now ? "text-danger fw-semibold" : "text-muted")">
@@ -549,6 +559,122 @@ else
             }
         }
     }
+
+    // ---- Phase 6: keyboard shortcuts and ticket tabs (wwwroot/js/ticket-shortcuts.js) ----
+    private IJSObjectReference? shortcuts;
+    private List<TicketTab> tabs = [];
+
+    // A ticket that finished loading before the module did; its tab is added once the module is in.
+    private Ticket? untabbed;
+
+    /// <summary>A tab: a ticket opened in this browser.</summary>
+    public sealed record TicketTab(int Number, string Title);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || TenantSlug is null)
+        {
+            return;
+        }
+
+        try
+        {
+            shortcuts = await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-shortcuts.js");
+            await shortcuts.InvokeVoidAsync("install");
+            tabs = await shortcuts.InvokeAsync<List<TicketTab>?>("tabsList", TenantSlug) ?? [];
+
+            if (untabbed is not null)
+            {
+                await RememberTabAsync(untabbed);
+            }
+
+            StateHasChanged();
+        }
+        catch (Exception)
+        {
+            // Shortcuts and tabs are conveniences; without script the queue works as before.
+            shortcuts = null;
+        }
+    }
+
+    private async Task RememberTabAsync(Ticket ticket)
+    {
+        if (shortcuts is null)
+        {
+            untabbed = ticket;
+            return;
+        }
+
+        untabbed = null;
+
+        if (TenantSlug is not null)
+        {
+            try
+            {
+                tabs = await shortcuts.InvokeAsync<List<TicketTab>?>("tabsAdd", TenantSlug, ticket.Number, ticket.Title) ?? [];
+            }
+            catch (Exception)
+            {
+                // A full or blocked localStorage loses the tab, never the ticket.
+            }
+        }
+    }
+
+    private async Task CloseTabAsync(int number)
+    {
+        if (shortcuts is not null && TenantSlug is not null)
+        {
+            tabs = await shortcuts.InvokeAsync<List<TicketTab>?>("tabsRemove", TenantSlug, number) ?? [];
+        }
+
+        if (openedNumber == number)
+        {
+            BackToQueue();
+        }
+    }
+
+    private void OpenTab(int number)
+    {
+        if (TenantSlug is not null)
+        {
+            Nav.NavigateTo(Nav.GetUriWithQueryParameter("ticket", number));
+        }
+    }
+
+    private void StepTab(int by)
+    {
+        if (tabs.Count == 0)
+        {
+            return;
+        }
+
+        int at = tabs.FindIndex(t => t.Number == openedNumber);
+        int next = at < 0 ? (by > 0 ? 0 : tabs.Count - 1) : (at + by + tabs.Count) % tabs.Count;
+        OpenTab(tabs[next].Number);
+    }
+
+    /// <summary>The open-ticket tabs, oldest first, at most thirty (Zammad's limit), kept per browser.</summary>
+    private RenderFragment TabStrip() => __builder =>
+    {
+        if (tabs.Count > 0)
+        {
+            <ul class="nav nav-tabs small mb-2 flex-nowrap" style="overflow-x: auto" data-test="ticket-tabs">
+                <li class="nav-item"><button class="nav-link py-1 px-2" title="Queue (Esc)" @onclick="BackToQueue"><i class="bi bi-list-ul"></i></button></li>
+                @foreach (TicketTab tab in tabs)
+                {
+                    <li class="nav-item">
+                        <span class="nav-link py-1 px-2 text-nowrap @(tab.Number == openedNumber && selectedTicketId is not null ? "active" : "")">
+                            <button class="btn btn-link btn-sm p-0 text-decoration-none" @onclick="() => OpenTab(tab.Number)" title="@tab.Title">
+                                #@tab.Number @(tab.Title.Length > 24 ? tab.Title[..24] + "…" : tab.Title)
+                            </button>
+                            <button class="btn btn-link btn-sm p-0 ms-1 text-muted" aria-label="@($"Close tab #{tab.Number}")" @onclick="() => CloseTabAsync(tab.Number)"><i class="bi bi-x"></i></button>
+                        </span>
+                    </li>
+                }
+                <li class="d-none"><button data-shortcut="tab-prev" @onclick="() => StepTab(-1)"></button><button data-shortcut="tab-next" @onclick="() => StepTab(1)"></button></li>
+            </ul>
+        }
+    };
 
     private void Open(Ticket ticket)
     {

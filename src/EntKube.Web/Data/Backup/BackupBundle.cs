@@ -30,7 +30,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 19;
+    public const int CurrentVersion = 20;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -246,6 +246,9 @@ public class BackupBundle
     public List<CalendarFeed> CalendarFeeds { get; set; } = [];
     public List<KbCategory> KbCategories { get; set; } = [];
     public List<KbAnswer> KbAnswers { get; set; } = [];
+    public List<IssueTracker> IssueTrackers { get; set; } = [];
+    public List<TicketIssueLink> TicketIssueLinks { get; set; } = [];
+    public List<TicketHighlight> TicketHighlights { get; set; } = [];
     public List<TimeEntry> TimeEntries { get; set; } = [];
     public List<WorkAuthorisation> WorkAuthorisations { get; set; } = [];
 
@@ -373,7 +376,9 @@ public record VaultSecretRecord(
     string? KubernetesSecretName,
     string? KubernetesNamespace,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    // Bundle v20: an issue tracker's token. Defaulted, so an older bundle reads as "none".
+    Guid? IssueTrackerId = null);
 
 // A historical secret value. Like VaultSecretRecord, the encrypted blob is decrypted
 // to plaintext on export and re-encrypted with the destination vault's fresh DEK on

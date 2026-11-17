@@ -142,6 +142,8 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
         Services.AddSingleton(new TicketChecklistService(factory));
         Services.AddSingleton(new TicketPresenceService(factory));
         Services.AddSingleton(new KnowledgeBaseService(factory));
+        Services.AddSingleton(new TicketHighlightService(factory));
+        Services.AddSingleton(NoIssueTrackers.For(factory));
         Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(new TicketDraftService(factory));
         Services.AddSingleton(TestTicketReference.Instance);

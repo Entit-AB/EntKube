@@ -338,6 +338,39 @@ Keyboard shortcuts, tabs, reporting with an .xlsx export, GitHub/GitLab issue li
 a responsive pass over the queue and ticket views for phones, and the highlighter.
 *Manual chapters: Keyboard shortcuts, Tabs, Reporting, GitHub/GitLab, Mobile view.*
 
+**Status (2026-11-17): built.** Manual chapters: `keyboard-shortcuts.md` (shortcuts and tabs),
+`reporting.md`, `issue-links.md`, `highlighter.md` and `mobile.md`. Tests: `SupportReportTests`,
+`IssueLinkTests`, `TicketHighlightTests`, and the Phase 6 section of `TicketWorkRenderTests`.
+Decisions made while building it:
+
+- **Shortcuts press buttons; they don't call services.** `ticket-shortcuts.js` clicks whatever is
+  on the page marked `data-shortcut="…"`, so a shortcut can never do what the screen doesn't offer
+  at that moment. The marks are the contract, and a render test pins them. The keys are single
+  letters, not Zammad's `Ctrl`+`Alt` chords, because `Alt` types characters on Swedish keyboards.
+  `Shift`+`C` presses Resolve on an open ticket and Close on a resolved one, because closing an
+  open ticket starts with stopping its resolution clock.
+- **Tabs live in the browser** (`localStorage`, per tenant, at most 30), not in the database. A
+  tab is a shortcut to a ticket. It isn't state anybody else needs, and it isn't worth a table
+  that the backup bundle and the tenant purge would have to know about.
+- **Reporting counts; it doesn't judge.** Whether response and resolution times were met is
+  measured per agreement by the existing SLA reports. The `.xlsx` is written by a small
+  in-house writer (inline strings, no styles) rather than a spreadsheet library, and text that
+  would start a formula is prefixed with `'`, because customers write the titles. The export is
+  capped at 6,000 rows (Zammad's cap) and the period at 366 days.
+- **Issue links are read-only and only reach configured hosts.** A tracker is a host plus a
+  token in the tenant's vault, owned by the tracker row (`VaultSecret.IssueTrackerId`). Linking
+  refuses any other host before anything is sent, and reading checks again. The HTTP client
+  follows no redirects, because GitLab's token is a header a redirect would carry along. Answers
+  are remembered for a minute, keyed by tenant *and* address. The links are hidden from customers
+  everywhere: portal, mail and API.
+- **Highlights are kept beside the entry, as text.** §14.6 makes the history the record, so marking
+  a passage must not edit it. The passage is stored as its words, which must occur in the entry
+  (compared without whitespace), rather than as offsets into markup that a sanitiser change
+  could shift. The page paints highlights with the CSS Custom Highlight API, which colours text
+  without changing the DOM that Blazor diffs.
+- **Backup bundle v20:** issue trackers, issue links, highlights, and the tracker token on the
+  secret record.
+
 ## Decisions (2026-11-16)
 
 1. **No groups. The tenant is the queue.** One support team works every customer, and
