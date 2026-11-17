@@ -9254,6 +9254,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("Actor")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("At")
                         .HasColumnType("TEXT");
 

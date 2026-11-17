@@ -227,8 +227,9 @@ they survive a reload, a dropped circuit or another instance. They are never on 
 - **Test lesson:** the first in-memory store refused cross-tenant reads itself, which hid the
   service's own tenant predicate (a mutation deleting it passed). The fake is now tenant-blind on
   read.
-- **Not yet:** customers downloading attachments from the portal, and an HTTP-level test of the
-  download endpoint (it needs a cookie-authenticated test host, which the API fixture isn't).
+- **Not yet:** customers downloading attachments from the portal (done in Phase 7), and an
+  HTTP-level test of the download endpoint (it needs a cookie-authenticated test host, which the
+  API fixture isn't).
 
 **Phase 2c-2 done (2026-11-17): rich text and mail from the ticket.**
 
@@ -246,7 +247,8 @@ they survive a reload, a dropped circuit or another instance. They are never on 
   plain text, so the reply cut line is still found in text, never in markup (decision 3).
 - **Not yet:** notes are still plain text (only mail is rich). Inbound HTML is shown as its text
   (remote images are therefore never loaded). Neither the `@@` trigger inside the editor nor
-  customer downloads from the portal exist yet.
+  customer downloads from the portal exist yet. *(Rich notes, `@@` and portal downloads: done in
+  Phase 7. Inbound HTML is still shown as text.)*
 
 Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and organisation views).
 
@@ -370,6 +372,38 @@ Decisions made while building it:
   without changing the DOM that Blazor diffs.
 - **Backup bundle v20:** issue trackers, issue links, highlights, and the tracker token on the
   secret record.
+
+### Phase 7: Loose ends
+The three gaps worth closing once Phases 1 to 6 had shipped: deleting a note (decision 5, agreed
+but never built), customers downloading their files from the portal, and rich-text notes with
+`@@` in the editor.
+
+**Status (2026-11-17): built.** Tests: `RichNoteTests`, the portal section of
+`TicketAttachmentTests`, and the Phase 7 parts of `TicketWorkRenderTests` and
+`CustomerPortalRenderTests`. Decisions made while building it:
+
+- **"By their author" needs an identity, not a name.** `TicketEvent.Actor` is a display name, and
+  two people can share one, so notes written from the ticket view now record
+  `TicketEvent.ActorUserId`. A note from before this has none and can never be deleted: nobody can
+  prove they wrote it. The window counts from `RecordedAt` (when the note was written), not `At`.
+- **Delete removes the entry and its highlights.** Files added with the note stay on the ticket,
+  untied from it. What the note already set off isn't undone: mention mails have gone, and a
+  follower digest may already have carried it. There is no API route for it, because a token has
+  no person to be the author.
+- **The portal shows a file only when all of these hold:**
+  - it is customer-visible;
+  - it is on one of that customer's own tickets, or on the mail filed on one;
+  - it isn't from a delivery report (a bounce is an internal note, and it carries our own mail);
+  - it isn't from a duplicate merged in from *another* customer. Agents see those; the customer doesn't.
+
+  The download (`/portal/attachments/{customerId}/{id}`) checks the person's access to the
+  customer, then asks the service, which applies the same rules. Every refusal is the same 404.
+- **Notes use the mail composer's Quill editor** (`TicketNoteEditor`), with `::`, `??` and a new
+  `@@` trigger. Picking a colleague writes `@@Name` and ticks them, so the checkbox list and the
+  text agree. Stored like a mail: sanitised `DetailHtml`, with its text in `Detail` for search,
+  digests, mention mail and the portal. Note drafts are kept as sanitised HTML; a plain-text draft
+  from before is converted, so nobody's half-written note is lost.
+- **Still not done:** inbound HTML mail is still shown as its text.
 
 ## Decisions (2026-11-16)
 

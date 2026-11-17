@@ -121,6 +121,14 @@ public class TicketEvent
     /// </summary>
     public string? DetailHtml { get; set; }
 
+    /// <summary>
+    /// The signed-in user who wrote it, when a person wrote it from the ticket view (helpdesk
+    /// phase 7). <see cref="Actor"/> is a display name — two people can share one — so this is
+    /// what "only its author may delete it" is checked against. Null on everything else, and on
+    /// rows written before it existed, which therefore cannot be deleted.
+    /// </summary>
+    public string? ActorUserId { get; set; }
+
     // Navigation
     public Ticket Ticket { get; set; } = null!;
 }

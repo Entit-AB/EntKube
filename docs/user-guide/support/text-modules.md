@@ -5,9 +5,9 @@ signature, ready to drop into a note.
 
 ## Using one
 
-In **Add a note**, type in **Insert a text module** to find one by its name or keywords, then
-click it. The text is added to the end of your note, with its placeholders already filled in from
-the ticket, and you can edit it before you add the note.
+In a note or a mail, type `::` and part of a module's name or keywords, then click the module.
+It replaces what you typed, with its placeholders already filled in from the ticket, and you can
+edit it before you add the note or send the mail.
 
 ## Placeholders
 

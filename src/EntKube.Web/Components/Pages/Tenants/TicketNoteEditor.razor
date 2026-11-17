@@ -1,0 +1,242 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@implements IAsyncDisposable
+@inject TicketReference References
+@inject KnowledgeBaseService KnowledgeBase
+@inject IJSRuntime JS
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Writing a note on a ticket, in rich text (docs/helpdesk.md, phase 7):
+   :: inserts a text module, ?? a help answer, @@ mentions a colleague.
+   The same Quill editor as the mail composer, and the same rule: the
+   browser's HTML is a convenience, sanitised on the server (RichText)
+   before it is stored, shown, or kept as a draft.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div @ref="editor" style="min-height: 7rem" class="bg-white mb-2" data-test="note-editor"></div>
+
+@if (moduleQuery is not null)
+{
+    <div class="list-group list-group-flush border rounded mb-2 small" data-test="note-text-modules" style="max-height: 12rem; overflow-y: auto">
+        @foreach (TextModule m in MatchingModules())
+        {
+            <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertModuleAsync(m)">
+                <strong>@m.Name</strong> <span class="text-muted">@m.Keywords</span>
+            </button>
+        }
+        @if (!MatchingModules().Any())
+        {
+            <div class="list-group-item text-muted py-1">No text module matches “@moduleQuery”.</div>
+        }
+    </div>
+}
+
+@if (kbQuery is not null)
+{
+    <div class="list-group list-group-flush border rounded mb-2 small" data-test="note-answers" style="max-height: 12rem; overflow-y: auto">
+        @foreach (KbAnswer a in answers)
+        {
+            <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertAnswerAsync(a)">
+                <strong>@a.Title</strong>
+                @if (a.Visibility == KbVisibility.Internal) { <span class="badge bg-warning text-dark ms-1">internal</span> }
+            </button>
+        }
+        @if (answers.Count == 0)
+        {
+            <div class="list-group-item text-muted py-1">No help answer matches “@kbQuery”.</div>
+        }
+    </div>
+}
+
+@if (mentionQuery is not null)
+{
+    <div class="list-group list-group-flush border rounded mb-2 small" data-test="note-mentions" style="max-height: 12rem; overflow-y: auto">
+        @foreach (SupportTechnician c in MatchingColleagues())
+        {
+            <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => MentionAsync(c)">
+                <i class="bi bi-at me-1"></i>@c.Name
+            </button>
+        }
+        @if (!MatchingColleagues().Any())
+        {
+            <div class="list-group-item text-muted py-1">Nobody with an address matches “@mentionQuery”.</div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+
+    [Parameter] public string? Actor { get; set; }
+
+    /// <summary>The text modules on offer for this ticket's customer.</summary>
+    [Parameter] public IReadOnlyList<TextModule> Modules { get; set; } = [];
+
+    /// <summary>Who can be mentioned: colleagues with an address.</summary>
+    [Parameter] public IReadOnlyList<SupportTechnician> Colleagues { get; set; } = [];
+
+    /// <summary>What the editor starts with — a restored draft. Read once, when it opens.</summary>
+    [Parameter] public string? InitialHtml { get; set; }
+
+    /// <summary>The note's HTML as it is typed, at most once a second — for the autosave.</summary>
+    [Parameter] public EventCallback<string> OnChanged { get; set; }
+
+    /// <summary>A colleague picked after "@@": the ticket view ticks them to be told.</summary>
+    [Parameter] public EventCallback<SupportTechnician> OnMention { get; set; }
+
+    private ElementReference editor;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<TicketNoteEditor>? self;
+    private string? moduleQuery;
+    private string? kbQuery;
+    private string? mentionQuery;
+    private List<KbAnswer> answers = [];
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-editor.js");
+            self = DotNetObjectReference.Create(this);
+            await module.InvokeVoidAsync("create", editor, self,
+                "A status update, or a working note… (:: text module, ?? help answer, @@ colleague)",
+                new { mentions = true, changes = true });
+
+            if (!string.IsNullOrEmpty(InitialHtml))
+            {
+                await module.InvokeVoidAsync("setHtml", editor, RichText.Sanitize(InitialHtml));
+            }
+        }
+        catch (JSException ex)
+        {
+            Toasts.Error($"The editor could not start: {ex.Message}");
+        }
+    }
+
+    /// <summary>The note as written. Sanitised again by whoever stores it.</summary>
+    public async Task<string> GetHtmlAsync() =>
+        module is null ? "" : await module.InvokeAsync<string>("html", editor);
+
+    /// <summary>Replaces what is in the editor — a shared draft loaded.</summary>
+    public async Task SetHtmlAsync(string html)
+    {
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("setHtml", editor, RichText.Sanitize(html));
+        }
+    }
+
+    public async Task ClearAsync()
+    {
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("clear", editor);
+        }
+    }
+
+    [JSInvokable]
+    public Task OnEditorChanged(string html) => OnChanged.InvokeAsync(html);
+
+    [JSInvokable]
+    public Task OnTextModuleTrigger(string? query) => Show(ref moduleQuery, query);
+
+    [JSInvokable]
+    public Task OnMentionTrigger(string? query) => Show(ref mentionQuery, query);
+
+    [JSInvokable]
+    public async Task OnKnowledgeTrigger(string? query)
+    {
+        if (query == kbQuery)
+        {
+            return;
+        }
+
+        kbQuery = query;
+
+        // Published answers only, and never one written for another customer (KnowledgeBaseService).
+        answers = query is null ? [] : await KnowledgeBase.ForAgentAsync(TenantId, Ticket.CustomerId, query, DateTime.UtcNow);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task Show(ref string? field, string? query)
+    {
+        if (query == field)
+        {
+            return Task.CompletedTask;
+        }
+
+        field = query;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private IEnumerable<TextModule> MatchingModules() =>
+        Modules.Where(m => moduleQuery is null or ""
+                           || m.Name.Contains(moduleQuery, StringComparison.OrdinalIgnoreCase)
+                           || m.Keywords.Contains(moduleQuery, StringComparison.OrdinalIgnoreCase)).Take(10);
+
+    private IEnumerable<SupportTechnician> MatchingColleagues() =>
+        Colleagues.Where(c => mentionQuery is null or "" || c.Name.Contains(mentionQuery, StringComparison.OrdinalIgnoreCase)).Take(10);
+
+    private async Task InsertModuleAsync(TextModule m)
+    {
+        string text = TextModuleRenderer.Render(m.Content, TextModuleRenderer.ValuesFor(
+            Ticket, Ticket.Customer?.Name, null, References.For(Ticket.Number), Actor, DateTime.UtcNow));
+
+        moduleQuery = null;
+
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("insertModule", editor, text);
+        }
+    }
+
+    private async Task InsertAnswerAsync(KbAnswer a)
+    {
+        kbQuery = null;
+
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("insertAnswer", editor, RichText.Sanitize(a.BodyHtml));
+        }
+    }
+
+    private async Task MentionAsync(SupportTechnician c)
+    {
+        mentionQuery = null;
+
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("insertMention", editor, c.Name);
+        }
+
+        await OnMention.InvokeAsync(c);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (module is not null)
+            {
+                await module.InvokeVoidAsync("dispose", editor);
+                await module.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit has gone; there is nothing left to tidy in the browser.
+        }
+
+        self?.Dispose();
+    }
+}

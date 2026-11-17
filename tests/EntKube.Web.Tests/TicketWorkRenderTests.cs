@@ -363,21 +363,62 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
     // ───────────────────────────── Phase 2a ─────────────────────────────
 
+    /// <summary>The note editor's module, answering "html" with what the person wrote.</summary>
+    private BunitJSModuleInterop NoteEditorWriting(string html)
+    {
+        BunitJSModuleInterop editor = JSInterop.SetupModule("./js/ticket-editor.js");
+        editor.Mode = JSRuntimeMode.Loose;
+        editor.Setup<string>("html", _ => true).SetResult(html);
+        return editor;
+    }
+
     [Fact]
     public async Task A_text_module_is_inserted_with_its_placeholders_filled_from_the_ticket()
     {
         Ticket ticket = await Raise("Login fails");
         await new TextModuleService(new TestDbContextFactory(connection)).SaveAsync(tenantId,
             new TextModule { Name = "Ack", Content = "Hi #{requester.name}, we are on #{ticket.number}." }, "admin");
+        BunitJSModuleInterop editor = NoteEditorWriting("<p></p>");
 
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
         await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
-        await detail.InvokeAsync(() => detail.Find("[data-test=text-module-picker] input").Input("ack"));
-        await detail.InvokeAsync(() => detail.FindAll("button.list-group-item").First(b => b.TextContent.Contains("Ack")).Click());
-        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
 
-        db.ChangeTracker.Clear();
-        db.TicketEvents.Should().Contain(e => e.TicketId == ticket.Id && e.Detail == $"Hi Karin, we are on {ticket.Number}.");
+        // What the editor reports when "::ack" is typed.
+        TicketNoteEditor note = detail.FindComponent<TicketNoteEditor>().Instance;
+        await detail.InvokeAsync(() => note.OnTextModuleTrigger("ack"));
+        await detail.InvokeAsync(() => detail.FindAll("[data-test=note-text-modules] button").First(b => b.TextContent.Contains("Ack")).Click());
+
+        editor.Invocations["insertModule"].Single().Arguments[1].Should().Be($"Hi Karin, we are on {ticket.Number}.");
+    }
+
+    /// <summary>
+    /// "@@" in the editor offers colleagues; picking one writes their name and ticks them to be
+    /// told, exactly as the checkbox does.
+    /// </summary>
+    [Fact]
+    public async Task A_colleague_picked_after_double_at_is_written_into_the_note_and_ticked_to_be_told()
+    {
+        Ticket ticket = await Raise();
+        Guid role = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent" });
+        db.Users.Add(new ApplicationUser { Id = "user-anna", UserName = "anna", Email = "anna@entit.example" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-anna", TenantId = tenantId, RoleId = role });
+        await db.SaveChangesAsync();
+        BunitJSModuleInterop editor = NoteEditorWriting("<p></p>");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
+
+        TicketNoteEditor note = detail.FindComponent<TicketNoteEditor>().Instance;
+        IReadOnlyList<SupportTechnician> offered = note.Colleagues;
+        offered.Should().NotBeEmpty("the fixture has a colleague with an address");
+        SupportTechnician colleague = offered[0];
+
+        await detail.InvokeAsync(() => note.OnMentionTrigger(colleague.Name[..2]));
+        await detail.InvokeAsync(() => detail.FindAll("[data-test=note-mentions] button").First(b => b.TextContent.Contains(colleague.Name)).Click());
+
+        editor.Invocations["insertMention"].Single().Arguments[1].Should().Be(colleague.Name);
+        detail.Find($"#mention-{colleague.UserId}").HasAttribute("checked").Should().BeTrue();
     }
 
     [Fact]
@@ -466,10 +507,10 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
     // ───────────────────────────── Phase 2b ─────────────────────────────
 
-    private async Task AddNoteThroughTheScreenAsync(IRenderedComponent<TicketDetail> detail, string text)
+    /// <summary>Writes a note as a person would: the editor holds <paramref name="html"/> when Add is pressed.</summary>
+    private async Task AddNoteThroughTheScreenAsync(IRenderedComponent<TicketDetail> detail, string html)
     {
         await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
-        await detail.InvokeAsync(() => detail.Find("textarea[placeholder='A status update, or a working note']").Input(text));
         await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
     }
 
@@ -477,9 +518,10 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     public async Task After_a_note_the_time_it_took_can_be_logged_against_the_ticket()
     {
         Ticket ticket = await Raise();
+        NoteEditorWriting("<p>Restarted the <strong>VPN</strong> gateway.</p>");
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
 
-        await AddNoteThroughTheScreenAsync(detail, "Restarted the VPN gateway.");
+        await AddNoteThroughTheScreenAsync(detail, "<p>Restarted the <strong>VPN</strong> gateway.</p>");
 
         IElement prompt = detail.Find("[data-test=time-prompt]");
         prompt.QuerySelector("input[type=number]")!.Change("25");
@@ -496,9 +538,10 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     public async Task Skipping_the_prompt_logs_nothing()
     {
         Ticket ticket = await Raise();
+        NoteEditorWriting("<p>Looked at it.</p>");
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
 
-        await AddNoteThroughTheScreenAsync(detail, "Looked at it.");
+        await AddNoteThroughTheScreenAsync(detail, "<p>Looked at it.</p>");
         await detail.InvokeAsync(() => detail.FindAll("[data-test=time-prompt] button").First(b => b.TextContent.Trim() == "Skip").Click());
 
         detail.FindAll("[data-test=time-prompt]").Should().BeEmpty();
@@ -513,10 +556,13 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
             .SavePersonalNoteAsync(tenantId, ticket.Id, "user-nils", "Half written", false);
 
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+        BunitJSModuleInterop editor = NoteEditorWriting("<p></p>");
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
         await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
 
-        detail.Find("textarea[placeholder='A status update, or a working note']").GetAttribute("value").Should().Be("Half written");
+        // A plain-text draft from before notes were rich comes back as that text.
+        detail.WaitForAssertion(() => editor.Invocations["setHtml"].Should().ContainSingle()
+            .Which.Arguments[1].Should().Be("Half written"));
     }
 
     [Fact]
@@ -524,8 +570,10 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     {
         Ticket ticket = await Raise();
         TicketDraftService drafts = new(new TestDbContextFactory(connection));
-        await drafts.ShareNoteAsync(tenantId, ticket.Id, "Anna's draft answer", true, "anna", false);
+        await drafts.ShareNoteAsync(tenantId, ticket.Id, "<p>Anna's <em>draft</em> answer</p>", true, "anna", false);
 
+        // The browser's editor, once the draft is loaded into it, hands back what it holds.
+        BunitJSModuleInterop editor = NoteEditorWriting("<p>Anna's <em>draft</em> answer</p>");
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
         detail.Find("[data-test=shared-draft]").TextContent.Should().Contain("Draft available").And.Contain("anna");
 
@@ -533,9 +581,39 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await detail.InvokeAsync(() => ButtonSaying(detail, "Load into the note").Click());
         await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
 
+        editor.Invocations["setHtml"].Should().Contain(i => (string)i.Arguments[1]! == "<p>Anna's <em>draft</em> answer</p>");
         db.ChangeTracker.Clear();
-        db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Detail == "Anna's draft answer").CustomerVisible.Should().BeTrue();
+        TicketEvent made = db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note && e.DetailHtml != null);
+        made.DetailHtml.Should().Be("<p>Anna's <em>draft</em> answer</p>");
+        made.CustomerVisible.Should().BeTrue();
         (await drafts.GetSharedNoteAsync(tenantId, ticket.Id)).Should().BeNull();
+    }
+
+    // ───────────────────────────── Phase 7 ─────────────────────────────
+
+    [Fact]
+    public async Task Ones_own_internal_note_can_be_deleted_from_the_history_after_a_second_press()
+    {
+        Ticket ticket = await Raise();
+        Guid mine = (await tickets.AddNoteAsync(tenantId, ticket.Id, "<p>Wrong ticket, sorry</p>", "nils", "user-nils", DateTime.UtcNow, false))!.Value;
+        await tickets.AddNoteAsync(tenantId, ticket.Id, "<p>Anna's note</p>", "anna", "user-anna", DateTime.UtcNow, false);
+        await tickets.AddNoteAsync(tenantId, ticket.Id, "<p>Told the customer</p>", "nils", "user-nils", DateTime.UtcNow, true);
+
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        // Only one button: not Anna's note, and not what the customer sees.
+        detail.FindAll("[data-test=delete-note]").Should().ContainSingle();
+
+        await detail.InvokeAsync(() => detail.Find("[data-test=delete-note]").Click());
+        detail.Find("[data-test=delete-note]").TextContent.Should().Contain("sure?");
+        db.TicketEvents.AsNoTracking().Any(e => e.Id == mine).Should().BeTrue("the first press only asks");
+
+        await detail.InvokeAsync(() => detail.Find("[data-test=delete-note]").Click());
+
+        db.TicketEvents.AsNoTracking().Any(e => e.Id == mine).Should().BeFalse();
+        detail.WaitForAssertion(() => detail.Markup.Should().NotContain("Wrong ticket, sorry").And.Contain("Anna's note"));
     }
 
     /// <summary>

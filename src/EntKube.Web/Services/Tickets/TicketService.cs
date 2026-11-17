@@ -904,6 +904,91 @@ public class TicketService(
         return true;
     }
 
+    /// <summary>How long after writing it an internal note may be deleted by its author (decision 5).</summary>
+    public static readonly TimeSpan NoteDeleteWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Adds a note written in the editor (helpdesk phase 7). The HTML is sanitised here and kept as
+    /// <see cref="TicketEvent.DetailHtml"/>; its text goes in <see cref="TicketEvent.Detail"/>, which
+    /// is what search, digests, mentions' mail and the portal read. <paramref name="trailer"/> is
+    /// plain text appended to both — who was mentioned.
+    /// </summary>
+    /// <returns>The entry's id, or null when the ticket is not the tenant's.</returns>
+    public async Task<Guid?> AddNoteAsync(
+        Guid tenantId, Guid ticketId, string html, string? actor, string? actorUserId, DateTime at,
+        bool customerVisible, string? trailer = null, CancellationToken ct = default)
+    {
+        string safe = RichText.Sanitize(html);
+
+        if (RichText.IsEmpty(safe))
+        {
+            throw new ArgumentException("The note is empty.", nameof(html));
+        }
+
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct))
+        {
+            return null;
+        }
+
+        string text = RichText.ToText(safe);
+
+        if (!string.IsNullOrWhiteSpace(trailer))
+        {
+            text = $"{text}\n\n{trailer.Trim()}";
+            safe = $"{safe}<p>{System.Net.WebUtility.HtmlEncode(trailer.Trim())}</p>";
+        }
+
+        TicketEvent entry = Event(ticketId, TicketEventKind.Note, at, actor, text, customerVisible, safe);
+        entry.ActorUserId = actorUserId;
+        db.TicketEvents.Add(entry);
+        await db.SaveChangesAsync(ct);
+        return entry.Id;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="userId"/> may delete this entry now: an internal note, written by
+    /// them, at most <see cref="NoteDeleteWindow"/> ago (decision 5). A customer-visible entry may
+    /// already have been read or mailed and is part of the §14.3 record, so it never qualifies.
+    /// </summary>
+    public static bool CanDeleteNote(TicketEvent entry, string? userId, DateTime now) =>
+        entry.Kind == TicketEventKind.Note
+        && !entry.CustomerVisible
+        && userId is not null
+        && entry.ActorUserId == userId
+        && now - (entry.RecordedAt ?? entry.At) <= NoteDeleteWindow;
+
+    /// <summary>
+    /// Deletes an internal note, by its author, within ten minutes of writing it (decision 5).
+    /// Highlights on it go with it; files added with it stay on the ticket, no longer tied to it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Why it may not be deleted.</exception>
+    public async Task DeleteNoteAsync(Guid tenantId, Guid entryId, string userId, DateTime now, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        TicketEvent entry = await db.TicketEvents
+            .FirstOrDefaultAsync(e => e.Id == entryId && e.Ticket.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("There is no such entry here.");
+
+        if (!CanDeleteNote(entry, userId, now))
+        {
+            throw new InvalidOperationException(
+                entry.Kind != TicketEventKind.Note || entry.CustomerVisible
+                    ? "Only internal notes can be deleted. What the customer can see is part of the record."
+                    : entry.ActorUserId != userId
+                        ? "Only the person who wrote a note can delete it."
+                        : "A note can only be deleted in the first ten minutes after it was written.");
+        }
+
+        await db.TicketAttachments.Where(a => a.TicketEventId == entryId && a.TenantId == tenantId)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.TicketEventId, (Guid?)null), ct);
+
+        db.TicketEvents.Remove(entry);
+        await db.SaveChangesAsync(ct);
+    }
+
     /// <summary>
     /// Notes that a ticket is not to be counted as a deviation, with the reason §14.6
     /// requires — waiting time, force majeure, or one of the §14.7 exemptions.

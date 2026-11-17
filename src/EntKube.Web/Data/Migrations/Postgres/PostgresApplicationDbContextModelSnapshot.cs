@@ -9261,6 +9261,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("Actor")
                         .HasColumnType("text");
 
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
                     b.Property<DateTime>("At")
                         .HasColumnType("timestamp with time zone");
 

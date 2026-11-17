@@ -26,8 +26,10 @@ function ensureQuill() {
 }
 
 // "::word" just before the cursor: the text-module trigger. "??words": the knowledge-base one.
+// "@@name": a colleague to mention (notes only; see `options.mentions`).
 const trigger = /::([^\s:]{0,30})$/;
 const kbTrigger = /\?\?([^?\n]{0,40})$/;
+const mentionTrigger = /@@([^\s@]{0,30})$/;
 
 function triggerBefore(quill, index, pattern = trigger) {
     const start = Math.max(0, index - 50);
@@ -35,7 +37,10 @@ function triggerBefore(quill, index, pattern = trigger) {
     return m ? { query: m[1], length: m[0].length } : null;
 }
 
-export async function create(element, dotnet, placeholder) {
+// options: { mentions: true } reports "@@name" to OnMentionTrigger; { changes: true } reports the
+// editor's HTML to OnEditorChanged, at most once a second while typing (the note's autosave).
+export async function create(element, dotnet, placeholder, options) {
+    options = options || {};
     await ensureQuill();
 
     const quill = new window.Quill(element, {
@@ -60,6 +65,14 @@ export async function create(element, dotnet, placeholder) {
         const kb = sel ? triggerBefore(quill, sel.index, kbTrigger) : null;
         dotnet.invokeMethodAsync('OnTextModuleTrigger', found ? found.query : null);
         dotnet.invokeMethodAsync('OnKnowledgeTrigger', kb ? kb.query : null);
+        if (options.mentions) {
+            const m = sel ? triggerBefore(quill, sel.index, mentionTrigger) : null;
+            dotnet.invokeMethodAsync('OnMentionTrigger', m ? m.query : null);
+        }
+        if (options.changes) {
+            clearTimeout(quill.__changeTimer);
+            quill.__changeTimer = setTimeout(() => dotnet.invokeMethodAsync('OnEditorChanged', quill.getSemanticHTML()), 800);
+        }
     });
 
     editors.set(element, quill);
@@ -82,6 +95,22 @@ export function insertModule(element, text) {
         at -= found.length;
         quill.deleteText(at, found.length, 'user');
     }
+    quill.insertText(at, text, 'user');
+    quill.setSelection(at + text.length, 0, 'user');
+}
+
+// Replaces the "@@name" being typed with "@@Full Name " — as TEXT, like a module.
+export function insertMention(element, name) {
+    const quill = editors.get(element);
+    if (!quill) return;
+    const sel = quill.getSelection(true);
+    const found = triggerBefore(quill, sel.index, mentionTrigger);
+    let at = sel.index;
+    if (found) {
+        at -= found.length;
+        quill.deleteText(at, found.length, 'user');
+    }
+    const text = '@@' + name + ' ';
     quill.insertText(at, text, 'user');
     quill.setSelection(at + text.length, 0, 'user');
 }
@@ -127,9 +156,13 @@ export function quote(element, text, header) {
 }
 
 export function clear(element) {
-    editors.get(element)?.setText('');
+    const quill = editors.get(element);
+    if (!quill) return;
+    clearTimeout(quill.__changeTimer);
+    quill.setText('', 'silent');
 }
 
 export function dispose(element) {
+    clearTimeout(editors.get(element)?.__changeTimer);
     editors.delete(element);
 }

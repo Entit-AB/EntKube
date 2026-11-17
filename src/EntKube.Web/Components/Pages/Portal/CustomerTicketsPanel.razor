@@ -7,6 +7,7 @@
 @inject IDbContextFactory<SupportDbContext> DbFactory
 @inject ToastService Toasts
 @inject CurrentActor ActorService
+@inject TicketAttachmentService Attachments
 
 @* ═══════════════════════════════════════════════════════════════════
    The customer's own view of §14: raise a ticket, follow it, and say
@@ -121,6 +122,29 @@
                     </div>
                 </div>
             </div>
+        }
+
+        @* Files (docs/helpdesk.md, phase 7): what the customer sent, and what we shared with them.
+           Downloads go through EntKube, checked against this customer, never a bucket link. *@
+        @if (files.Count > 0)
+        {
+            <h6 class="mb-2">Files</h6>
+            <ul class="list-unstyled small mb-3" data-test="portal-files">
+                @foreach (AttachmentView f in files)
+                {
+                    <li class="py-1">
+                        @if (f.Stored)
+                        {
+                            <a href="@($"/portal/attachments/{Customer.Id}/{f.Id}")" target="_blank" rel="noopener"><i class="bi bi-paperclip me-1"></i>@f.FileName</a>
+                        }
+                        else
+                        {
+                            <span class="text-muted"><i class="bi bi-paperclip me-1"></i>@f.FileName — could not be kept; please send it again</span>
+                        }
+                        <span class="text-muted ms-1">@Size(f.Size) · @f.CreatedAt.ToLocalTime().ToString("MMM d HH:mm")</span>
+                    </li>
+                }
+            </ul>
         }
 
         <h6 class="mb-2">History</h6>
@@ -264,6 +288,7 @@
     private List<Ticket> tickets = [];
     private List<Data.App> apps = [];
     private Ticket? selected;
+    private List<AttachmentView> files = [];
 
     private bool raising;
     private bool showReopen;
@@ -307,6 +332,7 @@
             if (selected is not null)
             {
                 selected = await Tickets.GetAsync(Customer.TenantId, selected.Id);
+                files = selected is null ? [] : await Attachments.ForCustomerTicketAsync(Customer.TenantId, Customer.Id, selected.Id);
             }
         }
         catch (Exception ex)
@@ -327,6 +353,7 @@
         // today. It is here because the next caller might not be, and the whole class of
         // mistake is trusting an id because the only caller that exists happens to be safe.
         selected = found?.CustomerId == Customer.Id ? found : null;
+        files = selected is null ? [] : await Attachments.ForCustomerTicketAsync(Customer.TenantId, Customer.Id, selected.Id);
 
         showReopen = false;
         replyText = "";
@@ -421,4 +448,10 @@
         TicketPriority.P3 => "bg-info text-dark",
         _ => "bg-secondary",
     };
+
+    // A conditional, not a switch: Razor reads a switch arm starting with "<" as markup.
+    private static string Size(long bytes) =>
+        bytes >= 1024 * 1024 ? $"{bytes / (1024.0 * 1024):0.#} MB"
+        : bytes >= 1024 ? $"{bytes / 1024.0:0.#} kB"
+        : $"{bytes} B";
 }

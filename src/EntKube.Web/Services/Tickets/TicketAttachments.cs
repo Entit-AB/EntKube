@@ -442,6 +442,86 @@ public class TicketAttachmentService(IDbContextFactory<SupportDbContext> dbFacto
         return content is null ? null : (View(row), content);
     }
 
+    // ───────────────────────────── The customer's view (phase 7) ─────────────────────────────
+
+    /// <summary>
+    /// The tenant a customer belongs to — for the portal's download, where the person's access to
+    /// the customer has already been checked and the customer is all the address names.
+    /// </summary>
+    public async Task<Guid?> TenantOfCustomerAsync(Guid customerId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.Customers.Where(c => c.Id == customerId).Select(c => (Guid?)c.TenantId).FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// The files a customer may see on their ticket: customer-visible ones, on this ticket or on a
+    /// mail filed on it — and on duplicates merged into it, but only duplicates that were this
+    /// customer's too. A ticket merged in from another customer brings its files to the agents,
+    /// never to this customer. A delivery report's files never show: the bounce is an internal
+    /// note, and what it carries is our own returned mail. Empty when the ticket is not this
+    /// customer's.
+    /// </summary>
+    public async Task<List<AttachmentView>> ForCustomerTicketAsync(
+        Guid tenantId, Guid customerId, Guid ticketId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId && t.CustomerId == customerId, ct))
+        {
+            return [];
+        }
+
+        List<Guid> tickets = [ticketId, .. await db.Tickets
+            .Where(t => t.MergedIntoTicketId == ticketId && t.TenantId == tenantId && t.CustomerId == customerId)
+            .Select(t => t.Id).ToListAsync(ct)];
+
+        List<Guid> mails = await db.InboundMailMessages
+            .Where(m => m.TicketId != null && tickets.Contains(m.TicketId.Value) && !m.IsDeliveryReport)
+            .Select(m => m.Id).ToListAsync(ct);
+
+        List<TicketAttachment> rows = await db.TicketAttachments.AsNoTracking()
+            .Where(a => a.TenantId == tenantId && a.CustomerVisible
+                        && ((a.TicketId != null && tickets.Contains(a.TicketId.Value))
+                            || (a.InboundMailMessageId != null && mails.Contains(a.InboundMailMessageId.Value))))
+            .OrderBy(a => a.CreatedAt)
+            .ToListAsync(ct);
+
+        return [.. rows.Select(View)];
+    }
+
+    /// <summary>
+    /// A file for the customer portal: stored, customer-visible, and on a ticket of
+    /// <paramref name="customerId"/>'s — its own ticket, or the ticket of the mail it came with.
+    /// Null for anything else, so a guessed id says nothing about whether the file exists.
+    /// </summary>
+    public async Task<(AttachmentView Meta, Stream Content)?> OpenForCustomerAsync(
+        Guid tenantId, Guid customerId, Guid attachmentId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        TicketAttachment? row = await db.TicketAttachments.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == attachmentId && a.TenantId == tenantId && a.Stored && a.CustomerVisible, ct);
+
+        if (row is null || row.StorageLinkId is not Guid linkId || row.ObjectKey is null)
+        {
+            return null;
+        }
+
+        Guid? ticketId = row.TicketId ?? (row.InboundMailMessageId is Guid mailId
+            ? await db.InboundMailMessages.Where(m => m.Id == mailId && !m.IsDeliveryReport).Select(m => m.TicketId).FirstOrDefaultAsync(ct)
+            : null);
+
+        if (ticketId is null
+            || !await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId && t.CustomerId == customerId, ct))
+        {
+            return null;
+        }
+
+        Stream? content = await store.OpenAsync(tenantId, linkId, row.ObjectKey, ct);
+        return content is null ? null : (View(row), content);
+    }
+
     private static AttachmentView View(TicketAttachment a) =>
         new(a.Id, a.FileName, a.ContentType, a.Size, a.Stored, a.Problem, a.Source, a.CustomerVisible,
             a.CreatedAt, a.CreatedBy, a.TicketEventId);

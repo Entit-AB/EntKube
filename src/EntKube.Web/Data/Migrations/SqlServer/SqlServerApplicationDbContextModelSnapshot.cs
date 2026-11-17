@@ -9266,6 +9266,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("Actor")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
+
                     b.Property<DateTime>("At")
                         .HasColumnType("datetime2");
 
