@@ -82,6 +82,29 @@ public class TicketMailTests : IDisposable
         RichText.Sanitize("<a href=\"https://status.entit.example/x\">status</a>")
             .Should().Be("<a href=\"https://status.entit.example/x\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">status</a>");
 
+    /// <summary>
+    /// GHSA-j92c-7v7g-gj3f: HtmlSanitizer before 9.0.892 did not sanitise inside an ALLOWED
+    /// <c>template</c>, and a browser renders it via <c>shadowrootmode</c> or by flattening nodes
+    /// deeper than 512. We never allowed <c>template</c>; these pin that, so allowing it later
+    /// (say, for a mail client's markup) fails here rather than reopening the bypass.
+    /// </summary>
+    [Fact]
+    public void A_template_never_carries_script_through_the_sanitiser()
+    {
+        string shadowRoot = "<div><template shadowrootmode=\"open\"><script>alert('xss')</script><img src=x onerror=alert(1)></template></div><p>ok</p>";
+        string deep = string.Concat(Enumerable.Repeat("<div>", 512)) + "<template><script>alert('xss')</script></template><p>ok</p>";
+
+        foreach (string payload in new[] { shadowRoot, deep })
+        {
+            RichText.Sanitize(payload).Should().NotContainAny("<template", "<script", "alert", "onerror", "shadowrootmode");
+        }
+
+        // What sits outside the attack survives. (In the deep payload the paragraph is INSIDE the
+        // unclosed divs, and a disallowed element goes with everything in it, so nothing is left.)
+        RichText.Sanitize(shadowRoot).Should().Be("<p>ok</p>");
+        RichText.Sanitize(deep).Should().BeEmpty();
+    }
+
     // ───────────────────────────── Sending ─────────────────────────────
 
     [Fact]
