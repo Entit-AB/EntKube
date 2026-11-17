@@ -70,7 +70,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal);
 
     /// <summary>Commands that render a table — the only ones with a column list to check.</summary>
-    private const int CommandsWithColumns = 22;
+    private const int CommandsWithColumns = 23;
 
     /// <summary>
     /// Whether this command is banked as unverifiable. Exposed so
@@ -102,6 +102,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
             [
                 "--cluster", "{}", "--id", "{}", "--app", "{}",
                 "--workload", "{}", "--environment", "{}",
+                "--ticket", "{}", "--tag", "{}", "--link", "{}",
             ]));
         }
         catch (CliUsageException)

@@ -152,10 +152,23 @@ the existing `TicketNotifier`.
 - **Split is offered on notes only.** The *Created* entry holds "Registered via …", not the
   customer's words. Customer replies are filed as notes, so they can be split.
 
-**Not yet done (Phase 1b): the ticket API and CLI.** Tickets have **no public API at all**
-today: no list, no read, nothing to hang tags, links or merge on. Adding one properly means a
-scope, typed responses for the OpenAPI ratchets, CLI verbs and the parity tests. That is its
-own PR rather than a tail on this one.
+**Phase 1b: the ticket API and CLI, done (2026-11-17).** It is the first public API for tickets
+at all.
+
+- **Contract.** `ITicketApi` in the Support contracts, implemented by `TicketApi`.
+- **Routes.** Ten routes under `/api/v1/tickets`, with tickets addressed by number inside the
+  token's tenant.
+- **Scopes.** `tickets:read` and `tickets:write`. The read label says the tickets include
+  customers' correspondence and patient data.
+- **CLI.** `entkube tickets …`. These are the first CLI commands that send a JSON body, so the CLI
+  gained a body and PUT.
+- **No MCP tools, by design.** Every ticket route is in `NoToolByDesign` with the §17/§18 reason.
+  Exposing the queue to a model *is* the transfer the no-LLM rule forbids.
+- **Not in the API:** person-relative overviews (a token has no person), split, rename, bulk
+  changes and following.
+- **Test probe.** The OpenAPI scope probe now fills integer path parameters with a number. Before
+  this, a `{number:int}` route was unrouted for a GUID and returned 404, which the probe read as
+  "not refused".
 
 ### Phase 2: Write faster
 Article types, attachments (inbound and outbound), and reply, reply-all, forward and quote.

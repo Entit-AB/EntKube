@@ -59,6 +59,7 @@ internal static class SupportServices
         services.AddSingletonWork<EntKube.Web.Services.Mail.SupportMailPoller>();
         services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         services.AddScoped<EntKube.Contracts.Support.ISupportApi, EntKube.Web.Modules.Api.SupportApi>();
+        services.AddScoped<EntKube.Contracts.Support.ITicketApi, EntKube.Web.Modules.Api.TicketApi>();
 
         return services;
     }

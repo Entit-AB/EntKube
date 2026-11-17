@@ -51,6 +51,7 @@ public class CliQueryParameterParityTests(GeneratedOpenApiDocumentFixture fixtur
                 [
                     "--cluster", "{}", "--id", "{}", "--app", "{}",
                     "--workload", "{}", "--environment", "{}",
+                    "--ticket", "{}", "--tag", "{}", "--link", "{}",
                 ]));
             }
             catch (CliUsageException)

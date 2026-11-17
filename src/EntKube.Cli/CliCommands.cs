@@ -25,7 +25,13 @@ public sealed record CliCommand
     }
 
     /// <summary>True for anything that is not a read — what an operator wants warned about.</summary>
-    public bool Mutates => Verb is CliVerb.Post or CliVerb.Delete;
+    public bool Mutates => Verb is CliVerb.Post or CliVerb.Put or CliVerb.Delete;
+
+    /// <summary>
+    /// The JSON body to send, for a command whose route takes one. Built from the arguments the
+    /// same way the path is, and allowed to throw <see cref="CliUsageException"/> the same way.
+    /// </summary>
+    public Func<CliArgs, object>? BuildBody { get; init; }
 
     /// <summary>Columns for the default table view: header → JSON property path.</summary>
     public (string Header, string Path)[] Columns { get; init; } = [];
@@ -41,7 +47,7 @@ public sealed record CliCommand
 }
 
 /// <summary>Thrown for a mistake in how the command was invoked, as opposed to a failure from the API.</summary>
-public enum CliVerb { Get, Post, Delete }
+public enum CliVerb { Get, Post, Put, Delete }
 
 public sealed class CliUsageException(string message) : Exception(message);
 
@@ -323,6 +329,95 @@ public static class CliCommands
             Columns = [("KIND", "kind"), ("SECRET", "secret"), ("ERROR", "error")],
             RowsProperty = "bindings",
         },
+        // ── Tickets (docs/helpdesk.md, phase 1b) ──
+        //
+        // A ticket is named by its number, as customers and operators know it. Every change is
+        // written to the ticket's history under the token's name.
+
+        new CliCommand
+        {
+            Path = ["tickets", "list"],
+            Description = "List open support tickets, worst first ([--view open|unassigned|reminders|escalated])",
+            BuildPath = a => "/api/v1/tickets" + Query(("view", a.Optional("view"))),
+            Columns = [("#", "number"), ("PRIO", "priority"), ("STATUS", "status"), ("TITLE", "title"),
+                       ("CUSTOMER", "customer"), ("HOLDER", "assignee"), ("RESPONSE DUE", "response.deadline"),
+                       ("REMINDER", "reminderAt"), ("TAGS", "tags")],
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "show"],
+            Description = "Show one ticket with its links and history (--ticket <number>)",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}",
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "tag"],
+            Description = "Add a tag to a ticket (--ticket <number> --tag <tag>)",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/tags",
+            BuildBody = a => new { tag = a.Required("tag") },
+            Verb = CliVerb.Post,
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "untag"],
+            Description = "Remove a tag from a ticket (--ticket <number> --tag <tag>)",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/tags/{Uri.EscapeDataString(a.Required("tag"))}",
+            Verb = CliVerb.Delete,
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "link"],
+            Description = "Link a ticket to another (--ticket <number> --to <number> [--role related|parent|child])",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/links",
+            BuildBody = a => new { number = Number(a, "to"), role = a.Optional("role") ?? "related" },
+            Verb = CliVerb.Post,
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "unlink"],
+            Description = "Remove a link (--ticket <number> --link <link-id>, from tickets show)",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/links/{a.Required("link")}",
+            Verb = CliVerb.Delete,
+        },
+        new CliCommand
+        {
+            // ⚠️ Never erases a missed response; --exclude-from-sla is the separate, reasoned act.
+            Path = ["tickets", "merge"],
+            Description = "Merge a duplicate into the original (--ticket <duplicate> --into <original> "
+                          + "[--exclude-from-sla --reason <why>])",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/merge",
+            BuildBody = a => new
+            {
+                into = Number(a, "into"),
+                excludeFromSla = a.Flag("exclude-from-sla"),
+                reason = a.Optional("reason"),
+            },
+            Verb = CliVerb.Post,
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "reminder", "set"],
+            Description = "Set a reminder; it never stops an agreement clock (--ticket <number> --at <UTC time> [--note <text>])",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/reminder",
+            BuildBody = a => new { at = Instant(a, "at"), note = a.Optional("note") },
+            Verb = CliVerb.Put,
+        },
+        new CliCommand
+        {
+            Path = ["tickets", "reminder", "clear"],
+            Description = "Clear a ticket's reminder (--ticket <number>)",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/reminder",
+            Verb = CliVerb.Delete,
+        },
+        new CliCommand
+        {
+            // Internal unless --customer-visible: a note the customer reads is a deliberate choice.
+            Path = ["tickets", "note"],
+            Description = "Add a note to a ticket's history (--ticket <number> --text <text> [--customer-visible])",
+            BuildPath = a => $"/api/v1/tickets/{a.Required("ticket")}/notes",
+            BuildBody = a => new { text = a.Required("text"), customerVisible = a.Flag("customer-visible") },
+            Verb = CliVerb.Post,
+        },
         new CliCommand
         {
             Path = ["vms", "list"],
@@ -381,6 +476,20 @@ public static class CliCommands
 
         return best is null ? (null, args) : (best, args[bestLength..]);
     }
+
+    /// <summary>An option that must be a whole number — a ticket number.</summary>
+    private static int Number(CliArgs a, string name) =>
+        int.TryParse(a.Required(name), out int n) && n > 0
+            ? n
+            : throw new CliUsageException($"--{name} must be a ticket number.");
+
+    /// <summary>An option that must be a point in time. Read as UTC unless it says otherwise.</summary>
+    private static DateTime Instant(CliArgs a, string name) =>
+        DateTime.TryParse(a.Required(name), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out DateTime t)
+            ? DateTime.SpecifyKind(t, DateTimeKind.Utc)
+            : throw new CliUsageException($"--{name} must be a time, such as 2026-11-20T09:00Z.");
 
     private static string Query(params (string Key, string? Value)[] parameters)
     {

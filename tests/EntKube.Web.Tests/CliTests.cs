@@ -146,6 +146,14 @@ public class CliTests
                 "vms pause",
                 "vms unpause",
                 "vms migrate",
+                "tickets tag",
+                "tickets untag",
+                "tickets link",
+                "tickets unlink",
+                "tickets merge",
+                "tickets reminder set",
+                "tickets reminder clear",
+                "tickets note",
             ]);
     }
 

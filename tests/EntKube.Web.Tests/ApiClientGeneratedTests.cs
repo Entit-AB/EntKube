@@ -81,7 +81,7 @@ public class ApiClientGeneratedTests
                 where verb.Name is "get" or "post" or "put" or "patch" or "delete"
                 select verb.Value.GetProperty("operationId").GetString() + "Async"];
 
-        expected.Should().HaveCount(43, "the document describes 43 operations");
+        expected.Should().HaveCount(53, "the document describes 53 operations");
 
         MethodInfo[] methods = typeof(EntKubeApi).GetMethods(BindingFlags.Public | BindingFlags.Instance);
 

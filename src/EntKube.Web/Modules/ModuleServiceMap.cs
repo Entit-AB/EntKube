@@ -243,6 +243,7 @@ public static partial class ModuleMap
 
         // ---- Support ---------------------------------------------------------------
         [typeof(Api.SupportApi)] = Module.Support,
+        [typeof(Api.TicketApi)] = Module.Support,
         [typeof(EntKube.Web.Services.Contracts.ContractService)] = Module.Support,
         [typeof(JiraAdapter)] = Module.Support,
         [typeof(EntKube.Web.Services.Knowledge.KnowledgeService)] = Module.Support,

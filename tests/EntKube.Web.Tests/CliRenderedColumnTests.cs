@@ -722,6 +722,38 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// The support queue. Every column is filled, an assignee, a reminder and a tag included, so a
+    /// dash here can only mean the column names a field the API does not send.
+    /// </summary>
+    [Fact]
+    public void The_ticket_queue_renders_every_column()
+    {
+        DateTime reported = new(2026, 11, 12, 8, 0, 0, DateTimeKind.Utc);
+
+        EntKube.Contracts.Support.TicketSummary ticket = new(
+            Id: Guid.Parse("71c00000-0000-0000-0000-000000000001"),
+            Number: 1042,
+            Title: "Login fails for all users",
+            Status: "InProgress",
+            Priority: "P2",
+            PriorityConfirmed: true,
+            CustomerId: Guid.Parse("c0570000-0000-0000-0000-000000000001"),
+            Customer: "Entit AB",
+            Assignee: "nils",
+            Tags: ["login", "vpn"],
+            ReportedAt: reported,
+            ReminderAt: reported.AddHours(6),
+            Response: new EntKube.Contracts.Support.TicketClock(reported.AddHours(4), null, false, false),
+            Resolution: new EntKube.Contracts.Support.TicketClock(reported.AddDays(2), null, false, false),
+            UpdateDue: reported.AddHours(4),
+            PenaltyDeviation: false);
+
+        EveryColumnRenders(
+            Command("tickets", "list"),
+            JsonSerializer.Serialize(new[] { TicketSummaryResponse.From(ticket) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -739,6 +771,7 @@ public class CliRenderedColumnTests
             "upgrades", "drift", "supply-chain",
             "vms list",
             "rollouts", "dr",
+            "tickets list",
         ];
 
         IEnumerable<string> describable =

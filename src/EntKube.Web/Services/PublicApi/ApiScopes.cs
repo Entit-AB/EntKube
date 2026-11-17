@@ -160,11 +160,15 @@ public static class ApiScopes
     /// </summary>
     public const string ScimProvision = "scim:provision";
 
+    public const string TicketsRead = "tickets:read";
+
+    public const string TicketsWrite = "tickets:write";
+
     /// <summary>Every scope, in the order they should be presented.</summary>
     // Declared before All: static field initializers run in declaration order, so
     // assigning All from a field declared below it would leave All null at runtime.
     private static readonly string[] AllScopes =
-        [FleetRead, AppsRead, AppsWrite, VmsWrite, OpsRead, LogsRead, OpsWrite, ConfigRead, ConfigWrite, ScimProvision];
+        [FleetRead, AppsRead, AppsWrite, VmsWrite, OpsRead, LogsRead, OpsWrite, ConfigRead, ConfigWrite, TicketsRead, TicketsWrite, ScimProvision];
 
     public static readonly IReadOnlyList<string> All = AllScopes;
 
@@ -254,6 +258,25 @@ public static class ApiScopes
         // verb is asserted against the methods rather than left as prose.
         [ConfigWrite] = new("Change", [
             new("the cluster price sheets", ["PUT /cost-rates/{}", "DELETE /cost-rates/{}"]),
+        ]),
+
+        // ⚠️ Says what is in a ticket, because that is the privilege: customers' own words, which
+        // for this agreement include patient data. Minting a token for "the ticket list" must not
+        // read as minting one for titles only.
+        [TicketsRead] = new("Read", [
+            new("support tickets, including customers' correspondence and internal notes, which may contain personal and patient data",
+                ["GET /tickets", "GET /tickets/{}"]),
+        ]),
+
+        [TicketsWrite] = new("Change", [
+            new("support tickets' tags, links, reminders and notes, merge duplicates, and write notes the customer can see",
+                [
+                    "POST /tickets/{}/tags", "DELETE /tickets/{}/tags/{}",
+                    "POST /tickets/{}/links", "DELETE /tickets/{}/links/{}",
+                    "POST /tickets/{}/merge",
+                    "PUT /tickets/{}/reminder", "DELETE /tickets/{}/reminder",
+                    "POST /tickets/{}/notes",
+                ]),
         ]),
 
         // ⚠️ This scope is NOT confined to the token's tenant, and it is the one grant on this

@@ -1066,6 +1066,7 @@ public class TicketService(
             .Include(t => t.Pauses)
             .Include(t => t.AffectedApps)
             .Include(t => t.Tags)
+            .Include(t => t.Customer)
             .AsNoTracking()
             .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
     }

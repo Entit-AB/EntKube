@@ -902,6 +902,184 @@ public static class PublicApiEndpoints
             // both would be the two-copies-of-one-fact the class comment on PublicApiResponses
             // warns about, and the declared one cannot drift out of step with the handler.
         }).RequireApiScope("AcknowledgeAdvisorFinding", ApiScopes.OpsWrite);
+
+        MapTickets(api);
+    }
+
+    /// <summary>
+    /// The support queue (docs/helpdesk.md, phase 1b). A ticket is addressed by its number, as
+    /// customers and operators know it, inside the token's tenant — a number belonging to another
+    /// tenant's ticket answers 404 like any ticket that is not there.
+    ///
+    /// <para>⚠️ <b>These routes carry customer correspondence</b>, which for this agreement means
+    /// patient data, so <c>tickets:read</c> says so in the sentence an operator reads when minting
+    /// a token, and the MCP server has no tools for them at all (see <c>McpEndpointParityTests</c>):
+    /// handing a ticket to a language model is the processing §17 needs a DPA for.</para>
+    ///
+    /// <para>Every change is written to the ticket's history as <c>api-token:&lt;name&gt;</c>.</para>
+    /// </summary>
+    private static void MapTickets(RouteGroupBuilder api)
+    {
+        static string Actor(HttpContext ctx) => $"api-token:{ctx.GetApiPrincipal()!.TokenName}";
+
+        static ProblemHttpResult Refused(EntKube.Contracts.Support.TicketActionRefused refused) =>
+            TypedResults.Problem(refused.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+
+        // A view the enum does not name answers 400 rather than quietly becoming "open".
+        api.MapGet("/tickets",
+            async Task<Results<Ok<IEnumerable<TicketSummaryResponse>>, BadRequest<string>>> (
+            HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets, string? view, CancellationToken ct) =>
+        {
+            EntKube.Contracts.Support.TicketQueueView parsed = EntKube.Contracts.Support.TicketQueueView.Open;
+
+            if (view is not null
+                && (!Enum.TryParse(view, ignoreCase: true, out parsed) || int.TryParse(view, out _)))
+            {
+                return TypedResults.BadRequest(
+                    $"Unknown view '{view}'. Use open, unassigned, reminders or escalated.");
+            }
+
+            IReadOnlyList<EntKube.Contracts.Support.TicketSummary> queue =
+                await tickets.GetQueueAsync(ctx.GetApiPrincipal()!.TenantId, parsed, ct);
+
+            return TypedResults.Ok<IEnumerable<TicketSummaryResponse>>([.. queue.Select(TicketSummaryResponse.From)]);
+        }).RequireApiScope("ListTickets", ApiScopes.TicketsRead);
+
+        api.MapGet("/tickets/{number:int}",
+            async Task<Results<Ok<TicketResponse>, NotFound>> (
+            int number, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets, CancellationToken ct) =>
+        {
+            EntKube.Contracts.Support.TicketView? view =
+                await tickets.GetTicketAsync(ctx.GetApiPrincipal()!.TenantId, number, ct);
+
+            return view is null ? TypedResults.NotFound() : TypedResults.Ok(TicketResponse.From(view));
+        }).RequireApiScope("GetTicket", ApiScopes.TicketsRead);
+
+        api.MapPost("/tickets/{number:int}/tags",
+            async Task<Results<Ok<TicketTagsResponse>, NotFound, ProblemHttpResult>> (
+            int number, TicketTagInput input, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                IReadOnlyList<string>? tags = await tickets.AddTagAsync(
+                    ctx.GetApiPrincipal()!.TenantId, number, input.Tag, Actor(ctx), ct);
+
+                return tags is null ? TypedResults.NotFound() : TypedResults.Ok(new TicketTagsResponse(number, tags));
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return Refused(refused);
+            }
+        }).RequireApiScope("AddTicketTag", ApiScopes.TicketsWrite);
+
+        api.MapDelete("/tickets/{number:int}/tags/{tag}",
+            async Task<Results<Ok<TicketTagsResponse>, NotFound>> (
+            int number, string tag, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            IReadOnlyList<string>? tags = await tickets.RemoveTagAsync(
+                ctx.GetApiPrincipal()!.TenantId, number, tag, Actor(ctx), ct);
+
+            return tags is null ? TypedResults.NotFound() : TypedResults.Ok(new TicketTagsResponse(number, tags));
+        }).RequireApiScope("RemoveTicketTag", ApiScopes.TicketsWrite);
+
+        api.MapPost("/tickets/{number:int}/links",
+            async Task<Results<Ok<TicketLinkResponse>, NotFound, ProblemHttpResult>> (
+            int number, TicketLinkInput input, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                EntKube.Contracts.Support.TicketLinkSummary? link = await tickets.LinkAsync(
+                    ctx.GetApiPrincipal()!.TenantId, number, input.Number, input.Role, Actor(ctx), ct);
+
+                return link is null ? TypedResults.NotFound() : TypedResults.Ok(TicketLinkResponse.From(link));
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return Refused(refused);
+            }
+        }).RequireApiScope("LinkTicket", ApiScopes.TicketsWrite);
+
+        api.MapDelete("/tickets/{number:int}/links/{linkId:guid}",
+            async Task<Results<NoContent, NotFound>> (
+            int number, Guid linkId, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            bool removed = await tickets.UnlinkAsync(ctx.GetApiPrincipal()!.TenantId, number, linkId, Actor(ctx), ct);
+            return removed ? TypedResults.NoContent() : TypedResults.NotFound();
+        }).RequireApiScope("UnlinkTicket", ApiScopes.TicketsWrite);
+
+        // ⚠️ Never erases a missed response: the duplicate keeps its own record. Excluding it from
+        // the SLA is the separate excludeFromSla flag, and needs a reason.
+        api.MapPost("/tickets/{number:int}/merge",
+            async Task<Results<Ok<TicketMergeResponse>, NotFound, ProblemHttpResult>> (
+            int number, TicketMergeInput input, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                EntKube.Contracts.Support.TicketMergeOutcome? merged = await tickets.MergeAsync(
+                    ctx.GetApiPrincipal()!.TenantId, number, input.Into, input.ExcludeFromSla == true,
+                    input.Reason, Actor(ctx), ct);
+
+                return merged is null
+                    ? TypedResults.NotFound()
+                    : TypedResults.Ok(new TicketMergeResponse(
+                        merged.Duplicate, merged.Original, merged.RecordedAsResponse, merged.ResponseWasLate));
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return Refused(refused);
+            }
+        }).RequireApiScope("MergeTicket", ApiScopes.TicketsWrite);
+
+        api.MapPut("/tickets/{number:int}/reminder",
+            async Task<Results<Ok<OkResponse>, NotFound, ProblemHttpResult>> (
+            int number, TicketReminderInput input, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                bool set = await tickets.SetReminderAsync(
+                    ctx.GetApiPrincipal()!.TenantId, number, input.At, input.Note, Actor(ctx), ct);
+
+                return set ? TypedResults.Ok(OkResponse.Succeeded) : TypedResults.NotFound();
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return Refused(refused);
+            }
+        }).RequireApiScope("SetTicketReminder", ApiScopes.TicketsWrite);
+
+        api.MapDelete("/tickets/{number:int}/reminder",
+            async Task<Results<NoContent, NotFound>> (
+            int number, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets, CancellationToken ct) =>
+        {
+            bool cleared = await tickets.SetReminderAsync(
+                ctx.GetApiPrincipal()!.TenantId, number, null, null, Actor(ctx), ct);
+
+            return cleared ? TypedResults.NoContent() : TypedResults.NotFound();
+        }).RequireApiScope("ClearTicketReminder", ApiScopes.TicketsWrite);
+
+        api.MapPost("/tickets/{number:int}/notes",
+            async Task<Results<Ok<OkResponse>, NotFound, ProblemHttpResult>> (
+            int number, TicketNoteInput input, HttpContext ctx, EntKube.Contracts.Support.ITicketApi tickets,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                bool added = await tickets.AddNoteAsync(
+                    ctx.GetApiPrincipal()!.TenantId, number, input.Text, input.CustomerVisible == true, Actor(ctx), ct);
+
+                return added ? TypedResults.Ok(OkResponse.Succeeded) : TypedResults.NotFound();
+            }
+            catch (EntKube.Contracts.Support.TicketActionRefused refused)
+            {
+                return Refused(refused);
+            }
+        }).RequireApiScope("AddTicketNote", ApiScopes.TicketsWrite);
     }
 
     /// <summary>
@@ -1026,4 +1204,25 @@ public static class PublicApiEndpoints
         // charging for a tenant who had turned it off in the settings page. Appended last so no
         // positional caller of this record is re-mapped.
         bool? ChargeIdleCapacity = null);
+
+    /// <summary>A tag to add.</summary>
+    public sealed record TicketTagInput(string Tag);
+
+    /// <summary>A link to another ticket: its number, and what it is to this one (related, parent or child).</summary>
+    public sealed record TicketLinkInput(int Number, string Role);
+
+    /// <summary>
+    /// Merge this ticket — the duplicate — into <c>Into</c>. <c>ExcludeFromSla</c> defaults to false,
+    /// and excluding needs a <c>Reason</c> (§14.6).
+    /// </summary>
+    public sealed record TicketMergeInput(int Into, bool? ExcludeFromSla = null, string? Reason = null);
+
+    /// <summary>When to be reminded (UTC), and what for. A reminder never stops an agreement clock.</summary>
+    public sealed record TicketReminderInput(DateTime At, string? Note = null);
+
+    /// <summary>
+    /// A note for the history. <c>CustomerVisible</c> defaults to false: a note the customer reads in
+    /// the portal is a deliberate choice, never a default.
+    /// </summary>
+    public sealed record TicketNoteInput(string Text, bool? CustomerVisible = null);
 }

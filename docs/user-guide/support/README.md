@@ -17,5 +17,6 @@ things work differently from a general helpdesk. These chapters say where.
 ## Advanced
 
 4. [Ticket actions](ticket-actions.md): merge, split and link.
+5. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
 
 More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).
