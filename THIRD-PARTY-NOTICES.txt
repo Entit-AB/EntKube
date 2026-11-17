@@ -8,13 +8,13 @@ Generated from the resolved NuGet dependency graph (direct + transitive).
 ========================================================================
 COMPONENT INVENTORY
 ========================================================================
-- AngleSharp 0.17.1
+- AngleSharp 1.10.0
     License:   MIT
-    Copyright: Copyright 2013-2022, AngleSharp.
+    Copyright: Copyright 2013-2026, AngleSharp.
     Project:   https://anglesharp.github.io/
-- AngleSharp.Css 0.17.0
+- AngleSharp.Css 1.4.0
     License:   MIT
-    Copyright: Copyright 2016-2023, AngleSharp
+    Copyright: Copyright (c) AngleSharp.Css
     Project:   https://anglesharp.github.io/
 - AWSSDK.Core 4.0.7.1
     License:   Apache-2.0
@@ -47,9 +47,9 @@ COMPONENT INVENTORY
     License:   file: license.txt
     Copyright: Copyright 2013-2023 Daniel Mueller
     Project:   https://github.com/danm-de/Fractions
-- HtmlSanitizer 9.0.886
+- HtmlSanitizer 11.0.26
     License:   MIT
-    Copyright: Copyright 2013-2025 Michael Ganss
+    Copyright: Copyright 2013-2026 Michael Ganss
     Project:   https://github.com/mganss/HtmlSanitizer
 - Humanizer.Core 2.14.1
     License:   MIT
@@ -368,14 +368,14 @@ LICENSE TEXTS
 MIT License
 ------------------------------------------------------------------------
 The following components are licensed under the MIT License:
-  - AngleSharp 0.17.1 — Copyright 2013-2022, AngleSharp.
-  - AngleSharp.Css 0.17.0 — Copyright 2016-2023, AngleSharp
+  - AngleSharp 1.10.0 — Copyright 2013-2026, AngleSharp.
+  - AngleSharp.Css 1.4.0 — Copyright (c) AngleSharp.Css
   - Azure.Core 1.47.1 — © Microsoft Corporation. All rights reserved.
   - Azure.Identity 1.14.2 — © Microsoft Corporation. All rights reserved.
   - BCrypt.Net-Next 4.0.3 — Copyright (c) 2006 Damien Miller (jBCrypt); 2013 Ryan D. Emerle (.Net port); 2016/2021 Chris McKee (.Net-core port)
   - BouncyCastle.Cryptography 2.6.2 — Copyright © Legion of the Bouncy Castle Inc. 2000-2025
   - Cronos 0.8.4 — Copyright © 2016-2024 Hangfire OÜ.
-  - HtmlSanitizer 9.0.886 — Copyright 2013-2025 Michael Ganss
+  - HtmlSanitizer 11.0.26 — Copyright 2013-2026 Michael Ganss
   - Humanizer.Core 2.14.1 — Copyright (c) .NET Foundation and Contributors
   - MailKit 4.17.0 — .NET Foundation and Contributors
   - Microsoft.AspNetCore.App.Internal.Assets 10.0.1 — © Microsoft Corporation. All rights reserved.
