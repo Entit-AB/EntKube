@@ -173,6 +173,13 @@ public class TenantService(
         // the tenant's own storage and are left there, as every other purge leaves infrastructure.
         await db.TicketAttachments.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
         await db.SupportAttachmentSettings.Where(s => s.TenantId == id).ExecuteDeleteAsync(ct);
+        // Phase 4's tables carry the tenant as a column too.
+        await db.UserNotifications.Where(n => n.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.NotificationPreferences.Where(p => p.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.NotificationCursors.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.OutOfOffices.Where(o => o.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.TicketPresences.Where(p => p.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.CalendarFeeds.Where(f => f.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

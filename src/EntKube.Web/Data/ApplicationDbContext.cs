@@ -49,6 +49,13 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketDraft> TicketDrafts => Set<TicketDraft>();
     public DbSet<TicketAttachment> TicketAttachments => Set<TicketAttachment>();
     public DbSet<SupportAttachmentSetting> SupportAttachmentSettings => Set<SupportAttachmentSetting>();
+    public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
+    public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
+    public DbSet<NotificationCursor> NotificationCursors => Set<NotificationCursor>();
+    public DbSet<NotifiedEscalation> NotifiedEscalations => Set<NotifiedEscalation>();
+    public DbSet<OutOfOffice> OutOfOffices => Set<OutOfOffice>();
+    public DbSet<TicketPresence> TicketPresences => Set<TicketPresence>();
+    public DbSet<CalendarFeed> CalendarFeeds => Set<CalendarFeed>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();

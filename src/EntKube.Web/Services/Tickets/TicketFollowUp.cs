@@ -24,7 +24,11 @@ public class TicketFollowUp(
     IDbContextFactory<SupportDbContext> dbFactory,
     TicketNotifier notifier,
     SupportDutyService duty,
-    ILogger<TicketFollowUp> logger)
+    ILogger<TicketFollowUp> logger,
+    // Optional so the reminder and digest tests need not build the bell. In the app both are
+    // registered, and every pass makes notifications and announces escalations as well.
+    TicketNotificationService? notifications = null,
+    TicketService? tickets = null)
 {
     /// <summary>
     /// How long a ticket must be quiet before its followers are sent what happened. Three
@@ -44,6 +48,18 @@ public class TicketFollowUp(
         int reminders = await RemindersAsync(tenantId, now, members, ct);
         int closed = await AutoCloseAsync(tenantId, now, ct);
         int digests = await DigestsAsync(tenantId, now, members, ct);
+
+        if (notifications is not null)
+        {
+            await notifications.GenerateAsync(tenantId, now, ct);
+
+            if (tickets is not null)
+            {
+                await notifications.EscalationsAsync(tenantId, await tickets.GetTenantQueueAsync(tenantId, now, ct), now, ct);
+            }
+
+            await notifications.PruneAsync(tenantId, now, ct);
+        }
 
         return new FollowUpPass(reminders, closed, digests);
     }

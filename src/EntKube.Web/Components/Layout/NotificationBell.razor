@@ -1,0 +1,125 @@
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@implements IDisposable
+@inject TicketNotificationService Notifications
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
+
+@* The bell (docs/helpdesk.md, phase 4): unread support notifications across every tenant the
+   person belongs to. An interactive island in the static top bar; the count is re-read every
+   thirty seconds from the database, which is what every instance shares. *@
+
+@if (userId is not null)
+{
+    <div class="position-relative" data-test="notification-bell">
+        <button type="button" class="nav-link position-relative" title="Notifications" aria-label="Notifications"
+                @onclick="ToggleAsync">
+            <i class="bi bi-bell"></i>
+            @if (unread > 0)
+            {
+                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style="font-size: .6rem">
+                    @(unread > 99 ? "99+" : unread.ToString())
+                </span>
+            }
+        </button>
+
+        @if (open)
+        {
+            <div class="dropdown-menu dropdown-menu-end show p-0 shadow" style="right: 0; left: auto; width: 24rem; max-height: 28rem; overflow-y: auto">
+                <div class="d-flex justify-content-between align-items-center px-3 py-2 border-bottom small">
+                    <strong>Notifications</strong>
+                    @if (unread > 0)
+                    {
+                        <button class="btn btn-sm btn-link p-0" @onclick="MarkAllAsync">Mark all read</button>
+                    }
+                </div>
+                @if (items.Count == 0)
+                {
+                    <div class="px-3 py-3 small text-muted">Nothing yet.</div>
+                }
+                @foreach (NotificationView n in items)
+                {
+                    <button type="button" class="dropdown-item small text-wrap py-2 @(n.Seen ? "text-muted" : "fw-semibold")"
+                            @onclick="() => OpenAsync(n)">
+                        <i class="bi @Icon(n.Kind) me-1"></i>@n.Text
+                        <div class="text-muted fw-normal" style="font-size: .7rem">@n.CreatedAt.ToLocalTime().ToString("MMM d HH:mm")</div>
+                    </button>
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private string? userId;
+    private int unread;
+    private bool open;
+    private List<NotificationView> items = [];
+    private Timer? timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        if (userId is null)
+        {
+            return;
+        }
+
+        unread = await Notifications.UnreadCountAsync(userId);
+
+        timer = new Timer(_ => InvokeAsync(async () =>
+        {
+            try
+            {
+                unread = await Notifications.UnreadCountAsync(userId);
+                StateHasChanged();
+            }
+            catch
+            {
+                // A missed refresh is the next refresh's job; the bell must never break a page.
+            }
+        }), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private async Task ToggleAsync()
+    {
+        open = !open;
+
+        if (open && userId is not null)
+        {
+            items = await Notifications.ListAsync(userId);
+        }
+    }
+
+    private async Task OpenAsync(NotificationView n)
+    {
+        await Notifications.MarkSeenAsync(userId!, n.Id);
+        unread = Math.Max(0, unread - (n.Seen ? 0 : 1));
+        open = false;
+
+        if (n.TenantSlug is string slug && n.TicketNumber is int number)
+        {
+            Nav.NavigateTo($"/tenants/{slug}?section=tickets&ticket={number}");
+        }
+    }
+
+    private async Task MarkAllAsync()
+    {
+        await Notifications.MarkSeenAsync(userId!, null);
+        unread = 0;
+        items = await Notifications.ListAsync(userId!);
+    }
+
+    private static string Icon(EntKube.Web.Data.NotificationKind kind) => kind switch
+    {
+        EntKube.Web.Data.NotificationKind.NewTicket => "bi-plus-circle",
+        EntKube.Web.Data.NotificationKind.Assigned => "bi-person-check",
+        EntKube.Web.Data.NotificationKind.Reminder => "bi-alarm",
+        EntKube.Web.Data.NotificationKind.Escalation => "bi-exclamation-triangle text-danger",
+        _ => "bi-chat-left-text",
+    };
+
+    public void Dispose() => timer?.Dispose();
+}

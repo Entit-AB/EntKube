@@ -268,6 +268,31 @@ Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and or
   showed); SQLite lower-cases only ASCII, so case-insensitive matching of `Å`, `Ä` and `Ö` works on
   Postgres and SQL Server but not in SQLite development databases.
 
+**Phase 4 done (2026-11-17): staying informed.**
+
+- **The bell.** In-app notifications are made by the follow-up sweep from the ticket history, the
+  same way as follower digests: one line per person per ticket per pass, never about your own
+  actions, with a compare-and-set cursor per tenant. A new or restored server starts the cursor at
+  *now* rather than announcing the past.
+- **Escalation notices**, once per ticket, clock and deadline. The claim is inserting that row.
+- **The notification matrix** is Zammad's events × (mine, unassigned, followed, all). Groups are
+  replaced by "unassigned" and "followed".
+- **Assignments** are now recorded as `TicketEventKind.Assigned`, not `Note`, so the sweep can
+  tell "yours now" apart from other news.
+- **Out of office** with a substitute: the rota passes over the absent person, the substitute
+  hears about their tickets and gets a *Covering for* overview, and the absences are listed.
+- **Presence** is kept in the database (`TicketPresence`, 15-second heartbeat, 45-second window),
+  so colleagues on another instance are seen too. Advisory only.
+- **The dashboard** is computed on read. First response time is measured inside the support
+  window, as §14.4 counts it.
+- **A calendar feed** of the person's deadlines at `/support/calendar/{token}.ics`. It is anonymous
+  by necessity, so it uses a 256-bit token stored only as a hash, and resetting it retires the old
+  address.
+- **Test lesson:** "nobody is told about their own" passed with that rule deleted, because the
+  test's person would never have been notified anyway. The test now makes them a follower.
+- **Not done:** an e-mail column in the matrix (followers already get digests), a notification
+  sound, and Zammad's per-browser keyboard shortcuts (Phase 6).
+
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
 We run on three providers and N instances, so a node-local index (even the Lucene.NET

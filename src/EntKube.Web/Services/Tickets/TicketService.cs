@@ -989,8 +989,9 @@ public class TicketService(
 
         // Not customer-visible: who at ENTIT is holding it is our business, and §14.1
         // promises the customer a named contact, not our rota.
+        // Assigned, not Note: the notification sweep tells \"it is yours now\" from news by this kind.
         db.Set<TicketEvent>().Add(Event(
-            ticket.Id, TicketEventKind.Note, at, actor,
+            ticket.Id, TicketEventKind.Assigned, at, actor,
             next is null
                 ? $"Unassigned (was {previous})."
                 : previous is null

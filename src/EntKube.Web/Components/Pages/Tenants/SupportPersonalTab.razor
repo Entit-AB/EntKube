@@ -1,0 +1,232 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@inject TicketNotificationService Notifications
+@inject OutOfOfficeService OutOfOffice
+@inject CalendarFeedService Calendar
+@inject SupportDutyService Duty
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
+@inject ToastService Toasts
+
+@* A person's own support settings in this tenant (docs/helpdesk.md, phase 4): what the bell
+   tells them, when they are away and who covers, and a calendar feed of their deadlines. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading && userId is null)
+{
+    <EmptyState Icon="bi-person-x" Title="Not signed in as a person" Message="These settings belong to a signed-in person." />
+}
+else if (!loading)
+{
+    <h6 class="mb-1">Notifications</h6>
+    <div class="text-muted small mb-2">What the bell tells you, for which tickets. Followers also get the mail digest they already had.</div>
+    <table class="table table-sm small align-middle" data-test="notification-matrix" style="max-width: 44rem">
+        <thead class="table-light">
+            <tr><th></th><th class="text-center">My tickets</th><th class="text-center">Unassigned</th><th class="text-center">Followed</th><th class="text-center">All tickets</th></tr>
+        </thead>
+        <tbody>
+            @foreach ((NotificationKind kind, string label) in Rows)
+            {
+                <tr>
+                    <td>@label</td>
+                    @foreach (NotifyScope scope in Columns)
+                    {
+                        <td class="text-center">
+                            <input class="form-check-input" type="checkbox" aria-label="@($"{label}: {scope}")"
+                                   checked="@Get(kind).HasFlag(scope)" @onchange="e => Set(kind, scope, e.Value is true)" />
+                        </td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+    <div class="mb-4">
+        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SavePreferencesAsync">Save</AsyncButton>
+        <button class="btn btn-sm btn-link" @onclick="ResetPreferences">Reset to defaults</button>
+    </div>
+
+    <h6 class="mb-1">Out of office</h6>
+    <div class="text-muted small mb-2">While you are away the rota passes you over, and your substitute hears about your tickets and sees them under <em>Covering for</em>.</div>
+    <div class="row g-2 align-items-end small mb-2" data-test="out-of-office" style="max-width: 50rem">
+        <div class="col-md-3"><label class="form-label text-muted">From</label><input class="form-control form-control-sm" type="date" @bind="awayFrom" /></div>
+        <div class="col-md-3"><label class="form-label text-muted">To (last day away)</label><input class="form-control form-control-sm" type="date" @bind="awayTo" /></div>
+        <div class="col-md-4">
+            <label class="form-label text-muted">Substitute</label>
+            <select class="form-select form-select-sm" @bind="substitute">
+                <option value="">nobody</option>
+                @foreach (SupportTechnician m in members.Where(m => m.UserId != userId))
+                {
+                    <option value="@m.UserId">@m.Name</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-2"><AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAbsenceAsync">Add</AsyncButton></div>
+        <div class="col-12"><input class="form-control form-control-sm" placeholder="Note (optional), e.g. parental leave" @bind="awayNote" /></div>
+    </div>
+    <ul class="list-unstyled small mb-4">
+        @foreach (OutOfOffice o in absences)
+        {
+            <li>
+                <i class="bi bi-calendar-x me-1"></i>
+                <strong>@NameOf(o.UserId)</strong> @o.From.ToString("yyyy-MM-dd") – @o.To.ToString("yyyy-MM-dd")
+                @if (o.SubstituteUserId is string sub) { <span>· covered by @NameOf(sub)</span> }
+                @if (o.Note is string note) { <span class="text-muted">· @note</span> }
+                @if (o.UserId == userId)
+                {
+                    <button class="btn btn-sm btn-link text-danger p-0 ms-1" @onclick="() => ClearAbsenceAsync(o)">remove</button>
+                }
+            </li>
+        }
+        @if (absences.Count == 0)
+        {
+            <li class="text-muted">Nobody in this tenant has an absence recorded.</li>
+        }
+    </ul>
+
+    <h6 class="mb-1">Calendar feed</h6>
+    <div class="text-muted small mb-2">Your tickets' reminders and response and resolution deadlines, for Outlook, Google or Apple Calendar. The address is the password: anyone who has it sees your deadlines.</div>
+    <div class="small" data-test="calendar-feed">
+        @if (feedUrl is string url)
+        {
+            <div class="input-group input-group-sm mb-1" style="max-width: 50rem">
+                <input class="form-control" readonly value="@url" />
+            </div>
+            <div class="form-text mb-1">Copy it now — it is shown once. Resetting makes this address stop working.</div>
+        }
+        else if (hasFeed)
+        {
+            <div class="mb-1">You have a feed. Its address was shown when it was made; reset it to get a new one.</div>
+        }
+        <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="ResetFeedAsync">@(hasFeed ? "Reset the address" : "Make a feed")</AsyncButton>
+        @if (hasFeed)
+        {
+            <AsyncButton CssClass="btn-sm btn-link text-danger" OnClick="RevokeFeedAsync">Turn it off</AsyncButton>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private static readonly (NotificationKind, string)[] Rows =
+    [
+        (NotificationKind.NewTicket, "New ticket"),
+        (NotificationKind.Update, "Update"),
+        (NotificationKind.Assigned, "Assigned to you"),
+        (NotificationKind.Reminder, "Reminder due"),
+        (NotificationKind.Escalation, "Deadline missed or near"),
+    ];
+
+    private static readonly NotifyScope[] Columns = [NotifyScope.Mine, NotifyScope.Unassigned, NotifyScope.Followed, NotifyScope.All];
+
+    private bool loading = true;
+    private string? error;
+    private string? userId;
+    private NotificationPreference prefs = null!;
+    private List<SupportTechnician> members = [];
+    private List<OutOfOffice> absences = [];
+    private DateOnly? awayFrom, awayTo;
+    private string substitute = "";
+    private string? awayNote;
+    private bool hasFeed;
+    private string? feedUrl;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            userId = (await AuthState.GetAuthenticationStateAsync()).User
+                .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            if (userId is not null)
+            {
+                prefs = await Notifications.GetPreferencesAsync(TenantId, userId);
+                members = await Duty.GetRosterAsync(TenantId);
+                absences = await OutOfOffice.ListAsync(TenantId);
+                hasFeed = await Calendar.HasFeedAsync(TenantId, userId);
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private NotifyScope Get(NotificationKind kind) => NotificationPreferences.For(prefs, kind);
+
+    private void Set(NotificationKind kind, NotifyScope scope, bool on)
+    {
+        NotifyScope value = on ? Get(kind) | scope : Get(kind) & ~scope;
+
+        switch (kind)
+        {
+            case NotificationKind.NewTicket: prefs.NewTicket = value; break;
+            case NotificationKind.Update: prefs.Update = value; break;
+            case NotificationKind.Assigned: prefs.Assigned = value; break;
+            case NotificationKind.Reminder: prefs.Reminder = value; break;
+            default: prefs.Escalation = value; break;
+        }
+    }
+
+    private async Task SavePreferencesAsync()
+    {
+        await Notifications.SavePreferencesAsync(prefs);
+        Toasts.Success("Saved.");
+    }
+
+    private void ResetPreferences() => prefs = NotificationPreferences.Defaults(userId!, TenantId);
+
+    private string NameOf(string id) => members.FirstOrDefault(m => m.UserId == id).Name ?? "someone who has left";
+
+    private async Task SaveAbsenceAsync()
+    {
+        if (awayFrom is not DateOnly from || awayTo is not DateOnly to)
+        {
+            Toasts.Error("Give the first and the last day away.");
+            return;
+        }
+
+        try
+        {
+            await OutOfOffice.SetAsync(TenantId, userId!, from, to,
+                members.Any(m => m.UserId == substitute) ? substitute : null, awayNote);
+            absences = await OutOfOffice.ListAsync(TenantId);
+            awayFrom = awayTo = null;
+            awayNote = null;
+            Toasts.Success("Recorded.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task ClearAbsenceAsync(OutOfOffice o)
+    {
+        await OutOfOffice.ClearAsync(TenantId, o.Id, userId);
+        absences = await OutOfOffice.ListAsync(TenantId);
+    }
+
+    private async Task ResetFeedAsync()
+    {
+        string token = await Calendar.ResetAsync(TenantId, userId!);
+        feedUrl = Nav.ToAbsoluteUri($"/support/calendar/{token}.ics").ToString();
+        hasFeed = true;
+    }
+
+    private async Task RevokeFeedAsync()
+    {
+        await Calendar.RevokeAsync(TenantId, userId!);
+        feedUrl = null;
+        hasFeed = false;
+        Toasts.Info("The calendar feed is off.");
+    }
+}

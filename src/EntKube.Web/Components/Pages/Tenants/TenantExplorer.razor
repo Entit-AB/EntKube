@@ -517,6 +517,8 @@ else
         // question an operator actually has, which is whose ticket runs out first across all of them.
         new("Tickets", "bi-life-preserver",
         [ new("tickets", "Ticket queue", "bi-life-preserver"),
+          new("support-dashboard", "Dashboard", "bi-speedometer2"),
+          new("support-personal", "My notifications & absence", "bi-bell"),
           // Beside the queue because it is the question the queue raises: whose is this
           // one. A rota nobody can find is a rota nobody is on, and an empty rota means
           // every ticket opens unassigned.
@@ -1071,6 +1073,13 @@ else
                 builder.AddComponentParameter(4, "Search", SearchParam);
                 builder.CloseComponent();
                 break;
+            case "support-dashboard":
+                builder.OpenComponent<SupportDashboardTab>(0);
+                builder.AddComponentParameter(1, "TenantId", tid);
+                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
+                builder.CloseComponent();
+                break;
+            case "support-personal": builder.OpenComponent<SupportPersonalTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
