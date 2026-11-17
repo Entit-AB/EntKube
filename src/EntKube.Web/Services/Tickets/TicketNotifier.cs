@@ -227,6 +227,107 @@ public class TicketNotifier(
     }
 
     /// <summary>
+    /// Who a reply goes to by default: the reporter, then the §14.1 technical contact and deputy —
+    /// the same people <see cref="ReplyToCustomerAsync"/> has always answered.
+    /// </summary>
+    public async Task<List<string>> DefaultRecipientsAsync(Ticket ticket, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        List<string> to = [];
+
+        if (!string.IsNullOrWhiteSpace(ticket.RequestedByEmail))
+        {
+            to.Add(ticket.RequestedByEmail.Trim());
+        }
+
+        foreach (string address in await DesignatedContactsAsync(db, ticket, ct))
+        {
+            if (!to.Any(a => a.Equals(address, StringComparison.OrdinalIgnoreCase)))
+            {
+                to.Add(address);
+            }
+        }
+
+        return to;
+    }
+
+    /// <summary>
+    /// Sends one written mail about a ticket — a reply, a reply to all, or a forward — as ONE
+    /// message with its To and Cc visible to everyone on it, the way a person's mail client
+    /// would. HTML with a plain-text part made from the same sanitised content, and attachments.
+    ///
+    /// <para><b>No <c>Auto-Submitted</c> header</b>, unlike the receipts and notices: this is a
+    /// person writing, and marking it automatic would tell the customer's mail system to treat
+    /// it as such. Their out-of-office answering it is harmless — the mailbox recognises
+    /// machine-generated mail and does not open tickets from it.</para>
+    ///
+    /// <para>Returns everyone it went to, or nothing when the relay refused it: a mail either
+    /// left or did not. Never throws.</para>
+    /// </summary>
+    public async Task<List<string>> SendComposedAsync(Ticket ticket, ComposedMail composed, CancellationToken ct = default)
+    {
+        try
+        {
+            using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
+
+            if (!settings.IsConfigured)
+            {
+                logger.LogWarning(
+                    "A mail on ticket #{Number} could not be sent: there is nowhere to send from ({Source}).",
+                    ticket.Number, settings.Source);
+                return [];
+            }
+
+            string from = await SenderAddressAsync(db, ticket, settings, ct);
+            MailboxAddress sender = MailboxAddress.Parse(from);
+
+            MimeMessage mail = new();
+            mail.From.Add(string.IsNullOrWhiteSpace(sender.Name)
+                ? new MailboxAddress(await SenderNameAsync(db, ticket, ct), sender.Address)
+                : sender);
+
+            foreach (string to in composed.To)
+            {
+                mail.To.Add(MailboxAddress.Parse(to));
+            }
+
+            foreach (string cc in composed.Cc)
+            {
+                mail.Cc.Add(MailboxAddress.Parse(cc));
+            }
+
+            mail.Subject = $"{(composed.IsForward ? "Fwd: " : "")}{references.For(ticket.Number)} {ticket.Title}";
+            mail.MessageId = SupportMessageId.For(ticket.Number, from);
+
+            BodyBuilder body = new()
+            {
+                TextBody = composed.Text,
+                HtmlBody = "<!DOCTYPE html><html><body style=\"font-family: sans-serif; font-size: 14px\">"
+                           + composed.Html + "</body></html>",
+            };
+
+            foreach (OutboundAttachment a in composed.Attachments)
+            {
+                body.Attachments.Add(a.FileName, a.Content, ContentType.Parse(a.ContentType));
+            }
+
+            mail.Body = body.ToMessageBody();
+
+            await TransmitAsync(settings, mail, ct);
+
+            return [.. composed.To, .. composed.Cc];
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "A mail on ticket #{Number} could not be sent.", ticket.Number);
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Sends one of our own people's words on to the customer, from the support address.
     ///
     /// <para><b>Why it goes to the §14.1 contacts and not only to the reporter.</b> The
@@ -447,41 +548,7 @@ public class TicketNotifier(
             mail.Headers.Add("Auto-Submitted", "auto-replied");
             mail.Headers.Add("X-Auto-Response-Suppress", "All");
 
-            using SmtpClient client = new();
-
-            // A mail server EntKube deployed holds a certificate for the hostname its users
-            // reach it on, and this connection is made to its in-cluster Service name instead —
-            // so the name cannot match, and insisting fails a healthy handshake. The same
-            // reasoning the fetching side has always applied; see MailboxConnection.
-            if (!settings.ValidateCertificateName)
-            {
-                client.ServerCertificateValidationCallback = (_, _, _, _) => true;
-            }
-
-            await client.ConnectAsync(
-                settings.Host, settings.Port,
-                settings.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None, ct);
-
-            if (!string.IsNullOrEmpty(settings.Username))
-            {
-                if (settings.UseOAuth)
-                {
-                    // An OIDC directory validates bearer tokens and nothing else, so a password
-                    // presented here is not wrong — it is unverifiable. OAUTHBEARER rather than
-                    // XOAUTH2, and the same mechanism the fetching side presents to the same
-                    // server: two halves of one login disagreeing about how to say "this is a
-                    // token" is a failure that only shows up in one direction.
-                    await client.AuthenticateAsync(
-                        new SaslMechanismOAuthBearer(settings.Username, settings.Password ?? ""), ct);
-                }
-                else
-                {
-                    await client.AuthenticateAsync(settings.Username, settings.Password ?? "", ct);
-                }
-            }
-
-            await client.SendAsync(mail, ct);
-            await client.DisconnectAsync(true, ct);
+            await TransmitAsync(settings, mail, ct);
 
             return true;
         }
@@ -497,4 +564,52 @@ public class TicketNotifier(
             return false;
         }
     }
+
+    /// <summary>Hands one message to the configured relay. Throws when it cannot.</summary>
+    private static async Task TransmitAsync(SmtpSettings settings, MimeMessage mail, CancellationToken ct)
+    {
+        using SmtpClient client = new();
+
+        // A mail server EntKube deployed holds a certificate for the hostname its users
+        // reach it on, and this connection is made to its in-cluster Service name instead —
+        // so the name cannot match, and insisting fails a healthy handshake. The same
+        // reasoning the fetching side has always applied; see MailboxConnection.
+        if (!settings.ValidateCertificateName)
+        {
+            client.ServerCertificateValidationCallback = (_, _, _, _) => true;
+        }
+
+        await client.ConnectAsync(
+            settings.Host, settings.Port,
+            settings.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None, ct);
+
+        if (!string.IsNullOrEmpty(settings.Username))
+        {
+            if (settings.UseOAuth)
+            {
+                // An OIDC directory validates bearer tokens and nothing else, so a password
+                // presented here is not wrong — it is unverifiable. OAUTHBEARER rather than
+                // XOAUTH2, and the same mechanism the fetching side presents to the same
+                // server: two halves of one login disagreeing about how to say "this is a
+                // token" is a failure that only shows up in one direction.
+                await client.AuthenticateAsync(
+                    new SaslMechanismOAuthBearer(settings.Username, settings.Password ?? ""), ct);
+            }
+            else
+            {
+                await client.AuthenticateAsync(settings.Username, settings.Password ?? "", ct);
+            }
+        }
+
+        await client.SendAsync(mail, ct);
+        await client.DisconnectAsync(true, ct);
+    }
 }
+
+/// <summary>A file to send with a mail.</summary>
+public sealed record OutboundAttachment(string FileName, string ContentType, byte[] Content);
+
+/// <summary>A mail written on a ticket: who it goes to, what it says (sanitised), what is attached.</summary>
+public sealed record ComposedMail(
+    IReadOnlyList<string> To, IReadOnlyList<string> Cc, string Text, string Html,
+    IReadOnlyList<OutboundAttachment> Attachments, bool IsForward = false);

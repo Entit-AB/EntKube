@@ -63,6 +63,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(contracts);
         Services.AddSingleton(tickets);
         Services.AddSingleton(work);
+        Services.AddSingleton(notifier);
         Services.AddSingleton(new TicketOverviews(tickets, factory));
         Services.AddSingleton(new TicketBulkService(tickets, work));
 
@@ -493,5 +494,52 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         string card = detail.Find("[data-test=attachments]").TextContent;
         card.Should().Contain("error.png").And.Contain(UnconfiguredAttachmentStore.Reason);
         detail.FindAll("[data-test=attachments] input[type=file]").Should().BeEmpty("there is nowhere to put an upload");
+    }
+
+    // ───────────────────────────── Phase 2c-2 ─────────────────────────────
+
+    /// <summary>
+    /// A rich entry is sanitised again when shown — a row written before a rule changed, or
+    /// restored from a backup, is held to today's rules, not trusted because it is ours.
+    /// </summary>
+    [Fact]
+    public async Task A_stored_rich_entry_is_sanitised_again_when_shown()
+    {
+        Ticket ticket = await Raise();
+        db.TicketEvents.Add(new TicketEvent
+        {
+            Id = Guid.NewGuid(), TicketId = ticket.Id, Kind = TicketEventKind.Note, At = DateTime.UtcNow,
+            Detail = "Hello", DetailHtml = "<p>Hello <strong>you</strong></p><script>alert(1)</script><img src=x onerror=alert(2)>",
+        });
+        await db.SaveChangesAsync();
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string entry = detail.Find(".rich-entry").InnerHtml;
+        entry.Should().Contain("<strong>you</strong>").And.NotContain("script").And.NotContain("onerror").And.NotContain("<img");
+    }
+
+    [Fact]
+    public async Task A_reply_written_in_the_composer_is_sent_and_recorded_as_rich_text()
+    {
+        Ticket ticket = await Raise();
+
+        BunitJSModuleInterop editor = JSInterop.SetupModule("./js/ticket-editor.js");
+        editor.SetupVoid("create", _ => true);
+        editor.SetupVoid("clear", _ => true);
+        editor.SetupVoid("dispose", _ => true);
+        editor.Setup<string>("html", _ => true).SetResult("<p>We restarted <strong>the gateway</strong>.</p>");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => detail.FindAll("button").First(b => b.TextContent.Trim() == "Reply").Click());
+        await detail.InvokeAsync(() => detail.Find("[data-test=mail-composer] .d-flex button.btn-primary").Click());
+
+        db.ChangeTracker.Clear();
+        // No relay is configured in this suite, so the mail cannot leave — which is itself what
+        // has to be recorded: the words, internal, and the clock still running.
+        TicketEvent written = db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.DetailHtml != null);
+        written.DetailHtml.Should().Be("<p>We restarted <strong>the gateway</strong>.</p>");
+        written.Detail.Should().StartWith("A mail could not be sent");
+        written.Actor.Should().Be("nils");
     }
 }

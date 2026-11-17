@@ -230,8 +230,25 @@ they survive a reload, a dropped circuit or another instance. They are never on 
 - **Not yet:** customers downloading attachments from the portal, and an HTTP-level test of the
   download endpoint (it needs a cookie-authenticated test host, which the API fixture isn't).
 
-Still to come in Phase 2: **2c-2** rich text (Quill) and HTML mail (HtmlSanitizer), a reply
-composer on the ticket, reply-all, forward and quoting.
+**Phase 2c-2 done (2026-11-17): rich text and mail from the ticket.**
+
+- **Composer.** A Reply composer on the ticket (`TicketMailComposer`) with Quill 2.0.3, vendored into
+  `wwwroot/lib/quill` from the npm tarball after checking it against the registry's sha512. It
+  offers reply, reply all (copying the others on the customer's last mail, minus our own
+  addresses) and forward (internal, not a response), `::` text modules typed inline, quoting
+  from the history, and the ticket's stored files as attachments.
+- **`RichText`** (HtmlSanitizer, allow-list) is the only sanitiser. It runs before anything is
+  stored or sent, and again when shown. The plain part is made from the same sanitised HTML.
+  `TicketEvent.DetailHtml` holds the rich version, and `Detail` keeps the text that search,
+  digests, the portal and the mail's plain part read.
+- **One message with To and Cc visible**, as a person's client sends it, and no
+  `Auto-Submitted`: a person wrote it. The internal notices (assignment, mention, digest) stay
+  plain text, so the reply cut line is still found in text, never in markup (decision 3).
+- **Not yet:** notes are still plain text (only mail is rich). Inbound HTML is shown as its text
+  (remote images are therefore never loaded). Neither the `@@` trigger inside the editor nor
+  customer downloads from the portal exist yet.
+
+Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and organisation views).
 
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
