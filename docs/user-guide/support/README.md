@@ -23,6 +23,7 @@ things work differently from a general helpdesk. These chapters say where.
 8. [Checklist](checklist.md): the steps of a ticket's work.
 9. [Time accounting](time-accounting.md): logging the time a ticket took.
 10. [Drafts](shared-drafts.md): your note saved as you type, and drafts left for colleagues.
-11. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
+11. [Attachments](attachments.md): files from customers' mail, and your own.
+12. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
 
 More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).

@@ -698,6 +698,8 @@
         <TicketWorkPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" Actor="@Actor" OnChanged="ReloadAfterWorkAsync" />
         <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
                               OnOpenItems="n => openChecklistItems = n" />
+        <TicketAttachmentsPanel TenantId="TenantId" TicketId="ticket.Id" TenantSlug="@TenantSlug" Actor="@Actor"
+                                Editable="IsOpen" OnChanged="ReloadAfterWorkAsync" />
     </div>
     </div>
 }

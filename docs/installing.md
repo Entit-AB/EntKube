@@ -464,6 +464,17 @@ the vault rather than in a file on the host.
 
 Switching later loses nothing: sealed segments already written stay where they are.
 
+## Support attachments
+
+Files customers mail to the support address, and files agents attach to tickets, are kept in one
+of the tenant's S3 StorageLinks, chosen under **Support › Mail › Attachments**. Until one is
+chosen, nothing is kept. A mail's files are listed on its ticket as *not kept* with the reason,
+and agents can't attach, so nothing is lost without anyone seeing it.
+
+⚠️ **The backup bundle holds the attachment records, not the files.** The files stay in the
+bucket, under `support-attachments/<tenant id>/`, and are backed up the way that bucket is. A
+bundle restored without its bucket lists every attachment as unavailable.
+
 ---
 
 ## Architecture

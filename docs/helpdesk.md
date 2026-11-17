@@ -210,8 +210,28 @@ they survive a reload, a dropped circuit or another instance. They are never on 
   `value=` plus `@oninput` handler compiles in about 90 seconds. Avoid `@bind:after` in that
   component.
 
-Still to come in Phase 2: **2c** rich text and HTML mail, S3 attachments, reply-all, forward and
-quoting.
+**Phase 2c-1 done (2026-11-17): attachments.**
+
+- Kept in one of the tenant's S3 `StorageLink`s (chosen under Support › Mail › Attachments), reached
+  through Data Services' own `StorageService` and client factory with the tenant as an input.
+- Inbound mail attachments are kept at intake, keyed to the mail. A ticket shows them once the mail
+  is filed on it, including for merged duplicates, so the filing logic did not change.
+- An attachment that could not be kept is still a row, with `Stored = false` and the reason shown
+  on the ticket. Intake never stops because of a bucket.
+- Agents attach from the ticket. Without storage they are refused with the reason. It never falls
+  back to the database.
+- Download: `/tenants/{slug}/support/attachments/{id}`. The tenant comes from the address, access
+  is checked against it, and the attachment is then looked up inside it. Files are served as a
+  download with an allow-listed type, `nosniff` and `CSP: sandbox`.
+- The backup bundle carries the rows only (v17). The installer docs and README say so.
+- **Test lesson:** the first in-memory store refused cross-tenant reads itself, which hid the
+  service's own tenant predicate (a mutation deleting it passed). The fake is now tenant-blind on
+  read.
+- **Not yet:** customers downloading attachments from the portal, and an HTTP-level test of the
+  download endpoint (it needs a cookie-authenticated test host, which the API fixture isn't).
+
+Still to come in Phase 2: **2c-2** rich text (Quill) and HTML mail (HtmlSanitizer), a reply
+composer on the ticket, reply-all, forward and quoting.
 
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.

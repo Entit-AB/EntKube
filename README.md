@@ -59,7 +59,7 @@ The operations layer is built in: **alert rules and routing**, **notification ch
 Give your customers a self-service view scoped strictly to their data: **status dashboards, SLA reports, observability, maintenance notices and incident history**.
 
 ### Backup & restore
-Export the full platform state and restore it on new hardware — migrate servers or recover from disaster without hand-rebuilding your configuration.
+Export the full platform state and restore it on new hardware — migrate servers or recover from disaster without hand-rebuilding your configuration. Support attachments live in the tenant's own S3 bucket and are backed up with it; the bundle carries their records only.
 
 ## Tech Stack
 

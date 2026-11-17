@@ -60,6 +60,8 @@ internal static class SupportModel
         builder.Entity<TicketChecklistItem>().ToTable("TicketChecklistItems");
         builder.Entity<ChecklistTemplate>().ToTable("ChecklistTemplates");
         builder.Entity<TicketDraft>().ToTable("TicketDrafts");
+        builder.Entity<TicketAttachment>().ToTable("TicketAttachments");
+        builder.Entity<SupportAttachmentSetting>().ToTable("SupportAttachmentSettings");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -333,6 +335,22 @@ internal static class SupportModel
             entity.HasIndex(t => new { t.TenantId, t.Name });
             entity.Property(t => t.Name).HasMaxLength(200);
             entity.HasOne(t => t.Tenant).WithMany().HasForeignKey(t => t.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<SupportAttachmentSetting>(entity => entity.HasKey(s => s.TenantId));
+
+        builder.Entity<TicketAttachment>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.TenantId, a.TicketId });
+            entity.HasIndex(a => a.InboundMailMessageId);
+            entity.Property(a => a.FileName).HasMaxLength(200);
+            entity.Property(a => a.ContentType).HasMaxLength(200);
+            entity.Property(a => a.ObjectKey).HasMaxLength(300);
+            entity.Property(a => a.Problem).HasMaxLength(500);
+
+            // The ticket cascades; the mail and the tenant are columns (see the class remarks).
+            entity.HasOne(a => a.Ticket).WithMany().HasForeignKey(a => a.TicketId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TicketDraft>(entity =>

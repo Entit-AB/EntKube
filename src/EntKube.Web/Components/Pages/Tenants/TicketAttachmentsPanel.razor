@@ -1,0 +1,132 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketAttachmentService Attachments
+@inject TicketService Tickets
+@inject ToastService Toasts
+
+@* The ticket's files: what came with the customer's mail, and what we added. A file that could
+   not be kept is listed with the reason, never left out (docs/helpdesk.md, decision 4).
+   Downloads go through EntKube with a tenant check; they are never links into the bucket. *@
+
+<div class="card mb-3" data-test="attachments">
+    <div class="card-body small">
+        <div class="text-muted mb-1">Attachments</div>
+        @if (files.Count == 0)
+        {
+            <div class="text-muted mb-2">none</div>
+        }
+        <ul class="list-unstyled mb-2">
+            @foreach (AttachmentView f in files)
+            {
+                <li class="mb-1">
+                    @if (f.Stored && TenantSlug is not null)
+                    {
+                        <a href="@($"/tenants/{TenantSlug}/support/attachments/{f.Id}")" target="_blank" rel="noopener"><i class="bi bi-paperclip me-1"></i>@f.FileName</a>
+                    }
+                    else
+                    {
+                        <span class="@(f.Stored ? "" : "text-danger")"><i class="bi bi-paperclip me-1"></i>@f.FileName</span>
+                    }
+                    <span class="text-muted">@Size(f.Size)@(f.Source == AttachmentSource.Mail ? " · from the customer's mail" : f.CustomerVisible ? " · the customer sees it" : " · internal")</span>
+                    @if (f.Problem is string problem)
+                    {
+                        <div class="text-danger">@problem</div>
+                    }
+                </li>
+            }
+        </ul>
+        @if (Editable)
+        {
+            @if (unavailable is string why)
+            {
+                <div class="form-text text-muted">@why</div>
+            }
+            else
+            {
+                <InputFile OnChange="OnFilesChosen" multiple class="form-control form-control-sm mb-1" />
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="attach-visible" @bind="customerVisible" />
+                    <label class="form-check-label" for="attach-visible">The customer sees what I attach</label>
+                </div>
+                <div class="form-text">Up to @(TicketAttachmentService.MaxFileBytes / (1024 * 1024)) MB a file.</div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+
+    [Parameter] public string? TenantSlug { get; set; }
+
+    [Parameter] public bool Editable { get; set; } = true;
+
+    [Parameter, EditorRequired] public string Actor { get; set; } = "";
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private List<AttachmentView> files = [];
+    private string? unavailable;
+    private bool customerVisible;
+    private Guid? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor != TicketId)
+        {
+            loadedFor = TicketId;
+            unavailable = await Attachments.WhyUnavailableAsync(TenantId);
+            files = await Attachments.ForTicketAsync(TenantId, TicketId);
+        }
+    }
+
+    private async Task OnFilesChosen(InputFileChangeEventArgs e)
+    {
+        IReadOnlyList<IBrowserFile> chosen = e.GetMultipleFiles(10);
+
+        if (chosen.FirstOrDefault(f => f.Size > TicketAttachmentService.MaxFileBytes) is { } tooBig)
+        {
+            Toasts.Error($"{tooBig.Name} is larger than {TicketAttachmentService.MaxFileBytes / (1024 * 1024)} MB. Nothing was attached.");
+            return;
+        }
+
+        // Each file is read through its own bounded stream; one byte over the limit and the
+        // browser stream throws, which the service never sees as a stored file.
+        List<IncomingAttachment> incoming = [.. chosen.Select(f => new IncomingAttachment(
+            f.Name, f.ContentType, () => f.OpenReadStream(TicketAttachmentService.MaxFileBytes + 1)))];
+
+        try
+        {
+            List<AttachmentView>? added = await Attachments.AddToTicketAsync(
+                TenantId, TicketId, null, incoming, customerVisible, Actor);
+
+            if (added is null)
+            {
+                Toasts.Error("That ticket is no longer here.");
+                return;
+            }
+
+            await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note,
+                $"Attached: {string.Join(", ", added.Select(a => a.FileName))}.", Actor, DateTime.UtcNow, customerVisible);
+
+            files = await Attachments.ForTicketAsync(TenantId, TicketId);
+            Toasts.Success($"{added.Count} file(s) attached.");
+            await OnChanged.InvokeAsync();
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private static string Size(long bytes) => bytes switch
+    {
+        0 => "",
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024} KB",
+        _ => $"{bytes / (1024.0 * 1024):0.#} MB",
+    };
+}

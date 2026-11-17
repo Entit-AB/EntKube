@@ -69,6 +69,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         // Phase 2a: text modules, macros and checklists on the ticket (docs/helpdesk.md).
         Services.AddSingleton(new TextModuleService(factory));
         Services.AddSingleton(new TicketChecklistService(factory));
+        Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, work));
         Services.AddSingleton(new TicketTemplateService(factory));
@@ -466,5 +467,31 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         db.ChangeTracker.Clear();
         db.Tickets.Include(t => t.Tags).Single(t => t.Title == "Printer offline").Tags.Select(t => t.Name).Should().Equal("printer");
         (await drafts.ListNewTicketDraftsAsync(tenantId)).Should().NotContain(d => d.Id == left.Id, "creating the ticket uses the draft up");
+    }
+
+    /// <summary>
+    /// Decision 4: a file the customer sent that could not be kept is shown, with why — never
+    /// left out, which would let everyone believe we had it.
+    /// </summary>
+    [Fact]
+    public async Task A_customers_file_that_could_not_be_kept_is_shown_with_the_reason()
+    {
+        Ticket ticket = await Raise();
+        InboundMailMessage mail = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "karin@entit.example", Subject = "Screenshot", TicketId = ticket.Id,
+        };
+        db.InboundMailMessages.Add(mail);
+        await db.SaveChangesAsync();
+
+        await new TicketAttachmentService(new TestDbContextFactory(connection), new UnconfiguredAttachmentStore())
+            .KeepFromMailAsync(tenantId, mail.Id, [new IncomingAttachment("error.png", "image/png", () => new MemoryStream([1, 2, 3]))]);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string card = detail.Find("[data-test=attachments]").TextContent;
+        card.Should().Contain("error.png").And.Contain(UnconfiguredAttachmentStore.Reason);
+        detail.FindAll("[data-test=attachments] input[type=file]").Should().BeEmpty("there is nowhere to put an upload");
     }
 }

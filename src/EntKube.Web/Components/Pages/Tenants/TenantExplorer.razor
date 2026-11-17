@@ -534,7 +534,7 @@ else
         // Named for what it is rather than for the section it sits in: a mailbox, its
         // connection and the phrases that triage it.
         new("Mail", "bi-envelope",
-        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel"), new("support-attachments", "Attachments", "bi-paperclip") ]),
         // A customer's own service desk reaching us directly. A channel, like the mailbox,
         // which is why it sits beside it rather than under Manage.
         new("Ticket bridge", "bi-arrow-left-right",
@@ -1066,6 +1066,7 @@ else
                 builder.AddComponentParameter(3, "FocusTicketNumber", TicketParam);
                 builder.CloseComponent();
                 break;
+            case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

@@ -56,7 +56,10 @@ public class SupportMailboxService(
     MailboxTokenProvider tokens,
     KeycloakService keycloak,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    ILogger<SupportMailboxService> logger)
+    ILogger<SupportMailboxService> logger,
+    // Optional so the tests that are about the mailbox connection need not build a bucket.
+    // Absent, attachments are not kept — exactly the behaviour before attachments existed.
+    EntKube.Web.Services.Tickets.TicketAttachmentService? attachments = null)
 {
     /// <summary>
     /// One fetch per mailbox at a time.
@@ -740,9 +743,10 @@ public class SupportMailboxService(
             InboundMailMessage row = MailMessageReader.Read(
                 message, mailbox.TenantId, DateTime.UtcNow, mailbox.TrustedAuthenticationServer);
 
-            if (await mail.IngestAsync(row, ct) is not null)
+            if (await mail.IngestAsync(row, ct) is InboundMailMessage kept)
             {
                 taken++;
+                await KeepAttachmentsAsync(kept, message, ct);
             }
 
             handled.Add(id);
@@ -866,9 +870,10 @@ public class SupportMailboxService(
                     continue;
                 }
 
-                if (await mail.IngestAsync(row, ct) is not null)
+                if (await mail.IngestAsync(row, ct) is InboundMailMessage kept)
                 {
                     rescued++;
+                    await KeepAttachmentsAsync(kept, message, ct);
 
                     logger.LogWarning(
                         "Took a support message in from Junk for tenant {Tenant}: {From} is a "
@@ -1139,4 +1144,24 @@ public class SupportMailboxService(
         OperationCanceledException => "The connection timed out.",
         _ => ex.Message,
     };
+
+    /// <summary>
+    /// Keeps what came attached to a mail just taken in. A delivery report's "attachment" is our
+    /// own mail coming back, so it is not kept. Never throws — see
+    /// <see cref="EntKube.Web.Services.Tickets.TicketAttachmentService.KeepFromMailAsync"/>.
+    /// </summary>
+    private async Task KeepAttachmentsAsync(InboundMailMessage row, MimeMessage message, CancellationToken ct)
+    {
+        if (attachments is null || row.IsDeliveryReport)
+        {
+            return;
+        }
+
+        IReadOnlyList<EntKube.Web.Services.Tickets.IncomingAttachment> files = MailAttachments.From(message);
+
+        if (files.Count > 0)
+        {
+            await attachments.KeepFromMailAsync(row.TenantId, row.Id, files, ct);
+        }
+    }
 }

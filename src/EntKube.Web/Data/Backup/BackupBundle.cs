@@ -30,7 +30,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 16;
+    public const int CurrentVersion = 17;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -235,6 +235,12 @@ public class BackupBundle
     public List<TicketChecklistItem> TicketChecklistItems { get; set; } = [];
     public List<ChecklistTemplate> ChecklistTemplates { get; set; } = [];
     public List<TicketDraft> TicketDrafts { get; set; } = [];
+
+    // Attachment ROWS only. The bytes are in the tenant's bucket, which is backed up with the
+    // bucket, not with this bundle (docs/helpdesk.md, decision 4); a restored row whose object
+    // is gone shows as unavailable rather than failing.
+    public List<TicketAttachment> TicketAttachments { get; set; } = [];
+    public List<SupportAttachmentSetting> SupportAttachmentSettings { get; set; } = [];
     public List<TimeEntry> TimeEntries { get; set; } = [];
     public List<WorkAuthorisation> WorkAuthorisations { get; set; } = [];
 

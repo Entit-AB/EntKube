@@ -1,0 +1,89 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketAttachmentService Attachments
+@inject StorageService Storage
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* Where this tenant's support attachments are kept: one of its own S3 storage links. Without
+   one, mail attachments are recorded on the ticket as "not kept" with this reason, and agents
+   cannot attach files — never a silent fallback (docs/helpdesk.md, decision 4). *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <h6 class="mb-0">Attachments</h6>
+    <div class="text-muted small mb-3">
+        Files customers mail us, and files agents add to tickets, are kept in one of this tenant's S3 storage links.
+        Downloads always go through EntKube; nobody is given a link to the bucket.
+    </div>
+
+    @if (status is string why)
+    {
+        <div class="alert alert-warning py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>@why</div>
+    }
+    else
+    {
+        <div class="alert alert-success py-2 small"><i class="bi bi-check2-circle me-1"></i>Attachments are being kept.</div>
+    }
+
+    <div class="row g-2 align-items-end small" data-test="attachment-storage">
+        <div class="col-md-6">
+            <label class="form-label text-muted">Storage link</label>
+            <select class="form-select form-select-sm" @bind="choice">
+                <option value="">— none: attachments are not kept —</option>
+                @foreach (StorageLink l in links)
+                {
+                    <option value="@l.Id">@l.Name (@l.Provider@(string.IsNullOrWhiteSpace(l.BucketName) ? ", no bucket" : $", bucket {l.BucketName}"))</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">Save</AsyncButton>
+        </div>
+    </div>
+    <div class="form-text small mt-2">
+        The bucket is backed up with the bucket, not with EntKube's backup bundle, which keeps only the record of each attachment.
+        Objects are stored under <code>support-attachments/&lt;tenant&gt;/</code>.
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<StorageLink> links = [];
+    private string choice = "";
+    private string? status;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            links = await Storage.GetStorageLinksAsync(TenantId);
+            choice = (await Attachments.GetStorageLinkAsync(TenantId))?.ToString() ?? "";
+            status = await Attachments.WhyUnavailableAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        // Only one of the links we listed — the tenant's own.
+        Guid? id = Guid.TryParse(choice, out Guid parsed) && links.Any(l => l.Id == parsed) ? parsed : null;
+
+        await Attachments.SetStorageLinkAsync(TenantId, id, await ActorService.NameAsync());
+        status = await Attachments.WhyUnavailableAsync(TenantId);
+        Toasts.Success(id is null ? "Attachments will not be kept." : "Saved.");
+    }
+}
