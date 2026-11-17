@@ -241,6 +241,8 @@ public class BackupService(
             NotificationPreferences = await db.NotificationPreferences.AsNoTracking().ToListAsync(),
             OutOfOffices = await db.OutOfOffices.AsNoTracking().ToListAsync(),
             CalendarFeeds = await db.CalendarFeeds.AsNoTracking().ToListAsync(),
+            KbCategories = await db.KbCategories.AsNoTracking().ToListAsync(),
+            KbAnswers = await db.KbAnswers.AsNoTracking().ToListAsync(),
             TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
             WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
             AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
@@ -614,6 +616,9 @@ public class BackupService(
             await InsertEntities(db, db.NotificationPreferences, bundle.NotificationPreferences);
             await InsertEntities(db, db.OutOfOffices, bundle.OutOfOffices);
             await InsertEntities(db, db.CalendarFeeds, bundle.CalendarFeeds);
+            // Parents before children: a category's parent must exist when it is inserted.
+            await InsertEntities(db, db.KbCategories, KbCategoriesParentsFirst(bundle.KbCategories));
+            await InsertEntities(db, db.KbAnswers, bundle.KbAnswers);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);
@@ -878,5 +883,31 @@ public class BackupService(
         db.Set<T>().AddRange(list);
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
+    }
+
+    /// <summary>Knowledge-base categories ordered so every parent comes before its children.</summary>
+    private static List<KbCategory> KbCategoriesParentsFirst(List<KbCategory> all)
+    {
+        List<KbCategory> ordered = [];
+        HashSet<Guid> placed = [];
+        List<KbCategory> left = [.. all];
+
+        while (left.Count > 0)
+        {
+            List<KbCategory> ready = [.. left.Where(c => c.ParentId is null || placed.Contains(c.ParentId.Value) || all.All(p => p.Id != c.ParentId))];
+
+            if (ready.Count == 0)
+            {
+                // A cycle cannot be saved by the service; if a bundle has one, keep the rest.
+                ordered.AddRange(left);
+                break;
+            }
+
+            ordered.AddRange(ready);
+            placed.UnionWith(ready.Select(c => c.Id));
+            left.RemoveAll(ready.Contains);
+        }
+
+        return ordered;
     }
 }

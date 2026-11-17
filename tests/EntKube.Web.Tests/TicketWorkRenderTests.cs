@@ -71,6 +71,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new TextModuleService(factory));
         Services.AddSingleton(new TicketChecklistService(factory));
         Services.AddSingleton(new TicketPresenceService(factory));
+        Services.AddSingleton(new KnowledgeBaseService(factory));
         Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, work));
@@ -580,5 +581,60 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
         string card = detail.Find("[data-test=customer-panel]").TextContent;
         card.Should().Contain("Entit AB").And.Contain($"#{other.Number}").And.Contain("2 open");
+    }
+
+    // ───────────────────────────── Phase 5 ─────────────────────────────
+
+    [Fact]
+    public async Task The_portal_shows_a_customer_their_public_answers_and_nothing_internal()
+    {
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Inloggning", null);
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Reset your password", CategoryId = cat.Id, Visibility = KbVisibility.Public,
+            Language = "sv", BodyHtml = "<p>Use <strong>Forgot password</strong>.</p>" }, "nils");
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Admin backdoor", CategoryId = cat.Id, Visibility = KbVisibility.Internal,
+            Language = "sv", BodyHtml = "<p>secret</p>" }, "nils");
+
+        Customer customer = db.Customers.AsNoTracking().Single(c => c.Id == customerId);
+        IRenderedComponent<EntKube.Web.Components.Pages.Portal.CustomerKnowledgePanel> panel =
+            Render<EntKube.Web.Components.Pages.Portal.CustomerKnowledgePanel>(p => p.Add(c => c.Customer, customer));
+
+        panel.WaitForAssertion(() => panel.Markup.Should().Contain("Reset your password").And.NotContain("Admin backdoor"));
+
+        await panel.InvokeAsync(() => panel.Find(".list-group-item").Click());
+        panel.Find(".kb-answer").InnerHtml.Should().Contain("<strong>Forgot password</strong>");
+    }
+
+    [Fact]
+    public async Task Typing_question_marks_in_a_reply_offers_answers_for_this_customer_and_inserts_one()
+    {
+        Ticket ticket = await Raise();
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN setup", CategoryId = cat.Id, Visibility = KbVisibility.Internal,
+            Language = "en", BodyHtml = "<p>Install the client.</p>" }, "nils");
+        Guid elsewhere = Guid.NewGuid();
+        db.Customers.Add(new Customer { Id = elsewhere, TenantId = tenantId, Name = "Annan kund" });
+        await db.SaveChangesAsync();
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN for Annan kund", CategoryId = cat.Id, Visibility = KbVisibility.Public,
+            Language = "sv", CustomerId = elsewhere, BodyHtml = "<p>Theirs.</p>" }, "nils");
+
+        BunitJSModuleInterop editor = JSInterop.SetupModule("./js/ticket-editor.js");
+        editor.SetupVoid("create", _ => true);
+        editor.SetupVoid("insertAnswer", _ => true);
+        editor.SetupVoid("dispose", _ => true);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => detail.FindAll("button").First(b => b.TextContent.Trim() == "Reply").Click());
+
+        IRenderedComponent<TicketMailComposer> composer = detail.FindComponent<TicketMailComposer>();
+        await composer.InvokeAsync(() => composer.Instance.OnKnowledgeTrigger("vpn"));
+
+        string offered = detail.Find("[data-test=composer-answers]").TextContent;
+        offered.Should().Contain("VPN setup").And.NotContain("Annan kund");
+
+        await detail.InvokeAsync(() => detail.Find("[data-test=composer-answers] button").Click());
+        editor.Invocations["insertAnswer"].Should().ContainSingle()
+            .Which.Arguments[1].Should().Be("<p>Install the client.</p>");
     }
 }

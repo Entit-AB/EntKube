@@ -293,6 +293,23 @@ Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and or
 - **Not done:** an e-mail column in the matrix (followers already get digests), a notification
   sound, and Zammad's per-browser keyboard shortcuts (Phase 6).
 
+**Phase 5 done (2026-11-17): the knowledge base.**
+
+- **Categories and answers.** Answers are draft, internal, public (optionally scheduled with
+  `PublishAt`) or archived, and can be narrowed to one customer. There is one language per answer
+  (decision 2), as a tag.
+- **One sanitiser.** Bodies go through the same `RichText` allow-list as mail: on save, and again
+  on display.
+- **Three readers, three rules.** The knowledge base's own list shows everything. `??` in the
+  reply composer offers *published* public and internal answers, and never one narrowed to another
+  customer, which would put one customer's material in another's mail. The portal's **Help
+  articles** shows public, published answers for everyone or for that customer, and re-checks
+  each one opened by id.
+- **Kept apart from `KnowledgeSection`** (the per-application runbook), which stays internal.
+- **Not done:** attachments and video embeds in answers, links between answers, related tickets,
+  RSS feeds, and per-role category permissions. Any tenant member may edit; Zammad by default
+  restricts editing to KB editors, and this installation has no such role yet.
+
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
 We run on three providers and N instances, so a node-local index (even the Lucene.NET

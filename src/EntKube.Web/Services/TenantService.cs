@@ -180,6 +180,10 @@ public class TenantService(
         await db.OutOfOffices.Where(o => o.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TicketPresences.Where(p => p.TenantId == id).ExecuteDeleteAsync(ct);
         await db.CalendarFeeds.Where(f => f.TenantId == id).ExecuteDeleteAsync(ct);
+        // Answers before categories (Restrict), and categories leaf-first via clearing parents.
+        await db.KbAnswers.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbCategories.Where(c => c.TenantId == id).ExecuteUpdateAsync(u => u.SetProperty(c => c.ParentId, (Guid?)null), ct);
+        await db.KbCategories.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

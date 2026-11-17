@@ -7,6 +7,7 @@
 @inject TextModuleService TextModules
 @inject TicketReference References
 @inject TicketAttachmentService Attachments
+@inject KnowledgeBaseService KnowledgeBase
 @inject IJSRuntime JS
 @inject ToastService Toasts
 
@@ -69,6 +70,24 @@
         </div>
     }
 
+    @if (kbQuery is not null)
+    {
+        <div class="list-group list-group-flush border rounded mt-1 small" data-test="composer-answers" style="max-height: 12rem; overflow-y: auto">
+            @foreach (KbAnswer a in answers)
+            {
+                <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertAnswerAsync(a)">
+                    <strong>@a.Title</strong>
+                    <span class="badge bg-light text-muted border ms-1">@a.Language</span>
+                    @if (a.Visibility == KbVisibility.Internal) { <span class="badge bg-warning text-dark ms-1">internal</span> }
+                </button>
+            }
+            @if (answers.Count == 0)
+            {
+                <div class="list-group-item text-muted py-1">No help answer matches “@kbQuery”.</div>
+            }
+        </div>
+    }
+
     @if (stored.Count > 0)
     {
         <div class="small mt-2">
@@ -115,6 +134,8 @@
     private List<TextModule> modules = [];
     private string? moduleQuery;
     private List<AttachmentView> stored = [];
+    private string? kbQuery;
+    private List<KbAnswer> answers = [];
     private HashSet<Guid> attach = [];
 
     protected override async Task OnInitializedAsync()
@@ -156,6 +177,32 @@
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>Called by the editor as the person types: the words after "??", or null.</summary>
+    [JSInvokable]
+    public async Task OnKnowledgeTrigger(string? query)
+    {
+        if (query == kbQuery)
+        {
+            return;
+        }
+
+        kbQuery = query;
+
+        // Only published answers, and never one written for another customer (KnowledgeBaseService).
+        answers = query is null ? [] : await KnowledgeBase.ForAgentAsync(TenantId, Ticket.CustomerId, query, DateTime.UtcNow);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task InsertAnswerAsync(KbAnswer a)
+    {
+        kbQuery = null;
+
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("insertAnswer", editor, RichText.Sanitize(a.BodyHtml));
+        }
     }
 
     private IEnumerable<TextModule> Matching() =>
