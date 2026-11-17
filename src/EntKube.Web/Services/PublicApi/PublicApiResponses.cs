@@ -1876,6 +1876,10 @@ public sealed record TicketResponse(
             [.. v.Links.Select(TicketLinkResponse.From)], [.. v.History.Select(TicketEntryResponse.From)]);
 }
 
+/// <summary>What a ticket search found, newest first.</summary>
+/// <param name="Truncated">There were more than the limit returned; narrow the search.</param>
+public sealed record TicketSearchResponse(IEnumerable<TicketSummaryResponse> Tickets, bool Truncated);
+
 /// <summary>A ticket's tags after a change.</summary>
 public sealed record TicketTagsResponse(int Number, IEnumerable<string> Tags);
 

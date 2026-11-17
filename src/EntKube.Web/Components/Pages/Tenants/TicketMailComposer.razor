@@ -1,0 +1,274 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@implements IAsyncDisposable
+@inject TicketService Tickets
+@inject TicketNotifier Notifier
+@inject TextModuleService TextModules
+@inject TicketReference References
+@inject TicketAttachmentService Attachments
+@inject IJSRuntime JS
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Writing a mail on a ticket — reply, reply to all, forward — in rich
+   text (Quill, vendored). The browser's HTML is a convenience: the
+   server sanitises it (RichText) before it is stored or sent, and the
+   plain-text part is made from that same sanitised content.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="border rounded p-3 mb-2" data-test="mail-composer">
+    <div class="btn-group btn-group-sm mb-2" role="group" aria-label="Kind of mail">
+        <button class="btn @(kind == TicketService.MailKind.Reply ? "btn-secondary" : "btn-outline-secondary")" @onclick="() => kind = TicketService.MailKind.Reply">Reply</button>
+        <button class="btn @(kind == TicketService.MailKind.ReplyAll ? "btn-secondary" : "btn-outline-secondary")" @onclick="() => kind = TicketService.MailKind.ReplyAll" disabled="@(candidates.Count == 0)"
+                title="@(candidates.Count == 0 ? "Nobody else was on the customer's last mail" : "Copy everyone else on the customer's last mail")">Reply all</button>
+        <button class="btn @(kind == TicketService.MailKind.Forward ? "btn-secondary" : "btn-outline-secondary")" @onclick="() => kind = TicketService.MailKind.Forward">Forward</button>
+    </div>
+
+    <div class="small mb-2" data-test="recipients">
+        @if (kind == TicketService.MailKind.Forward)
+        {
+            <label class="form-label text-muted mb-1">To</label>
+            <input class="form-control form-control-sm" @bind="forwardTo" placeholder="someone@supplier.example, …" />
+            <div class="form-text">A forward is internal on the history and is not a response to the customer.</div>
+        }
+        else
+        {
+            <span class="text-muted">To:</span> @(defaults.Count == 0 ? "nobody — this ticket has no reporter address and no §14.1 contacts" : string.Join(", ", defaults))
+            @if (kind == TicketService.MailKind.ReplyAll)
+            {
+                <div class="mt-1">
+                    <span class="text-muted">Copy:</span>
+                    @foreach (string c in candidates)
+                    {
+                        <span class="form-check form-check-inline ms-1">
+                            <input class="form-check-input" type="checkbox" id="@($"cc-{c}")" checked="@cc.Contains(c)" @onchange="e => ToggleCc(c, e)" />
+                            <label class="form-check-label" for="@($"cc-{c}")">@c</label>
+                        </span>
+                    }
+                </div>
+            }
+        }
+    </div>
+
+    <div @ref="editor" style="min-height: 9rem" class="bg-white"></div>
+
+    @if (moduleQuery is not null)
+    {
+        <div class="list-group list-group-flush border rounded mt-1 small" data-test="composer-text-modules" style="max-height: 12rem; overflow-y: auto">
+            @foreach (TextModule m in Matching())
+            {
+                <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertModuleAsync(m)">
+                    <strong>@m.Name</strong> <span class="text-muted">@m.Keywords</span>
+                </button>
+            }
+            @if (!Matching().Any())
+            {
+                <div class="list-group-item text-muted py-1">No text module matches “@moduleQuery”.</div>
+            }
+        </div>
+    }
+
+    @if (stored.Count > 0)
+    {
+        <div class="small mt-2">
+            <span class="text-muted">Attach:</span>
+            @foreach (AttachmentView a in stored)
+            {
+                <span class="form-check form-check-inline ms-1">
+                    <input class="form-check-input" type="checkbox" id="@($"att-{a.Id}")" checked="@attach.Contains(a.Id)" @onchange="e => ToggleAttach(a.Id, e)" />
+                    <label class="form-check-label" for="@($"att-{a.Id}")">@a.FileName@(a.CustomerVisible ? "" : " (internal)")</label>
+                </span>
+            }
+        </div>
+    }
+
+    <div class="d-flex justify-content-between align-items-center mt-2">
+        <span class="form-text">The customer sees a reply in the portal as well. Type <code>::</code> for a text module.</span>
+        <span>
+            <button class="btn btn-sm btn-link" @onclick="OnClose">Cancel</button>
+            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SendAsync">Send</AsyncButton>
+        </span>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+
+    [Parameter, EditorRequired] public string Actor { get; set; } = "";
+
+    /// <summary>Told what was sent, as text, so the detail can ask how long it took.</summary>
+    [Parameter] public EventCallback<string> OnSent { get; set; }
+
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private ElementReference editor;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<TicketMailComposer>? self;
+    private TicketService.MailKind kind = TicketService.MailKind.Reply;
+    private List<string> defaults = [];
+    private List<string> candidates = [];
+    private HashSet<string> cc = new(StringComparer.OrdinalIgnoreCase);
+    private string forwardTo = "";
+    private List<TextModule> modules = [];
+    private string? moduleQuery;
+    private List<AttachmentView> stored = [];
+    private HashSet<Guid> attach = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        defaults = await Notifier.DefaultRecipientsAsync(Ticket);
+        candidates = await Tickets.ReplyAllCandidatesAsync(TenantId, Ticket.Id);
+        cc.UnionWith(candidates);
+        modules = await TextModules.OfferedAsync(TenantId, Ticket.CustomerId);
+        stored = [.. (await Attachments.ForTicketAsync(TenantId, Ticket.Id)).Where(a => a.Stored)];
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-editor.js");
+            self = DotNetObjectReference.Create(this);
+            await module.InvokeVoidAsync("create", editor, self);
+        }
+        catch (JSException ex)
+        {
+            Toasts.Error($"The editor could not start: {ex.Message}");
+        }
+    }
+
+    /// <summary>Called by the editor as the person types: the word after "::", or null.</summary>
+    [JSInvokable]
+    public Task OnTextModuleTrigger(string? query)
+    {
+        if (query != moduleQuery)
+        {
+            moduleQuery = query;
+            return InvokeAsync(StateHasChanged);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private IEnumerable<TextModule> Matching() =>
+        modules.Where(m => moduleQuery is null or ""
+                           || m.Name.Contains(moduleQuery, StringComparison.OrdinalIgnoreCase)
+                           || m.Keywords.Contains(moduleQuery, StringComparison.OrdinalIgnoreCase)).Take(10);
+
+    private async Task InsertModuleAsync(TextModule m)
+    {
+        string text = TextModuleRenderer.Render(m.Content, TextModuleRenderer.ValuesFor(
+            Ticket, Ticket.Customer?.Name, null, References.For(Ticket.Number), Actor, DateTime.UtcNow));
+
+        moduleQuery = null;
+
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("insertModule", editor, text);
+        }
+    }
+
+    /// <summary>Quotes an earlier entry into the mail being written.</summary>
+    public async Task QuoteAsync(string text, string header)
+    {
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("quote", editor, text, header);
+        }
+    }
+
+    private void ToggleCc(string address, ChangeEventArgs e)
+    {
+        if (e.Value is true) cc.Add(address); else cc.Remove(address);
+    }
+
+    private void ToggleAttach(Guid id, ChangeEventArgs e)
+    {
+        if (e.Value is true) attach.Add(id); else attach.Remove(id);
+    }
+
+    private async Task SendAsync()
+    {
+        string html = module is null ? "" : await module.InvokeAsync<string>("html", editor);
+
+        List<OutboundAttachment> files = [];
+
+        foreach (Guid id in attach.Where(id => stored.Any(s => s.Id == id)))
+        {
+            if (await Attachments.OpenAsync(TenantId, id) is not { } file)
+            {
+                Toasts.Error("One of the attachments is no longer available. Nothing was sent.");
+                return;
+            }
+
+            await using Stream content = file.Content;
+            using MemoryStream bytes = new();
+            await content.CopyToAsync(bytes);
+            files.Add(new OutboundAttachment(file.Meta.FileName, TicketAttachmentService.ServedContentType(file.Meta.ContentType), bytes.ToArray()));
+        }
+
+        IReadOnlyList<string> extra = kind switch
+        {
+            TicketService.MailKind.Forward => forwardTo.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries),
+            TicketService.MailKind.ReplyAll => [.. candidates.Where(cc.Contains)],
+            _ => [],
+        };
+
+        try
+        {
+            TicketService.MailOutcome? outcome = await Tickets.SendMailAsync(
+                TenantId, Ticket.Id, kind, html, extra, files, Actor, DateTime.UtcNow);
+
+            if (outcome is not { } sent)
+            {
+                Toasts.Error("That ticket is no longer here.");
+                return;
+            }
+
+            if (sent.Reached.Count == 0)
+            {
+                Toasts.Error("The mail could not be sent. What you wrote is on the history, internal, so it is not lost.");
+            }
+            else
+            {
+                Toasts.Success($"Sent to {string.Join(", ", sent.Reached)}.");
+                if (module is not null)
+                {
+                    await module.InvokeVoidAsync("clear", editor);
+                }
+            }
+
+            await OnSent.InvokeAsync(RichText.ToText(html));
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (module is not null)
+            {
+                await module.InvokeVoidAsync("dispose", editor);
+                await module.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit has gone; there is nothing left to tidy in the browser.
+        }
+
+        self?.Dispose();
+    }
+}

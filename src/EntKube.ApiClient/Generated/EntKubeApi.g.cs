@@ -1465,6 +1465,16 @@ public sealed record TicketResponse
     public IReadOnlyList<TicketEntryResponse?>? History { get; init; }
 }
 
+/// <summary>The <c>TicketSearchResponse</c> schema, as the document defines it.</summary>
+public sealed record TicketSearchResponse
+{
+    [JsonPropertyName("tickets")]
+    public IReadOnlyList<TicketSummaryResponse?>? Tickets { get; init; }
+
+    [JsonPropertyName("truncated")]
+    public bool Truncated { get; init; }
+}
+
 /// <summary>The <c>TicketSummaryResponse</c> schema, as the document defines it.</summary>
 public sealed record TicketSummaryResponse
 {
@@ -2096,6 +2106,17 @@ public sealed class EntKubeApi(EntKubeApiClient transport)
 
         ApiResult result = await transport.PostAsync(path, ct);
         return ApiResponse<ScimUserResponse>.From(result);
+    }
+
+    /// <summary><c>GET /api/v1/tickets/search</c></summary>
+    public async Task<ApiResponse<TicketSearchResponse>> SearchTicketsAsync(
+        string q, CancellationToken ct = default)
+    {
+        string path = $"/api/v1/tickets/search" + EntKubeApiClient.QueryString(
+            ("q", q));
+
+        ApiResult result = await transport.GetAsync(path, ct);
+        return ApiResponse<TicketSearchResponse>.From(result);
     }
 
     /// <summary><c>PUT /api/v1/cost-rates/{clusterId}</c></summary>

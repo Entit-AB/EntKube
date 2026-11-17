@@ -97,6 +97,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         // Phase 2a: text modules, macros and checklists on the ticket (docs/helpdesk.md).
         Services.AddSingleton(new TextModuleService(factory));
         Services.AddSingleton(new TicketChecklistService(factory));
+        Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(new TicketDraftService(factory));
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, new TicketWorkService(factory, tickets, SilentTicketNotifier.For(factory), duty)));

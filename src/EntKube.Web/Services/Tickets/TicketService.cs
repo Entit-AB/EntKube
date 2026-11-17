@@ -1071,6 +1071,271 @@ public class TicketService(
             .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
     }
 
+    /// <summary>What kind of mail is being written on a ticket.</summary>
+    public enum MailKind
+    {
+        /// <summary>To the reporter and the §14.1 contacts.</summary>
+        Reply,
+
+        /// <summary>The same, with whoever else was on the customer's last mail in copy.</summary>
+        ReplyAll,
+
+        /// <summary>To somebody else entirely — a supplier, a colleague elsewhere. Internal on the history.</summary>
+        Forward,
+    }
+
+    /// <summary>What sending a mail did.</summary>
+    public readonly record struct MailOutcome(Ticket Ticket, IReadOnlyList<string> Reached);
+
+    /// <summary>
+    /// Sends a mail written on the ticket and puts it on the history — Zammad's reply, reply-all
+    /// and forward.
+    ///
+    /// <para><b>Sanitised before anything else</b>, so what is mailed and what is stored are the
+    /// same safe content (decision 3). The plain-text part is made from that same HTML.</para>
+    ///
+    /// <para>A reply is the customer hearing from a person, so like
+    /// <see cref="ReplyToCustomerAsync"/> it discharges §14.4's response clock — and a reply that
+    /// reached nobody is recorded as the failure it is, internal, with the clock left running.
+    /// A forward goes to somebody who is not the customer: it is internal and is not a response.</para>
+    /// </summary>
+    /// <param name="extraRecipients">For a reply-all, who to copy; for a forward, who it goes to.</param>
+    /// <exception cref="ArgumentException">Nothing to send, no one to send it to, or an address that is not one.</exception>
+    public async Task<MailOutcome?> SendMailAsync(
+        Guid tenantId, Guid ticketId, MailKind kind, string html, IReadOnlyList<string> extraRecipients,
+        IReadOnlyList<OutboundAttachment> attachments, string? actor, DateTime at, CancellationToken ct = default)
+    {
+        string safe = RichText.Sanitize(html);
+        string text = RichText.ToText(safe);
+
+        if (text.Length == 0)
+        {
+            throw new ArgumentException("There is nothing to send.");
+        }
+
+        List<string> extra = [];
+        foreach (string raw in extraRecipients.Where(r => !string.IsNullOrWhiteSpace(r)))
+        {
+            if (!MimeKit.MailboxAddress.TryParse(raw.Trim(), out MimeKit.MailboxAddress? parsed) || !parsed.Address.Contains('@'))
+            {
+                throw new ArgumentException($"\u201c{raw.Trim()}\u201d is not an e-mail address.");
+            }
+
+            if (!extra.Contains(parsed.Address, StringComparer.OrdinalIgnoreCase))
+            {
+                extra.Add(parsed.Address);
+            }
+        }
+
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        List<string> to;
+        List<string> cc = [];
+
+        if (kind == MailKind.Forward)
+        {
+            if (extra.Count == 0)
+            {
+                throw new ArgumentException("Say who to forward it to.");
+            }
+
+            to = extra;
+        }
+        else
+        {
+            to = await notifier.DefaultRecipientsAsync(ticket, ct);
+
+            if (kind == MailKind.ReplyAll)
+            {
+                cc = [.. extra.Where(e => !to.Contains(e, StringComparer.OrdinalIgnoreCase))];
+            }
+
+            if (to.Count == 0)
+            {
+                throw new ArgumentException("This ticket has no reporter address and no §14.1 contacts to reply to.");
+            }
+        }
+
+        List<string> reached = await notifier.SendComposedAsync(
+            ticket, new ComposedMail(to, cc, text, safe, attachments, kind == MailKind.Forward), ct);
+
+        string files = attachments.Count == 0 ? "" : $"\n\nAttached: {string.Join(", ", attachments.Select(a => a.FileName))}.";
+
+        if (reached.Count == 0)
+        {
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Note, at, actor,
+                $"A mail could not be sent, so nobody has received it. What was written:\n\n{text}{files}",
+                customerVisible: false, html: safe));
+
+            await db.SaveChangesAsync(ct);
+            return new MailOutcome(ticket, reached);
+        }
+
+        string who = string.Join(", ", to) + (cc.Count == 0 ? "" : $" (copy: {string.Join(", ", cc)})");
+
+        db.TicketEvents.Add(Event(
+            ticket.Id, TicketEventKind.Note, at, actor,
+            kind == MailKind.Forward ? $"Forwarded to {who}:\n\n{text}{files}" : $"Replied to {who}:\n\n{text}{files}",
+            customerVisible: kind != MailKind.Forward, html: safe));
+
+        if (kind != MailKind.Forward && ticket.FirstResponseAt is null)
+        {
+            ticket.FirstResponseAt = at;
+            ticket.Status = TicketStatus.InProgress;
+
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Responded, at, actor,
+                "First response given by replying to the customer (§14.4)."));
+        }
+
+        ticket.UpdatedAt = at;
+
+        await db.SaveChangesAsync(ct);
+        return new MailOutcome(ticket, reached);
+    }
+
+    /// <summary>
+    /// Who a reply-all would copy: everyone on the customer's last mail on this ticket — its
+    /// sender and the addresses it was sent to — except our own support addresses and those a
+    /// plain reply already reaches.
+    /// </summary>
+    public async Task<List<string>> ReplyAllCandidatesAsync(Guid tenantId, Guid ticketId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+
+        if (ticket is null)
+        {
+            return [];
+        }
+
+        InboundMailMessage? last = await db.InboundMailMessages.AsNoTracking()
+            .Where(m => m.TicketId == ticketId && m.TenantId == tenantId)
+            .OrderByDescending(m => m.ReceivedAt)
+            .FirstOrDefaultAsync(ct);
+
+        if (last is null)
+        {
+            return [];
+        }
+
+        HashSet<string> ours = new(StringComparer.OrdinalIgnoreCase);
+        ours.UnionWith(await db.SupportMailboxes.AsNoTracking().Where(m => m.TenantId == tenantId).Select(m => m.Address).ToListAsync(ct));
+        ours.UnionWith(await db.CustomerSupportAddresses.AsNoTracking().Where(a => a.CustomerId == ticket.CustomerId).Select(a => a.Address).ToListAsync(ct));
+        ours.UnionWith(await notifier.DefaultRecipientsAsync(ticket, ct));
+
+        List<string> candidates = [];
+
+        foreach (string raw in new[] { last.FromAddress }.Concat((last.ToAddresses ?? "").Split([',', ';'], StringSplitOptions.RemoveEmptyEntries)))
+        {
+            if (MimeKit.MailboxAddress.TryParse(raw.Trim(), out MimeKit.MailboxAddress? a)
+                && a.Address.Contains('@')
+                && !ours.Contains(a.Address)
+                && !candidates.Contains(a.Address, StringComparer.OrdinalIgnoreCase))
+            {
+                candidates.Add(a.Address);
+            }
+        }
+
+        return candidates;
+    }
+
+    /// <summary>What the ticket sidebar says about the customer and the reporter.</summary>
+    /// <param name="OtherOpen">The customer's other open tickets, worst first, at most five.</param>
+    /// <param name="ReporterTickets">How many tickets the same reporter address has raised.</param>
+    public sealed record CustomerSummary(
+        string Customer, int Open, int LastTwelveMonths, TimeSpan? OldestOpenAge,
+        IReadOnlyList<(int Number, string Title, TicketPriority Priority)> OtherOpen, int ReporterTickets);
+
+    /// <summary>
+    /// Zammad's customer and organisation sidebars in one — here the customer IS the organisation —
+    /// with the stats Zammad shows: tickets in the last twelve months, open now, oldest open.
+    /// </summary>
+    public async Task<CustomerSummary?> CustomerSummaryAsync(Guid tenantId, Guid ticketId, DateTime now, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.AsNoTracking().Include(t => t.Customer)
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        IQueryable<Ticket> theirs = db.Tickets.AsNoTracking()
+            .Where(t => t.TenantId == tenantId && t.CustomerId == ticket.CustomerId);
+
+        IQueryable<Ticket> open = theirs.Where(t =>
+            t.Status != TicketStatus.Closed && t.Status != TicketStatus.Rejected && t.Status != TicketStatus.Merged);
+
+        DateTime? oldest = await open.OrderBy(t => t.ReportedAt).Select(t => (DateTime?)t.ReportedAt).FirstOrDefaultAsync(ct);
+
+        var others = await open.Where(t => t.Id != ticket.Id)
+            .OrderBy(t => t.Priority).ThenBy(t => t.ReportedAt)
+            .Take(5).Select(t => new { t.Number, t.Title, t.Priority }).ToListAsync(ct);
+
+        string? email = ticket.RequestedByEmail?.Trim().ToLower();
+
+        return new CustomerSummary(
+            ticket.Customer.Name,
+            await open.CountAsync(ct),
+            await theirs.CountAsync(t => t.ReportedAt >= now.AddMonths(-12), ct),
+            oldest is DateTime o ? now - o : null,
+            [.. others.Select(x => (x.Number, x.Title, x.Priority))],
+            email is null ? 0 : await theirs.CountAsync(t => t.RequestedByEmail != null && t.RequestedByEmail.ToLower() == email, ct));
+    }
+
+    /// <summary>The most tickets one search returns.</summary>
+    public const int SearchLimit = 200;
+
+    /// <summary>What a search found: the tickets, newest first, and whether there were more.</summary>
+    public readonly record struct SearchResult(List<TicketSlaStatus> Tickets, bool Truncated);
+
+    /// <summary>
+    /// Searches a tenant's tickets — open and closed — with Zammad's syntax (<see cref="TicketSearch"/>).
+    /// The tenant is applied before the query, so nothing a query says can reach another tenant's.
+    /// </summary>
+    /// <exception cref="TicketSearchException">The query could not be read, and why.</exception>
+    public async Task<SearchResult> SearchAsync(Guid tenantId, string query, DateTime now, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new SearchResult([], false);
+        }
+
+        System.Linq.Expressions.Expression<Func<Ticket, bool>> condition =
+            TicketSearch.Compile(TicketSearch.Parse(query), now);
+
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        List<Ticket> found = await db.Tickets
+            .Where(t => t.TenantId == tenantId)
+            .Where(condition)
+            .OrderByDescending(t => t.ReportedAt)
+            .Take(SearchLimit + 1)
+            .Include(t => t.Pauses)
+            .Include(t => t.Events)
+            .Include(t => t.Customer)
+            .Include(t => t.Tags)
+            .AsSplitQuery()
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        bool truncated = found.Count > SearchLimit;
+
+        return new SearchResult([.. found.Take(SearchLimit).Select(t => StatusOf(t, now))], truncated);
+    }
+
     /// <summary>
     /// A ticket's id from its number, within one tenant — what a ticket's address carries. A
     /// number belonging to another tenant's ticket is no ticket here.
@@ -1281,7 +1546,7 @@ public class TicketService(
 
     private static TicketEvent Event(
         Guid ticketId, TicketEventKind kind, DateTime at, string? actor, string detail,
-        bool customerVisible = true) =>
+        bool customerVisible = true, string? html = null) =>
         new()
         {
             Id = Guid.NewGuid(),
@@ -1291,6 +1556,7 @@ public class TicketService(
             Actor = actor,
             Detail = detail,
             CustomerVisible = customerVisible,
+            DetailHtml = html,
         };
 
     private static string Describe(WaitingOn waitingOn) => waitingOn switch

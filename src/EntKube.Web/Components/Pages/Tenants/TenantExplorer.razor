@@ -434,6 +434,9 @@ else
     // number belongs to this tenant before opening anything.
     [SupplyParameterFromQuery(Name = "ticket")] private int? TicketParam { get; set; }
 
+    // A ticket search, so it can be linked to and survives a reload: ?section=tickets&q=tag:vpn
+    [SupplyParameterFromQuery(Name = "q")] private string? SearchParam { get; set; }
+
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
@@ -534,7 +537,7 @@ else
         // Named for what it is rather than for the section it sits in: a mailbox, its
         // connection and the phrases that triage it.
         new("Mail", "bi-envelope",
-        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel"), new("support-attachments", "Attachments", "bi-paperclip") ]),
         // A customer's own service desk reaching us directly. A channel, like the mailbox,
         // which is why it sits beside it rather than under Manage.
         new("Ticket bridge", "bi-arrow-left-right",
@@ -960,6 +963,7 @@ else
             ["app"] = app, ["cluster"] = cluster, ["section"] = section, ["env"] = env, ["customer"] = customer,
             // Leaving for anywhere else leaves the open ticket behind.
             ["ticket"] = null,
+            ["q"] = null,
         });
         Nav.NavigateTo(uri, forceLoad: false, replace: true);
     }
@@ -1064,8 +1068,10 @@ else
                 builder.AddComponentParameter(1, "TenantId", (Guid?)tid);
                 builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
                 builder.AddComponentParameter(3, "FocusTicketNumber", TicketParam);
+                builder.AddComponentParameter(4, "Search", SearchParam);
                 builder.CloseComponent();
                 break;
+            case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

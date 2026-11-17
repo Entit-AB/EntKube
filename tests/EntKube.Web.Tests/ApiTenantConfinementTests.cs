@@ -133,6 +133,10 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
             ["GET /api/v1/tickets"] =
                 (TenantReach.ConfinedToTheTokenTenant,
                  "TicketOverviews reads the token tenant's queue; there is no tenant parameter."),
+            ["GET /api/v1/tickets/search"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "TicketService.SearchAsync applies the token's tenant before the compiled query, so no "
+                 + "query can reach another tenant's tickets."),
             ["GET /api/v1/tickets/{number}"] =
                 (TenantReach.ConfinedToTheTokenTenant,
                  "The number is resolved inside the token's tenant (FindByNumberAsync); another "
@@ -270,7 +274,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// shared <c>Actor(ctx)</c> helper that names the token on the ticket's history. The helper
     /// reads only the token's name, never a tenant.</para>
     /// </summary>
-    private const int ApiV1PrincipalReads = 47;
+    private const int ApiV1PrincipalReads = 48;
 
     private IReadOnlyList<string> DocumentedOperations()
     {
@@ -339,7 +343,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
          + "from every assertion in this file");
 
         Reaches.Values.Count(v => v.Reach == TenantReach.ConfinedToTheTokenTenant)
-            .Should().Be(45, "the three counts have to add up to the operation count, or a row "
+            .Should().Be(46, "the three counts have to add up to the operation count, or a row "
                 + "has gone missing from the arithmetic");
     }
 

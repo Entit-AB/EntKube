@@ -2360,6 +2360,70 @@
         ]
       }
     },
+    "/api/v1/tickets/search": {
+      "get": {
+        "tags": [
+          "EntKube.Web"
+        ],
+        "description": "Requires the `tickets:read` scope.",
+        "operationId": "SearchTickets",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketSearchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          { }
+        ]
+      }
+    },
     "/api/v1/tickets/{number}": {
       "get": {
         "tags": [
@@ -6429,6 +6493,24 @@
             "items": {
               "$ref": "#/components/schemas/TicketEntryResponse"
             }
+          }
+        }
+      },
+      "TicketSearchResponse": {
+        "required": [
+          "tickets",
+          "truncated"
+        ],
+        "type": "object",
+        "properties": {
+          "tickets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TicketSummaryResponse"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },

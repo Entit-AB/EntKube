@@ -210,8 +210,63 @@ they survive a reload, a dropped circuit or another instance. They are never on 
   `value=` plus `@oninput` handler compiles in about 90 seconds. Avoid `@bind:after` in that
   component.
 
-Still to come in Phase 2: **2c** rich text and HTML mail, S3 attachments, reply-all, forward and
-quoting.
+**Phase 2c-1 done (2026-11-17): attachments.**
+
+- Kept in one of the tenant's S3 `StorageLink`s (chosen under Support › Mail › Attachments), reached
+  through Data Services' own `StorageService` and client factory with the tenant as an input.
+- Inbound mail attachments are kept at intake, keyed to the mail. A ticket shows them once the mail
+  is filed on it, including for merged duplicates, so the filing logic did not change.
+- An attachment that could not be kept is still a row, with `Stored = false` and the reason shown
+  on the ticket. Intake never stops because of a bucket.
+- Agents attach from the ticket. Without storage they are refused with the reason. It never falls
+  back to the database.
+- Download: `/tenants/{slug}/support/attachments/{id}`. The tenant comes from the address, access
+  is checked against it, and the attachment is then looked up inside it. Files are served as a
+  download with an allow-listed type, `nosniff` and `CSP: sandbox`.
+- The backup bundle carries the rows only (v17). The installer docs and README say so.
+- **Test lesson:** the first in-memory store refused cross-tenant reads itself, which hid the
+  service's own tenant predicate (a mutation deleting it passed). The fake is now tenant-blind on
+  read.
+- **Not yet:** customers downloading attachments from the portal, and an HTTP-level test of the
+  download endpoint (it needs a cookie-authenticated test host, which the API fixture isn't).
+
+**Phase 2c-2 done (2026-11-17): rich text and mail from the ticket.**
+
+- **Composer.** A Reply composer on the ticket (`TicketMailComposer`) with Quill 2.0.3, vendored into
+  `wwwroot/lib/quill` from the npm tarball after checking it against the registry's sha512. It
+  offers reply, reply all (copying the others on the customer's last mail, minus our own
+  addresses) and forward (internal, not a response), `::` text modules typed inline, quoting
+  from the history, and the ticket's stored files as attachments.
+- **`RichText`** (HtmlSanitizer, allow-list) is the only sanitiser. It runs before anything is
+  stored or sent, and again when shown. The plain part is made from the same sanitised HTML.
+  `TicketEvent.DetailHtml` holds the rich version, and `Detail` keeps the text that search,
+  digests, the portal and the mail's plain part read.
+- **One message with To and Cc visible**, as a person's client sends it, and no
+  `Auto-Submitted`: a person wrote it. The internal notices (assignment, mention, digest) stay
+  plain text, so the reply cut line is still found in text, never in markup (decision 3).
+- **Not yet:** notes are still plain text (only mail is rich). Inbound HTML is shown as its text
+  (remote images are therefore never loaded). Neither the `@@` trigger inside the editor nor
+  customer downloads from the portal exist yet.
+
+Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and organisation views).
+
+**Phase 3 done (2026-11-17): search and the customer card.**
+
+- **Search.** `TicketSearch` parses Zammad's syntax and compiles it to an EF expression, so it is
+  the same SQL on all three providers and every instance, with no index to keep in step. The
+  tenant is applied before the query. `LIKE` is given an explicit escape character, because the
+  `[%]` form is SQL Server's alone. Fuzzy `~` and regex are refused with a reason.
+- **Where it shows up.** The queue has a search box: the address carries `q`, results replace the
+  overviews, and bulk changes work on them. The API has `GET /tickets/search` and the CLI
+  `entkube tickets search`; there are no MCP tools, as for every ticket route.
+- **The customer card.** Zammad's customer and organisation sidebars are one card here, because
+  our Customer is the organisation. It shows open tickets, tickets in the last 12 months, the age
+  of the oldest open ticket, the customer's other open tickets, and the reporter's ticket count,
+  with links into search.
+- **Not done:** quick search across customers and the knowledge base (the KB doesn't exist until
+  Phase 5); separate customer and organisation pages (the card and a search cover what they
+  showed); SQLite lower-cases only ASCII, so case-insensitive matching of `Å`, `Ä` and `Ö` works on
+  Postgres and SQL Server but not in SQLite development databases.
 
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.

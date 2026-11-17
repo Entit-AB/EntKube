@@ -53,6 +53,7 @@ vms pause            Freeze a running VM in memory
 vms unpause          Resume a paused VM where it was
 vms migrate          Live-migrate a running VM to another node
 tickets list         Open support tickets, worst first ([--view open|unassigned|reminders|escalated])
+tickets search       Search all tickets, open and closed (--query 'tag:vpn status:open')
 tickets show         One ticket with its links and history (--ticket <number>)
 tickets tag          Add a tag (--ticket <number> --tag <tag>)
 tickets untag        Remove a tag (--ticket <number> --tag <tag>)
@@ -74,7 +75,7 @@ These commands change something; everything else is read-only:
 | `cost rates clear` | `config:write` |
 | `tickets tag`, `untag`, `link`, `unlink`, `merge`, `reminder set`, `reminder clear`, `note` | `tickets:write` |
 
-`tickets list` and `tickets show` need `tickets:read`. **A ticket carries what customers wrote**,
+`tickets list`, `tickets search` and `tickets show` need `tickets:read`. **A ticket carries what customers wrote**,
 which for the support agreement includes patient data, so a token with `tickets:read` is a
 token that can read it. The MCP server has no ticket tools for that reason.
 

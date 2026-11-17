@@ -76,7 +76,44 @@ else
         <NewTicketForm TenantId="creatingFor" OnCancel="() => creating = false" OnCreated="OnTicketCreatedAsync" />
     }
 
-    @if (overviews is not null)
+    @if (TenantId is not null)
+    {
+        <div class="input-group input-group-sm mb-2" data-test="ticket-search">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input class="form-control" placeholder="Search all tickets — e.g. tag:vpn status:open, customer:vård reported:>now-7d"
+                   @bind="searchText" @onkeydown="OnSearchKeyAsync" aria-label="Search tickets" />
+            <button class="btn btn-outline-secondary" @onclick="SearchAsync">Search</button>
+            @if (searchResults is not null)
+            {
+                <button class="btn btn-outline-secondary" @onclick="ClearSearch">Clear</button>
+            }
+            <button class="btn btn-outline-secondary" title="How to search" @onclick="() => showSearchHelp = !showSearchHelp"><i class="bi bi-question-circle"></i></button>
+        </div>
+        @if (searchError is string bad)
+        {
+            <div class="alert alert-warning py-1 px-2 small mb-2">@bad</div>
+        }
+        @if (showSearchHelp)
+        {
+            <div class="border rounded p-2 mb-2 small bg-light" data-test="search-help">
+                <div class="mb-1">Words alone look in titles, descriptions and the history. <code>"a phrase"</code>, <code>prefix*</code>, <code>AND</code>, <code>OR</code>, <code>!</code>/<code>NOT</code>, <code>( )</code>, ranges <code>[2026-11-01 TO *]</code> and <code>&gt;now-24h</code> work as in Zammad. Fuzzy <code>~</code> and regular expressions do not.</div>
+                <table class="table table-sm mb-0">
+                    @foreach ((string field, string aliases, string takes) in TicketSearch.Fields)
+                    {
+                        <tr><td><code>@field:</code></td><td class="text-muted">@aliases</td><td>@takes</td></tr>
+                    }
+                </table>
+            </div>
+        }
+        @if (searchResults is not null)
+        {
+            <div class="small text-muted mb-2" data-test="search-summary">
+                @searchResults.Count ticket(s), open and closed, newest first@(searchTruncated ? $" — only the first {TicketService.SearchLimit}; narrow the search" : "").
+            </div>
+        }
+    }
+
+    @if (overviews is not null && searchResults is null)
     {
         <ul class="nav nav-pills nav-sm mb-3 small" data-test="overviews">
             @foreach (TicketOverview o in Enum.GetValues<TicketOverview>())
@@ -343,6 +380,75 @@ else
     /// <summary>The ticket to open, by number — from the address.</summary>
     [Parameter] public int? FocusTicketNumber { get; set; }
 
+    /// <summary>A search to run, from the address.</summary>
+    [Parameter] public string? Search { get; set; }
+
+    private string searchText = "";
+    private string? searchedFor;
+    private List<TicketSlaStatus>? searchResults;
+    private bool searchTruncated;
+    private string? searchError;
+    private bool showSearchHelp;
+
+    private async Task OnSearchKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SearchAsync();
+        }
+    }
+
+    /// <summary>Puts the search in the address, which runs it — so it can be linked to and reloaded.</summary>
+    private async Task SearchAsync()
+    {
+        if (TenantSlug is null)
+        {
+            await RunSearchAsync(searchText);
+            return;
+        }
+
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("q", string.IsNullOrWhiteSpace(searchText) ? null : searchText.Trim()));
+    }
+
+    private void ClearSearch()
+    {
+        searchText = "";
+
+        if (TenantSlug is null)
+        {
+            searchResults = null;
+            searchedFor = null;
+            return;
+        }
+
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("q", (string?)null));
+    }
+
+    private async Task RunSearchAsync(string? query)
+    {
+        searchedFor = query;
+        searchError = null;
+        selected.Clear();
+
+        if (string.IsNullOrWhiteSpace(query) || TenantId is not Guid tenant)
+        {
+            searchResults = null;
+            return;
+        }
+
+        try
+        {
+            TicketService.SearchResult result = await Tickets.SearchAsync(tenant, query, DateTime.UtcNow);
+            searchResults = result.Tickets;
+            searchTruncated = result.Truncated;
+        }
+        catch (TicketSearchException ex)
+        {
+            searchResults = null;
+            searchError = ex.Message;
+        }
+    }
+
     /// <summary>
     /// The tenant the detail view acts as. Every ticket operation is scoped to it now, so the
     /// queue has to name one rather than letting the detail derive it from the ticket it loaded.
@@ -373,7 +479,7 @@ else
     {
         get
         {
-            IEnumerable<TicketSlaStatus> rows = overviews is not null ? overviews[overview] : queue;
+            IEnumerable<TicketSlaStatus> rows = searchResults ?? (overviews is not null ? overviews[overview] : queue);
             return customerFilter is Guid only ? [.. rows.Where(q => q.Ticket.CustomerId == only)] : [.. rows];
         }
     }
@@ -421,6 +527,12 @@ else
     protected override async Task OnParametersSetAsync()
     {
         await LoadAsync();
+
+        if (Search != searchedFor)
+        {
+            searchText = Search ?? "";
+            await RunSearchAsync(Search);
+        }
 
         // The address names a ticket: open it, if it is this tenant's. Only when the address
         // changed, so a reload after an action does not reopen one the operator just left.
@@ -580,6 +692,12 @@ else
                 macros = await Macros.ListAsync(tenant, activeOnly: true);
                 actorName ??= await ActorService.NameAsync();
                 selected.IntersectWith(queue.Select(q => q.Ticket.Id));
+
+                // A search on screen is re-run too, so a bulk change shows in its results.
+                if (searchResults is not null && searchedFor is not null)
+                {
+                    await RunSearchAsync(searchedFor);
+                }
             }
             else
             {

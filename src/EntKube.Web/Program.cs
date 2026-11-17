@@ -767,6 +767,36 @@ public class Program
         // Add additional endpoints required by the Identity /Account Razor components.
         app.MapAdditionalIdentityEndpoints();
 
+        // A ticket attachment, for an agent (docs/helpdesk.md, decision 4). The tenant is taken
+        // from the address and the person's access to IT is checked; the attachment is then looked
+        // up inside that tenant. Never by attachment id alone — reading the tenant off the row and
+        // then checking access to it would make the check vacuous.
+        //
+        // Always a download, never shown inline, with a content type from an allow-list: a file a
+        // customer mailed us must not be able to run as a page in our origin.
+        app.MapGet("/tenants/{slug}/support/attachments/{id:guid}", async (
+            string slug, Guid id, HttpContext httpContext, TenantService tenants, UserAccessService access,
+            EntKube.Web.Services.Tickets.TicketAttachmentService attachmentService, CancellationToken ct) =>
+        {
+            string? userId = httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (httpContext.User.Identity?.IsAuthenticated != true || userId is null)
+                return Results.Unauthorized();
+
+            Tenant? tenant = await tenants.GetTenantBySlugAsync(slug);
+            if (tenant is null || !await access.HasTenantAccessAsync(userId, tenant.Id))
+                return Results.NotFound();
+
+            if (await attachmentService.OpenAsync(tenant.Id, id, ct) is not { } file)
+                return Results.NotFound();
+
+            httpContext.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            httpContext.Response.Headers["Content-Security-Policy"] = "sandbox";
+            return Results.File(
+                file.Content,
+                EntKube.Web.Services.Tickets.TicketAttachmentService.ServedContentType(file.Meta.ContentType),
+                file.Meta.FileName);
+        }).RequireAuthorization();
+
         // Backup download — streams a gzip-compressed JSON bundle of the full app state.
         // Requires the Admin role; the bundle contains plaintext secrets so access is restricted.
         app.MapGet("/api/admin/backup", async (BackupService backupService, HttpContext httpContext) =>

@@ -8043,6 +8043,26 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("Subconsultants", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportAttachmentSetting", b =>
+                {
+                    b.Property<Guid>("TenantId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("StorageLinkId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("TenantId");
+
+                    b.ToTable("SupportAttachmentSettings", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8717,6 +8737,74 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("TicketAffectedApps", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketAttachment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("CustomerVisible")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid?>("InboundMailMessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ObjectKey")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("Problem")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<long>("Size")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Source")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("Stored")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("TicketEventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InboundMailMessageId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("TenantId", "TicketId");
+
+                    b.ToTable("TicketAttachments", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketBridgeConnection", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8917,6 +9005,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("Detail")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DetailHtml")
                         .HasColumnType("text");
 
                     b.Property<int>("Kind")
@@ -12324,6 +12415,16 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
 
                     b.Navigation("App");
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAttachment", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.Navigation("Ticket");
                 });

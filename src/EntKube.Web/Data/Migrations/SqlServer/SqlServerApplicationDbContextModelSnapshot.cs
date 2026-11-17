@@ -8048,6 +8048,26 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("Subconsultants", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportAttachmentSetting", b =>
+                {
+                    b.Property<Guid>("TenantId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StorageLinkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("TenantId");
+
+                    b.ToTable("SupportAttachmentSettings", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8722,6 +8742,74 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("TicketAffectedApps", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketAttachment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("CustomerVisible")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid?>("InboundMailMessageId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ObjectKey")
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("Problem")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<long>("Size")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Source")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("StorageLinkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("Stored")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketEventId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InboundMailMessageId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("TenantId", "TicketId");
+
+                    b.ToTable("TicketAttachments", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketBridgeConnection", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8922,6 +9010,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("Detail")
                         .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("DetailHtml")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<int>("Kind")
@@ -12330,6 +12421,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("App");
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAttachment", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.Navigation("Ticket");
                 });

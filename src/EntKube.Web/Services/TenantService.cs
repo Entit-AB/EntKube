@@ -169,6 +169,10 @@ public class TenantService(
         // Drafts carry the tenant as a column (a second cascade path is one SQL Server refuses);
         // note drafts would go with their tickets, but new-ticket drafts have no ticket.
         await db.TicketDrafts.Where(d => d.TenantId == id).ExecuteDeleteAsync(ct);
+        // Attachment rows and the storage choice, likewise columns. The objects in the bucket are
+        // the tenant's own storage and are left there, as every other purge leaves infrastructure.
+        await db.TicketAttachments.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.SupportAttachmentSettings.Where(s => s.TenantId == id).ExecuteDeleteAsync(ct);
         // Customers → cascades git creds/policies and environment memberships that
         // Restrict-ref Environment.
         await db.Customers.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

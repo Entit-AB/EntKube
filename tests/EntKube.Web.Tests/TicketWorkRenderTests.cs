@@ -63,12 +63,14 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(contracts);
         Services.AddSingleton(tickets);
         Services.AddSingleton(work);
+        Services.AddSingleton(notifier);
         Services.AddSingleton(new TicketOverviews(tickets, factory));
         Services.AddSingleton(new TicketBulkService(tickets, work));
 
         // Phase 2a: text modules, macros and checklists on the ticket (docs/helpdesk.md).
         Services.AddSingleton(new TextModuleService(factory));
         Services.AddSingleton(new TicketChecklistService(factory));
+        Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(TestTicketReference.Instance);
         Services.AddSingleton(new MacroService(factory, tickets, work));
         Services.AddSingleton(new TicketTemplateService(factory));
@@ -466,5 +468,116 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         db.ChangeTracker.Clear();
         db.Tickets.Include(t => t.Tags).Single(t => t.Title == "Printer offline").Tags.Select(t => t.Name).Should().Equal("printer");
         (await drafts.ListNewTicketDraftsAsync(tenantId)).Should().NotContain(d => d.Id == left.Id, "creating the ticket uses the draft up");
+    }
+
+    /// <summary>
+    /// Decision 4: a file the customer sent that could not be kept is shown, with why — never
+    /// left out, which would let everyone believe we had it.
+    /// </summary>
+    [Fact]
+    public async Task A_customers_file_that_could_not_be_kept_is_shown_with_the_reason()
+    {
+        Ticket ticket = await Raise();
+        InboundMailMessage mail = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "karin@entit.example", Subject = "Screenshot", TicketId = ticket.Id,
+        };
+        db.InboundMailMessages.Add(mail);
+        await db.SaveChangesAsync();
+
+        await new TicketAttachmentService(new TestDbContextFactory(connection), new UnconfiguredAttachmentStore())
+            .KeepFromMailAsync(tenantId, mail.Id, [new IncomingAttachment("error.png", "image/png", () => new MemoryStream([1, 2, 3]))]);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string card = detail.Find("[data-test=attachments]").TextContent;
+        card.Should().Contain("error.png").And.Contain(UnconfiguredAttachmentStore.Reason);
+        detail.FindAll("[data-test=attachments] input[type=file]").Should().BeEmpty("there is nowhere to put an upload");
+    }
+
+    // ───────────────────────────── Phase 2c-2 ─────────────────────────────
+
+    /// <summary>
+    /// A rich entry is sanitised again when shown — a row written before a rule changed, or
+    /// restored from a backup, is held to today's rules, not trusted because it is ours.
+    /// </summary>
+    [Fact]
+    public async Task A_stored_rich_entry_is_sanitised_again_when_shown()
+    {
+        Ticket ticket = await Raise();
+        db.TicketEvents.Add(new TicketEvent
+        {
+            Id = Guid.NewGuid(), TicketId = ticket.Id, Kind = TicketEventKind.Note, At = DateTime.UtcNow,
+            Detail = "Hello", DetailHtml = "<p>Hello <strong>you</strong></p><script>alert(1)</script><img src=x onerror=alert(2)>",
+        });
+        await db.SaveChangesAsync();
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string entry = detail.Find(".rich-entry").InnerHtml;
+        entry.Should().Contain("<strong>you</strong>").And.NotContain("script").And.NotContain("onerror").And.NotContain("<img");
+    }
+
+    [Fact]
+    public async Task A_reply_written_in_the_composer_is_sent_and_recorded_as_rich_text()
+    {
+        Ticket ticket = await Raise();
+
+        BunitJSModuleInterop editor = JSInterop.SetupModule("./js/ticket-editor.js");
+        editor.SetupVoid("create", _ => true);
+        editor.SetupVoid("clear", _ => true);
+        editor.SetupVoid("dispose", _ => true);
+        editor.Setup<string>("html", _ => true).SetResult("<p>We restarted <strong>the gateway</strong>.</p>");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => detail.FindAll("button").First(b => b.TextContent.Trim() == "Reply").Click());
+        await detail.InvokeAsync(() => detail.Find("[data-test=mail-composer] .d-flex button.btn-primary").Click());
+
+        db.ChangeTracker.Clear();
+        // No relay is configured in this suite, so the mail cannot leave — which is itself what
+        // has to be recorded: the words, internal, and the clock still running.
+        TicketEvent written = db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.DetailHtml != null);
+        written.DetailHtml.Should().Be("<p>We restarted <strong>the gateway</strong>.</p>");
+        written.Detail.Should().StartWith("A mail could not be sent");
+        written.Actor.Should().Be("nils");
+    }
+
+    // ───────────────────────────── Phase 3 ─────────────────────────────
+
+    [Fact]
+    public async Task A_search_in_the_address_is_run_and_its_results_replace_the_overviews()
+    {
+        Ticket match = await Raise("Login fails");
+        await Raise("Printer offline");
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "title:login"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=search-summary]").TextContent.Should().Contain("1 ticket(s)"));
+        queue.Markup.Should().Contain("Login fails").And.NotContain("Printer offline");
+        queue.FindAll("[data-test=overviews]").Should().BeEmpty();
+        _ = match;
+    }
+
+    [Fact]
+    public void A_search_that_cannot_be_read_says_why_instead_of_showing_nothing()
+    {
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "colour:red"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=ticket-search] + .alert").TextContent.Should().Contain("There is no field"));
+    }
+
+    [Fact]
+    public async Task The_ticket_shows_its_customer_with_their_other_open_tickets()
+    {
+        Ticket ticket = await Raise("Login fails");
+        Ticket other = await Raise("Printer offline");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string card = detail.Find("[data-test=customer-panel]").TextContent;
+        card.Should().Contain("Entit AB").And.Contain($"#{other.Number}").And.Contain("2 open");
     }
 }

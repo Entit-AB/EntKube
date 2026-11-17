@@ -1,0 +1,1 @@
+Quill 2.0.3 (BSD-3-Clause), from the npm tarball quill-2.0.3.tgz, sha512 verified against the registry's dist.integrity on 2026-11-17. Files: dist/quill.js, dist/quill.js.LICENSE.txt, dist/quill.snow.css, LICENSE.

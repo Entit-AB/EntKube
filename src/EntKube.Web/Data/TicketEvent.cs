@@ -113,6 +113,14 @@ public class TicketEvent
     /// </summary>
     public DateTime? RecordedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// The entry as written, when it was written as rich text — a mail composed on the ticket.
+    /// Already sanitised (<c>RichText</c>), and sanitised again when shown. <see cref="Detail"/>
+    /// always holds the same content as text, which is what search, digests, the portal and the
+    /// mail's plain part read.
+    /// </summary>
+    public string? DetailHtml { get; set; }
+
     // Navigation
     public Ticket Ticket { get; set; } = null!;
 }

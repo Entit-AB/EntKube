@@ -1,0 +1,74 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Tickets
+@inject TicketService Tickets
+
+@* The customer this ticket is for, and who reported it — Zammad's customer and organisation
+   sidebars in one, since here the customer is the organisation. *@
+
+@if (summary is { } s)
+{
+    <div class="card mb-3" data-test="customer-panel">
+        <div class="card-body small">
+            <div class="d-flex justify-content-between">
+                <span class="fw-semibold">@s.Customer</span>
+                @if (TenantSlug is not null)
+                {
+                    <a href="@SearchHref($"customer:\"{s.Customer}\"")" title="All of this customer's tickets">all tickets</a>
+                }
+            </div>
+            <div class="text-muted mb-2">
+                @s.Open open · @s.LastTwelveMonths in the last 12 months@(s.OldestOpenAge is TimeSpan age ? $" · oldest open {Age(age)}" : "")
+            </div>
+
+            @if (s.OtherOpen.Count > 0)
+            {
+                <div class="text-muted mb-1">Their other open tickets</div>
+                <ul class="list-unstyled mb-2">
+                    @foreach ((int number, string title, TicketPriority priority) in s.OtherOpen)
+                    {
+                        <li><span class="badge bg-light text-dark border me-1">@priority</span><a href="@TicketHref(number)">#@number</a> @title</li>
+                    }
+                </ul>
+            }
+
+            <div class="text-muted mb-1">Reported by</div>
+            <div>
+                @(Ticket.RequestedBy ?? "—")
+                @if (Ticket.RequestedByEmail is string email)
+                {
+                    <div><a href="mailto:@email">@email</a></div>
+                    @if (s.ReporterTickets > 1 && TenantSlug is not null)
+                    {
+                        <a href="@SearchHref($"requester:\"{email}\"")">@s.ReporterTickets tickets from this address</a>
+                    }
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+
+    [Parameter] public string? TenantSlug { get; set; }
+
+    private TicketService.CustomerSummary? summary;
+    private (Guid, Guid)? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor != (Ticket.Id, Ticket.CustomerId))
+        {
+            loadedFor = (Ticket.Id, Ticket.CustomerId);
+            summary = await Tickets.CustomerSummaryAsync(TenantId, Ticket.Id, DateTime.UtcNow);
+        }
+    }
+
+    private string TicketHref(int number) => TenantSlug is null ? "" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+
+    private string SearchHref(string query) => $"/tenants/{TenantSlug}?section=tickets&q={Uri.EscapeDataString(query)}";
+
+    private static string Age(TimeSpan age) => age.TotalDays >= 1 ? $"{(int)age.TotalDays} d" : $"{(int)age.TotalHours} h";
+}

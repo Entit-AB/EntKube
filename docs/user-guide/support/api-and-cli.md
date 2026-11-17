@@ -19,6 +19,7 @@ name tokens after what uses them.
 
 ```
 entkube tickets list [--view open|unassigned|reminders|escalated]
+entkube tickets search --query 'tag:vpn status:open'
 entkube tickets show --ticket 1042
 entkube tickets tag --ticket 1042 --tag vpn
 entkube tickets untag --ticket 1042 --tag vpn

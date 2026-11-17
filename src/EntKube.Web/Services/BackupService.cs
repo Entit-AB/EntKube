@@ -236,6 +236,8 @@ public class BackupService(
             TicketChecklistItems = await db.TicketChecklistItems.AsNoTracking().ToListAsync(),
             ChecklistTemplates = await db.ChecklistTemplates.AsNoTracking().ToListAsync(),
             TicketDrafts = await db.TicketDrafts.AsNoTracking().ToListAsync(),
+            TicketAttachments = await db.TicketAttachments.AsNoTracking().ToListAsync(),
+            SupportAttachmentSettings = await db.SupportAttachmentSettings.AsNoTracking().ToListAsync(),
             TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
             WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
             AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
@@ -604,6 +606,8 @@ public class BackupService(
             await InsertEntities(db, db.TicketChecklistItems, bundle.TicketChecklistItems);
             await InsertEntities(db, db.ChecklistTemplates, bundle.ChecklistTemplates);
             await InsertEntities(db, db.TicketDrafts, bundle.TicketDrafts);
+            await InsertEntities(db, db.TicketAttachments, bundle.TicketAttachments);
+            await InsertEntities(db, db.SupportAttachmentSettings, bundle.SupportAttachmentSettings);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);
