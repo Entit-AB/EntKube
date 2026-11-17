@@ -33,6 +33,11 @@ confirmation names who was not reached; they still follow the ticket.
 Replying to a mention mail does **not** reach the customer. Answer the customer from the
 ticket.
 
+### Text modules
+
+Under the note, **Insert a text module** finds reusable text by name or keyword and adds it with
+its placeholders filled in. See [Text modules](text-modules.md).
+
 ## Who has the ticket
 
 - **Take this**: the ticket is yours. If you are on the support rota, the ticket is mailed to

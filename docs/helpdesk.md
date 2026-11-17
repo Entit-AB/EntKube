@@ -177,6 +177,29 @@ only). Macros (atomic, bulk, after-run behaviour). Checklists and their template
 Shared drafts and autosave. The time-accounting prompt.
 *Manual chapters: Text modules, Ticket templates, Macros, Checklist, Shared drafts, Time accounting.*
 
+**Phase 2a done (2026-11-17):** text modules, ticket templates, macros, checklists and checklist
+templates, plus an agent **New ticket** form. The form was a gap in the gap analysis: tickets
+could arrive only by mail, the portal, monitoring or a bridge, so a phone call couldn't be
+registered at all, and templates had nothing to fill. Decisions:
+
+- **Macros have typed columns, not an action list.** Each action has its own rules: a priority
+  carries its §14.3 reason, and only a resolved ticket closes. A macro can't mail the customer,
+  pause a clock or reject a ticket. It checks everything before changing anything.
+- **Text modules are narrowed per customer**, not per group (decision 1). A placeholder with no
+  value becomes "-", as in Zammad, and the editor flags misspelt ones.
+- **The `::` trigger waits for the rich-text editor (2c).** For now the note form has a search
+  that inserts the filled-in text.
+- **A checklist item naming `#N` follows that ticket**, looked up in this tenant only, so it
+  reveals nothing about another tenant's ticket of the same number.
+- **"Reported at" on a hand-registered ticket** defaults to now and can be set earlier. A call
+  logged afterwards is reported when it was made.
+- **Bug found and fixed:** a browser's `datetime-local` sends no seconds, and Blazor's default
+  binding expected them. The Phase 1 reminder picker therefore silently did nothing. All three
+  pickers now bind `yyyy-MM-ddTHH:mm`, pinned by render tests.
+
+Still to come in Phase 2: **2b** time-accounting prompt and shared drafts; **2c** rich text and
+HTML mail, S3 attachments, reply-all, forward and quoting.
+
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
 We run on three providers and N instances, so a node-local index (even the Lucene.NET

@@ -1,0 +1,159 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TextModuleService Modules
+@inject TenantService TenantService
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* Text modules: reusable text an agent drops into a note, with #{…} placeholders filled from
+   the ticket. See docs/user-guide/support/text-modules.md. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Text modules</h6>
+            <div class="text-muted small">Reusable text for notes and replies. Placeholders such as <code>#{ticket.number}</code> are filled from the ticket when inserted.</div>
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="() => Edit(new TextModule { Name = string.Empty })"><i class="bi bi-plus me-1"></i>New text module</button>
+    </div>
+
+    @if (editing is not null)
+    {
+        <div class="card mb-3" data-test="text-module-form">
+            <div class="card-body small">
+                <div class="row g-2">
+                    <div class="col-md-4"><label class="form-label text-muted">Name</label><input class="form-control form-control-sm" @bind="editing.Name" /></div>
+                    <div class="col-md-4"><label class="form-label text-muted">Keywords</label><input class="form-control form-control-sm" @bind="editing.Keywords" placeholder="words it is found by" /></div>
+                    <div class="col-md-4">
+                        <label class="form-label text-muted">Offered on</label>
+                        <select class="form-select form-select-sm" @bind="customerChoice">
+                            <option value="">every customer's tickets</option>
+                            @foreach (Customer c in customers)
+                            {
+                                <option value="@c.Id">@c.Name's tickets only</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label text-muted">Text</label>
+                        <textarea class="form-control form-control-sm font-monospace" rows="6" @bind="editing.Content" @bind:event="oninput"></textarea>
+                        @if (TextModuleRenderer.Unknown(editing.Content) is { Count: > 0 } unknown)
+                        {
+                            <div class="form-text text-danger">Unknown placeholder(s): @string.Join(", ", unknown.Select(u => $"#{{{u}}}")). They will be inserted as "-".</div>
+                        }
+                        <details class="form-text">
+                            <summary>Placeholders</summary>
+                            <ul class="mb-0">
+                                @foreach ((string name, string meaning) in TextModuleRenderer.Known)
+                                {
+                                    <li><code>#{@name}</code> — @meaning</li>
+                                }
+                            </ul>
+                            A placeholder with no value on a ticket is inserted as "-".
+                        </details>
+                    </div>
+                    <div class="col-12 d-flex justify-content-between align-items-center">
+                        <div class="form-check"><input class="form-check-input" type="checkbox" id="tm-active" @bind="editing.IsActive" /><label class="form-check-label" for="tm-active">Active</label></div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => editing = null">Cancel</button>
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">Save</AsyncButton>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (rows.Count == 0)
+    {
+        <EmptyState Icon="bi-card-text" Title="No text modules yet" Message="Create one for the answers you write over and over." />
+    }
+    else
+    {
+        <table class="table table-sm align-middle small">
+            <thead class="table-light"><tr><th>Name</th><th>Keywords</th><th>Offered on</th><th>Active</th><th></th></tr></thead>
+            <tbody>
+                @foreach (TextModule m in rows)
+                {
+                    <tr>
+                        <td>@m.Name</td>
+                        <td class="text-muted">@m.Keywords</td>
+                        <td>@(m.CustomerId is Guid id ? customers.FirstOrDefault(c => c.Id == id)?.Name ?? "?" : "every customer")</td>
+                        <td>@(m.IsActive ? "yes" : "no")</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => Edit(m)">Edit</button>
+                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(m)">Delete</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<TextModule> rows = [];
+    private List<Customer> customers = [];
+    private TextModule? editing;
+    private string customerChoice = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            customers = await TenantService.GetCustomersAsync(TenantId);
+            rows = await Modules.ListAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void Edit(TextModule m)
+    {
+        editing = new TextModule
+        {
+            Id = m.Id, Name = m.Name, Keywords = m.Keywords, Content = m.Content, CustomerId = m.CustomerId, IsActive = m.IsActive,
+        };
+        customerChoice = m.CustomerId?.ToString() ?? "";
+    }
+
+    private async Task SaveAsync()
+    {
+        // The choice is checked against the customers we rendered: a select posts a string the
+        // browser chose, and the service checks the tenant again besides.
+        editing!.CustomerId = Guid.TryParse(customerChoice, out Guid id) && customers.Any(c => c.Id == id) ? id : null;
+
+        try
+        {
+            await Modules.SaveAsync(TenantId, editing, await ActorService.NameAsync());
+            editing = null;
+            rows = await Modules.ListAsync(TenantId);
+            Toasts.Success("Saved.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteAsync(TextModule m)
+    {
+        await Modules.DeleteAsync(TenantId, m.Id);
+        rows = await Modules.ListAsync(TenantId);
+        Toasts.Info($"“{m.Name}” deleted.");
+    }
+}

@@ -1772,6 +1772,40 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("CertificateDistributions", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ChecklistTemplate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Items")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name");
+
+                    b.ToTable("ChecklistTemplates", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
                 {
                     b.Property<Guid>("Id")
@@ -5492,6 +5526,76 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("KyvernoPolicies", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Macro", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AddTags")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("AfterRun")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Assign")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("Close")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Note")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("NoteCustomerVisible")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("Priority")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("PriorityReason")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("ReminderAfterHours")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RemoveTags")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Resolution")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name");
+
+                    b.ToTable("Macros", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8404,6 +8508,51 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("TenantRoles", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TextModule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Keywords")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name");
+
+                    b.ToTable("TextModules", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8628,6 +8777,60 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("TicketBridgeConnections", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketChecklist", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("TicketId");
+
+                    b.ToTable("TicketChecklists", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketChecklistItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("CheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CheckedBy")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsChecked")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "SortOrder");
+
+                    b.ToTable("TicketChecklistItems", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
                 {
                     b.Property<Guid>("Id")
@@ -8793,6 +8996,59 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("Name");
 
                     b.ToTable("TicketTags", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketTemplate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int?>("Priority")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Tags")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Title")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name");
+
+                    b.ToTable("TicketTemplates", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
@@ -10028,6 +10284,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("RedisCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ChecklistTemplate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ClientCaBundle", "Bundle")
@@ -11215,6 +11482,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Macro", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
                 {
                     b.HasOne("EntKube.Web.Data.InboundMailMessage", "Message")
@@ -11925,6 +12203,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TextModule", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -11996,6 +12285,28 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.TicketChecklist", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithOne()
+                        .HasForeignKey("EntKube.Web.Data.TicketChecklist", "TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketChecklistItem", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.TicketChecklist", "Checklist")
+                        .WithMany("Items")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Checklist");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
@@ -12057,6 +12368,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
 
                     b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketTemplate", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
@@ -12775,6 +13097,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Pauses");
 
                     b.Navigation("Tags");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketChecklist", b =>
+                {
+                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>

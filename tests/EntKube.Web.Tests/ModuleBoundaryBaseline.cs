@@ -64,7 +64,10 @@ public partial class ModuleBoundaryTests
         [(Module.Secrets, Module.Identity)] = 3,
         [(Module.Secrets, Module.Support)] = 1,
         [(Module.Support, Module.Delivery)] = 11,
-        [(Module.Support, Module.Identity)] = 28,
+        // 28 → 32: text modules, ticket templates, macros and checklist templates each belong to a
+        // tenant by foreign key, like every other tenant-owned Support table — the tenant purge
+        // cascades through it (docs/helpdesk.md, phase 2a).
+        [(Module.Support, Module.Identity)] = 32,
         [(Module.Telemetry, Module.Fleet)] = 2,
         [(Module.Telemetry, Module.Identity)] = 3,
     };

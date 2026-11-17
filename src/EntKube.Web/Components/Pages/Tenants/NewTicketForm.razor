@@ -1,0 +1,234 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@using EntKube.Web.Services.Tickets
+@inject TicketService Tickets
+@inject TicketWorkService Work
+@inject TicketTemplateService Templates
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Registering a ticket by hand — a phone call in or out, a Teams
+   message, somebody at the desk. Zammad's "create ticket".
+
+   The ticket is registered the ordinary way (receipt, rota, window from
+   the application's agreement), so it is measured exactly as one that
+   came in by mail. "Reported at" is when the customer raised it, which
+   for a call registered afterwards is earlier than now: §14.3 counts
+   from the report, not from when we got round to typing it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card mb-3" data-test="new-ticket">
+    <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+        <strong class="small">New ticket</strong>
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnCancel">Cancel</button>
+    </div>
+    <div class="card-body small">
+        <div class="row g-3">
+            <div class="col-lg-8">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label text-muted">How it came in</label>
+                        <select class="form-select form-select-sm" @bind="kind">
+                            <option value="received">Received call</option>
+                            <option value="outbound">Outbound call</option>
+                            <option value="message">Teams or chat message</option>
+                            <option value="in-person">In person</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label text-muted">Customer</label>
+                        <select class="form-select form-select-sm" value="@(draft.CustomerId?.ToString() ?? "")" @onchange="OnCustomerChangedAsync">
+                            <option value="">— choose —</option>
+                            @foreach ((Guid id, string name) in customers)
+                            {
+                                <option value="@id">@name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label text-muted">Application</label>
+                        <select class="form-select form-select-sm" value="@(draft.AppId?.ToString() ?? "")" @onchange="OnAppChanged">
+                            <option value="">— not known yet —</option>
+                            @foreach ((Guid id, string name) in apps)
+                            {
+                                <option value="@id">@name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-6"><label class="form-label text-muted">Reported by</label><input class="form-control form-control-sm" @bind="requester" /></div>
+                    <div class="col-md-6"><label class="form-label text-muted">Their e-mail</label><input class="form-control form-control-sm" type="email" @bind="requesterEmail" /></div>
+                    <div class="col-12"><label class="form-label text-muted">Title</label><input class="form-control form-control-sm" @bind="draft.Title" /></div>
+                    <div class="col-12"><label class="form-label text-muted">What they said</label><textarea class="form-control form-control-sm" rows="4" @bind="draft.Description"></textarea></div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted">Their priority</label>
+                        <select class="form-select form-select-sm" @bind="priorityChoice">
+                            <option value="">none proposed</option>
+                            @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                            {
+                                <option value="@p">@p</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-4"><label class="form-label text-muted">Reported at (Swedish time)</label><input class="form-control form-control-sm" type="datetime-local" @bind="reportedLocal" @bind:format="yyyy-MM-ddTHH:mm" /></div>
+                    <div class="col-md-5"><label class="form-label text-muted">Tags</label><input class="form-control form-control-sm" @bind="draft.Tags" placeholder="vpn, login" /></div>
+                </div>
+                <div class="form-text mt-2">
+                    The customer gets the usual receipt, the rota assigns it, and its clocks count from the time it was reported.
+                    The priority is the customer's proposal until somebody confirms it (§14.3).
+                </div>
+                <div class="text-end mt-2">
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="CreateAsync">Create</AsyncButton>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="text-muted mb-1">Templates</div>
+                @if (templates.Count == 0)
+                {
+                    <div class="text-muted">None. Create them under Ticket tools › Templates.</div>
+                }
+                else
+                {
+                    <div class="input-group input-group-sm mb-1">
+                        <select class="form-select" @bind="templateChoice">
+                            <option value="">— choose —</option>
+                            @foreach (TicketTemplate t in templates)
+                            {
+                                <option value="@t.Id">@t.Name</option>
+                            }
+                        </select>
+                        <button class="btn btn-outline-secondary" @onclick="ApplyTemplateAsync">Apply</button>
+                    </div>
+                    <div class="form-text">Fills only the fields that are still empty.</div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter] public EventCallback<Ticket> OnCreated { get; set; }
+
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private readonly NewTicketDraft draft = new();
+    private List<(Guid Id, string Name)> customers = [];
+    private List<(Guid Id, string Name)> apps = [];
+    private List<TicketTemplate> templates = [];
+    private string kind = "received";
+    private string requester = "";
+    private string requesterEmail = "";
+    private string priorityChoice = "";
+    private string templateChoice = "";
+    private DateTime? reportedLocal = BusinessCalendar.ToLocal(DateTime.UtcNow);
+
+    protected override async Task OnInitializedAsync()
+    {
+        customers = await Templates.CustomersAsync(TenantId);
+        templates = await Templates.ListAsync(TenantId, activeOnly: true);
+    }
+
+    private async Task OnCustomerChangedAsync(ChangeEventArgs e)
+    {
+        // Only a customer we rendered: a select posts whatever the browser sends.
+        draft.CustomerId = Guid.TryParse(e.Value?.ToString(), out Guid id) && customers.Any(c => c.Id == id) ? id : null;
+        draft.AppId = null;
+        apps = draft.CustomerId is Guid customerId ? await Templates.AppsAsync(TenantId, customerId) : [];
+    }
+
+    private void OnAppChanged(ChangeEventArgs e) =>
+        draft.AppId = Guid.TryParse(e.Value?.ToString(), out Guid id) && apps.Any(a => a.Id == id) ? id : null;
+
+    private async Task ApplyTemplateAsync()
+    {
+        TicketTemplate? template = templates.FirstOrDefault(t => t.Id.ToString() == templateChoice);
+
+        if (template is null)
+        {
+            return;
+        }
+
+        Guid? before = draft.CustomerId;
+        draft.Priority = Enum.TryParse(priorityChoice, out TicketPriority chosen) && Enum.IsDefined(chosen) ? chosen : null;
+
+        TicketTemplateService.Apply(template, draft);
+
+        priorityChoice = draft.Priority?.ToString() ?? "";
+
+        if (draft.CustomerId != before && draft.CustomerId is Guid customerId)
+        {
+            Guid? app = draft.AppId;
+            apps = await Templates.AppsAsync(TenantId, customerId);
+            draft.AppId = apps.Any(a => a.Id == app) ? app : null;
+        }
+    }
+
+    private async Task CreateAsync()
+    {
+        if (draft.CustomerId is not Guid customerId || customers.All(c => c.Id != customerId))
+        {
+            Toasts.Error("Choose the customer.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(draft.Title))
+        {
+            Toasts.Error("A ticket needs a title.");
+            return;
+        }
+
+        DateTime now = DateTime.UtcNow;
+        DateTime reportedAt = reportedLocal is DateTime local
+            ? TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime)
+            : now;
+
+        if (reportedAt > now)
+        {
+            Toasts.Error("A ticket cannot have been reported in the future.");
+            return;
+        }
+
+        string actor = await ActorService.NameAsync();
+        TicketPriority? priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
+
+        Ticket created = await Tickets.CreateAsync(
+            TenantId, customerId, draft.AppId, draft.Title.Trim(), draft.Description.Trim(), TicketChannel.Conversation,
+            priority, reportedAt,
+            string.IsNullOrWhiteSpace(requester) ? null : requester.Trim(),
+            string.IsNullOrWhiteSpace(requesterEmail) ? null : requesterEmail.Trim());
+
+        await Tickets.AddEventAsync(TenantId, created.Id, TicketEventKind.Note,
+            $"Registered by hand from {Describe(kind)}.", actor, now, customerVisible: false);
+
+        List<string> refused = [];
+
+        foreach (string tag in MacroService.TagList(draft.Tags))
+        {
+            try
+            {
+                await Work.AddTagAsync(TenantId, created.Id, tag, actor, now);
+            }
+            catch (ArgumentException)
+            {
+                refused.Add(tag);
+            }
+        }
+
+        Toasts.Success(refused.Count == 0
+            ? $"#{created.Number} created."
+            : $"#{created.Number} created. Not a tag: {string.Join(", ", refused)}.");
+
+        await OnCreated.InvokeAsync(created);
+    }
+
+    private static string Describe(string kind) => kind switch
+    {
+        "outbound" => "an outbound call",
+        "message" => "a Teams or chat message",
+        "in-person" => "a conversation in person",
+        _ => "a received call",
+    };
+}

@@ -65,6 +65,13 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(work);
         Services.AddSingleton(new TicketOverviews(tickets, factory));
         Services.AddSingleton(new TicketBulkService(tickets, work));
+
+        // Phase 2a: text modules, macros and checklists on the ticket (docs/helpdesk.md).
+        Services.AddSingleton(new TextModuleService(factory));
+        Services.AddSingleton(new TicketChecklistService(factory));
+        Services.AddSingleton(TestTicketReference.Instance);
+        Services.AddSingleton(new MacroService(factory, tickets, work));
+        Services.AddSingleton(new TicketTemplateService(factory));
         Services.AddSingleton(new TimeService(factory, contracts));
         Services.AddSingleton(duty);
         Services.AddSingleton(new ToastService());
@@ -236,5 +243,108 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await queue.InvokeAsync(() => queue.Find("input[aria-label='Select all']").Change(true));
 
         queue.Find("[data-test=bulk-bar]").TextContent.Should().Contain("2 selected");
+    }
+
+    // ───────────────────────────── Phase 2a ─────────────────────────────
+
+    [Fact]
+    public async Task A_text_module_is_inserted_with_its_placeholders_filled_from_the_ticket()
+    {
+        Ticket ticket = await Raise("Login fails");
+        await new TextModuleService(new TestDbContextFactory(connection)).SaveAsync(tenantId,
+            new TextModule { Name = "Ack", Content = "Hi #{requester.name}, we are on #{ticket.number}." }, "admin");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Add a note").Click());
+        await detail.InvokeAsync(() => detail.Find("[data-test=text-module-picker] input").Input("ack"));
+        await detail.InvokeAsync(() => detail.FindAll("button.list-group-item").First(b => b.TextContent.Contains("Ack")).Click());
+        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Add").Click());
+
+        db.ChangeTracker.Clear();
+        db.TicketEvents.Should().Contain(e => e.TicketId == ticket.Id && e.Detail == $"Hi Karin, we are on {ticket.Number}.");
+    }
+
+    [Fact]
+    public async Task A_macro_run_from_the_screen_is_recorded_under_the_operator_and_the_macro()
+    {
+        Ticket ticket = await Raise();
+        Macro macro = await new MacroService(new TestDbContextFactory(connection), tickets, work)
+            .SaveAsync(tenantId, new Macro { Name = "Tag network", AddTags = "network" }, "admin");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        detail.Find("[data-test=macro-runner] select").Change(macro.Id.ToString());
+        await detail.InvokeAsync(() => detail.Find("[data-test=macro-runner] button").Click());
+
+        db.ChangeTracker.Clear();
+        db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Tagged)
+            .Actor.Should().Be("nils (macro \u201cTag network\u201d)");
+    }
+
+    [Fact]
+    public async Task Resolving_with_open_checklist_items_asks_first_and_goes_ahead_when_told()
+    {
+        Ticket ticket = await Raise();
+        TicketChecklistService checklists = new(new TestDbContextFactory(connection));
+        await checklists.CreateAsync(tenantId, ticket.Id, null, "nils");
+        await checklists.AddItemAsync(tenantId, ticket.Id, "Check the logs");
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+        detail.WaitForAssertion(() => detail.Find("[data-test=checklist]").TextContent.Should().Contain("Check the logs"));
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Resolve").Click());
+        detail.FindAll("textarea").First().Change("Restarted the service.");
+        await detail.InvokeAsync(() => detail.FindAll("button").Last(b => b.TextContent.Trim() == "Resolve").Click());
+
+        detail.Find("[data-test=checklist-guard]").TextContent.Should().Contain("1 checklist item(s) are still open");
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).Status.Should().NotBe(TicketStatus.Resolved);
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Resolve anyway").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).Status.Should().Be(TicketStatus.Resolved);
+    }
+
+    /// <summary>A call registered afterwards is reported when it was made, not when it was typed.</summary>
+    [Fact]
+    public async Task A_ticket_registered_by_hand_keeps_the_time_it_was_reported_and_its_tags()
+    {
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, (string?)null));
+
+        await queue.InvokeAsync(() => ButtonSaying(queue, "New ticket").Click());
+        IElement form = queue.Find("[data-test=new-ticket]");
+        form.QuerySelectorAll("select")[1].Change(customerId.ToString());
+
+        queue.Find("[data-test=new-ticket]").QuerySelectorAll("input")[2].Change("Printer offline");
+        queue.Find("[data-test=new-ticket] input[type=datetime-local]").Change("2026-09-22T08:15");
+        queue.Find("[data-test=new-ticket] input[placeholder='vpn, login']").Change("printer");
+        await queue.InvokeAsync(() => queue.Find("[data-test=new-ticket] .text-end button").Click());
+
+        db.ChangeTracker.Clear();
+        Ticket created = db.Tickets.Include(t => t.Tags).Single(t => t.Title == "Printer offline");
+        created.Channel.Should().Be(TicketChannel.Conversation);
+        created.ReportedAt.Should().Be(Tue(8, 15));
+        created.Tags.Select(t => t.Name).Should().Equal("printer");
+    }
+
+    /// <summary>
+    /// ⚠️ A browser's datetime-local sends "2026-09-22T08:15" — no seconds. Bound without an
+    /// explicit format, Blazor expected seconds, failed to parse it, and kept the old value: the
+    /// Set button did nothing at all, silently. Pinned here for the reminder; the new-ticket test
+    /// pins it for "reported at".
+    /// </summary>
+    [Fact]
+    public async Task A_reminder_picked_in_the_panel_is_the_time_that_was_picked()
+    {
+        Ticket ticket = await Raise();
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        detail.Find("input[type=datetime-local]").Change("2026-09-23T09:30");
+        await detail.InvokeAsync(() => detail.FindAll("button").First(b => b.TextContent.Trim() == "Set").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).ReminderAt.Should().Be(TimeZoneInfo.ConvertTimeToUtc(
+            new DateTime(2026, 9, 23, 9, 30, 0, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime));
     }
 }

@@ -521,6 +521,12 @@ else
           // Beside the queue because it is what feeds it: what people said through the widget,
           // waiting for somebody to decide which of it is a ticket.
           new("feedback", "Customer feedback", "bi-chat-square-text") ]),
+        // What agents reach for while working the queue: the text they reuse, the changes they
+        // make in one click, and the shapes of work they start from (docs/helpdesk.md, phase 2a).
+        new("Ticket tools", "bi-tools",
+        [ new("text-modules", "Text modules", "bi-card-text"),
+          new("macros", "Macros", "bi-lightning"),
+          new("ticket-templates", "Templates", "bi-files") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -1060,6 +1066,9 @@ else
                 builder.AddComponentParameter(3, "FocusTicketNumber", TicketParam);
                 builder.CloseComponent();
                 break;
+            case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);

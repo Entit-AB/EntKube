@@ -12,6 +12,9 @@
 @inject AuthenticationStateProvider AuthState
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject TicketWorkService Work
+@inject TextModuleService TextModules
+@inject MacroService Macros
+@inject TicketReference References
 @inject IJSRuntime JS
 @inject NavigationManager Nav
 
@@ -252,6 +255,19 @@
                         <i class="bi bi-intersect me-1"></i>Merge into…
                     </button>
                 }
+                @if (IsOpen && macros.Count > 0)
+                {
+                    <div class="input-group input-group-sm w-auto" data-test="macro-runner">
+                        <select class="form-select form-select-sm" @bind="macroChoice" aria-label="Macro">
+                            <option value="">Run a macro…</option>
+                            @foreach (Macro m in macros)
+                            {
+                                <option value="@m.Id">@m.Name</option>
+                            }
+                        </select>
+                        <AsyncButton CssClass="btn-sm btn-outline-secondary" OnClick="RunMacroAsync">Run</AsyncButton>
+                    </div>
+                }
 
                 @* Claim, hand over, or put it back. *@
                 @if (ticket.Assignee is null)
@@ -298,6 +314,17 @@
                     </span>
                 }
             </div>
+
+            @if (guardedAction is not null)
+            {
+                <div class="alert alert-warning py-2 small d-flex justify-content-between align-items-center" data-test="checklist-guard">
+                    <span><i class="bi bi-list-check me-1"></i>@openChecklistItems checklist item(s) are still open.</span>
+                    <span>
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => guardedAction = null">Keep it open</button>
+                        <AsyncButton CssClass="btn-sm btn-warning" OnClick="ContinueGuardedAsync">@guardedLabel anyway</AsyncButton>
+                    </span>
+                </div>
+            }
 
             @if (showPriority)
             {
@@ -501,8 +528,27 @@
             @if (showNote)
             {
                 <div class="border rounded p-3 mb-2">
-                    <textarea class="form-control form-control-sm mb-2" rows="2" @bind="formReason"
+                    <textarea class="form-control form-control-sm mb-2" rows="3" @bind="formReason"
                               placeholder="A status update, or a working note"></textarea>
+                    <div class="input-group input-group-sm mb-2" data-test="text-module-picker">
+                        <span class="input-group-text"><i class="bi bi-card-text"></i></span>
+                        <input class="form-control" placeholder="Insert a text module — type to find one" @bind="moduleQuery" @bind:event="oninput" />
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(moduleQuery))
+                    {
+                        <div class="list-group list-group-flush border rounded mb-2 small" style="max-height: 12rem; overflow-y: auto">
+                            @foreach (TextModule m in MatchingModules())
+                            {
+                                <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertModule(m)">
+                                    <strong>@m.Name</strong> <span class="text-muted">@m.Keywords</span>
+                                </button>
+                            }
+                            @if (!MatchingModules().Any())
+                            {
+                                <div class="list-group-item text-muted py-1">No text module matches.</div>
+                            }
+                        </div>
+                    }
                     @if (colleagues is { Count: > 0 })
                     {
                         <div class="small text-muted mb-1">Mention colleagues — they are mailed the note and follow the ticket:</div>
@@ -600,6 +646,8 @@
     </div>
     <div class="col-xl-3">
         <TicketWorkPanel TenantId="TenantId" Ticket="ticket" TenantSlug="@TenantSlug" Actor="@Actor" OnChanged="ReloadAfterWorkAsync" />
+        <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
+                              OnOpenItems="n => openChecklistItems = n" />
     </div>
     </div>
 }
@@ -635,6 +683,15 @@
     private (int Number, Guid Id)? mergedInto;
     private List<SupportTechnician>? colleagues;
     private HashSet<string> mentioned = [];
+
+    // ---- Phase 2a: text modules, macros, the checklist guard ----
+    private List<TextModule> offeredModules = [];
+    private string moduleQuery = "";
+    private List<Macro> macros = [];
+    private string macroChoice = "";
+    private int openChecklistItems;
+    private Func<Task>? guardedAction;
+    private string guardedLabel = "";
 
     // ---- Moving it somewhere else ----
     //
@@ -895,6 +952,8 @@
                 roster = await Duty.GetActiveAsync(ticket.TenantId);
 
                 mergedEntries = await Work.GetMergedHistoryAsync(TenantId, ticket.Id);
+                offeredModules = await TextModules.OfferedAsync(TenantId, ticket.CustomerId);
+                macros = await Macros.ListAsync(TenantId, activeOnly: true);
                 mergedInto = await MergedIntoAsync();
 
                 // Anybody in the tenant with an address can be mentioned — not only who is on
@@ -1041,6 +1100,11 @@
             return;
         }
 
+        if (Guard("Resolve", ResolveAsync))
+        {
+            return;
+        }
+
         await Tickets.ResolveAsync(TenantId, TicketId, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Resolved.");
     }
@@ -1059,6 +1123,11 @@
 
     private async Task CloseAsync()
     {
+        if (Guard("Close", CloseAsync))
+        {
+            return;
+        }
+
         await Tickets.CloseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Closed.");
     }
@@ -1262,6 +1331,92 @@
         ticket!.Events.Select(e => (e, (int?)null))
             .Concat(mergedEntries.Select(m => (m.Event, (int?)m.FromNumber)))
             .OrderByDescending(x => x.Item1.At);
+
+    /// <summary>
+    /// Zammad's close guard: with checklist items still open, resolving or closing asks first.
+    /// Returns true when it stopped to ask. The second time through — "anyway" — it lets go.
+    /// </summary>
+    private bool Guard(string label, Func<Task> action)
+    {
+        if (openChecklistItems == 0 || guardPassed)
+        {
+            guardPassed = false;
+            return false;
+        }
+
+        guardedLabel = label;
+        guardedAction = action;
+        return true;
+    }
+
+    private bool guardPassed;
+
+    private async Task ContinueGuardedAsync()
+    {
+        Func<Task>? action = guardedAction;
+        guardedAction = null;
+        guardPassed = true;
+
+        if (action is not null)
+        {
+            await action();
+        }
+    }
+
+    private IEnumerable<TextModule> MatchingModules()
+    {
+        string q = moduleQuery.Trim();
+        return offeredModules.Where(m =>
+            m.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || m.Keywords.Contains(q, StringComparison.OrdinalIgnoreCase)).Take(10);
+    }
+
+    /// <summary>Adds the module, its placeholders filled from this ticket, to the end of the note.</summary>
+    private void InsertModule(TextModule module)
+    {
+        Dictionary<string, string?> values = TextModuleRenderer.ValuesFor(
+            ticket!, ticket!.Customer?.Name, null, References.For(ticket.Number), Actor, DateTime.UtcNow);
+
+        string text = TextModuleRenderer.Render(module.Content, values);
+        formReason = string.IsNullOrWhiteSpace(formReason) ? text : formReason.TrimEnd() + "\n\n" + text;
+        moduleQuery = "";
+    }
+
+    private async Task RunMacroAsync()
+    {
+        if (!Guid.TryParse(macroChoice, out Guid macroId) || macros.All(m => m.Id != macroId))
+        {
+            Toasts.Error("Choose a macro.");
+            return;
+        }
+
+        SupportTechnician? me = roster?.Cast<SupportTechnician?>().FirstOrDefault(t => t!.Value.Name == Actor);
+
+        try
+        {
+            MacroRun? run = await Macros.RunAsync(TenantId, TicketId, macroId, Actor, (Actor, me?.UserId, me?.Email), DateTime.UtcNow);
+            macroChoice = "";
+
+            if (run is not { } done)
+            {
+                Toasts.Error("That macro or ticket is no longer there.");
+                return;
+            }
+
+            if (done.AfterRun == MacroAfterRun.BackToQueue)
+            {
+                Toasts.Success($"Done: {string.Join(", ", done.Applied)}.");
+                await OnBack.InvokeAsync();
+                await OnChanged.InvokeAsync();
+                return;
+            }
+
+            await AfterChangeAsync($"Done: {string.Join(", ", done.Applied)}.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
 
     private async Task ReloadAfterWorkAsync()
     {

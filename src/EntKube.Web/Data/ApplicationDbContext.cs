@@ -40,6 +40,12 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketTag> TicketTags => Set<TicketTag>();
     public DbSet<TicketLink> TicketLinks => Set<TicketLink>();
     public DbSet<TicketSubscription> TicketSubscriptions => Set<TicketSubscription>();
+    public DbSet<TextModule> TextModules => Set<TextModule>();
+    public DbSet<TicketTemplate> TicketTemplates => Set<TicketTemplate>();
+    public DbSet<Macro> Macros => Set<Macro>();
+    public DbSet<TicketChecklist> TicketChecklists => Set<TicketChecklist>();
+    public DbSet<TicketChecklistItem> TicketChecklistItems => Set<TicketChecklistItem>();
+    public DbSet<ChecklistTemplate> ChecklistTemplates => Set<ChecklistTemplate>();
     public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
     public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();

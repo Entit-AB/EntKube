@@ -6,6 +6,7 @@
 @inject TicketService Tickets
 @inject TicketOverviews Overviews
 @inject TicketBulkService Bulk
+@inject MacroService Macros
 @inject SupportDutyService Duty
 @inject CurrentActor ActorService
 @inject AuthenticationStateProvider AuthState
@@ -61,8 +62,19 @@ else
             <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
                 <i class="bi bi-arrow-clockwise me-1"></i>Refresh
             </button>
+            @if (TenantId is not null)
+            {
+                <button class="btn btn-sm btn-primary" @onclick="() => creating = !creating">
+                    <i class="bi bi-plus me-1"></i>New ticket
+                </button>
+            }
         </div>
     </div>
+
+    @if (creating && TenantId is Guid creatingFor)
+    {
+        <NewTicketForm TenantId="creatingFor" OnCancel="() => creating = false" OnCreated="OnTicketCreatedAsync" />
+    }
 
     @if (overviews is not null)
     {
@@ -93,6 +105,10 @@ else
                 <option value="priority">Priority</option>
                 <option value="note">Add a note</option>
                 <option value="close">Close the resolved ones</option>
+                @if (macros.Count > 0)
+                {
+                    <option value="macro">Run a macro</option>
+                }
             </select>
             @switch (bulkAction)
             {
@@ -112,11 +128,20 @@ else
                         <span class="text-muted">Nobody is on the support rota.</span>
                     }
                     break;
+                case "macro":
+                    <select class="form-select form-select-sm w-auto" @bind="bulkMacro">
+                        <option value="">— which —</option>
+                        @foreach (Macro m in macros)
+                        {
+                            <option value="@m.Id">@m.Name</option>
+                        }
+                    </select>
+                    break;
                 case "tag" or "untag":
                     <input class="form-control form-control-sm w-auto" placeholder="tag" @bind="bulkText" />
                     break;
                 case "remind":
-                    <input class="form-control form-control-sm w-auto" type="datetime-local" @bind="bulkWhen" />
+                    <input class="form-control form-control-sm w-auto" type="datetime-local" @bind="bulkWhen" @bind:format="yyyy-MM-ddTHH:mm" />
                     break;
                 case "priority":
                     <select class="form-select form-select-sm w-auto" @bind="bulkPriority">
@@ -365,6 +390,21 @@ else
     private bool bulkVisible;
     private TicketPriority bulkPriority = TicketPriority.P3;
     private int? openedNumber;
+    private bool creating;
+    private List<Macro> macros = [];
+    private string bulkMacro = "";
+
+    /// <summary>The signed-in person on the rota, for a macro that assigns "to whoever runs it".</summary>
+    private SupportTechnician? Me => roster?.Cast<SupportTechnician?>().FirstOrDefault(t => t!.Value.Name == actorName);
+
+    private string? actorName;
+
+    private async Task OnTicketCreatedAsync(Ticket created)
+    {
+        creating = false;
+        await LoadAsync();
+        Open(created);
+    }
 
     private List<(Guid Id, string Name, int Count)> customers => [.. queue
         .GroupBy(q => q.Ticket.CustomerId)
@@ -471,6 +511,9 @@ else
             "priority" => new BulkChange.Prioritise(bulkPriority, bulkText),
             "note" => new BulkChange.Comment(bulkText, bulkVisible),
             "close" => new BulkChange.Close(),
+            "macro" => macros.FirstOrDefault(m => m.Id.ToString() == bulkMacro) is { } macro
+                ? new BulkChange.RunMacro(macro.Id, await ActorService.NameAsync(), Me?.UserId, Me?.Email)
+                : null,
             _ => null,
         };
 
@@ -534,6 +577,8 @@ else
                 overviews = await Overviews.AllAsync(tenant, await ViewerAsync(), now);
                 queue = overviews[TicketOverview.Open];
                 roster ??= await Duty.GetActiveAsync(tenant);
+                macros = await Macros.ListAsync(tenant, activeOnly: true);
+                actorName ??= await ActorService.NameAsync();
                 selected.IntersectWith(queue.Select(q => q.Ticket.Id));
             }
             else

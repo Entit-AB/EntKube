@@ -1,0 +1,177 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject MacroService Macros
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* Macros: a named bundle of changes run on a ticket in one click, or on many from the queue.
+   What a macro cannot do is said in the form, not discovered at run time. *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Macros</h6>
+            <div class="text-muted small">Changes an agent applies in one click. They run as that agent, and the history names the macro beside them.</div>
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="() => Edit(new Macro { Name = string.Empty })"><i class="bi bi-plus me-1"></i>New macro</button>
+    </div>
+
+    @if (editing is not null)
+    {
+        <div class="card mb-3" data-test="macro-form">
+            <div class="card-body small">
+                <div class="row g-2">
+                    <div class="col-md-6"><label class="form-label text-muted">Name</label><input class="form-control form-control-sm" @bind="editing.Name" /></div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted">Assign</label>
+                        <select class="form-select form-select-sm" @bind="editing.Assign">
+                            <option value="@MacroAssign.Unchanged">leave as it is</option>
+                            <option value="@MacroAssign.Me">to whoever runs it</option>
+                            <option value="@MacroAssign.Nobody">back to the queue</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted">Afterwards</label>
+                        <select class="form-select form-select-sm" @bind="editing.AfterRun">
+                            <option value="@MacroAfterRun.StayOnTicket">stay on the ticket</option>
+                            <option value="@MacroAfterRun.BackToQueue">go back to the queue</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6"><label class="form-label text-muted">Add tags</label><input class="form-control form-control-sm" @bind="editing.AddTags" placeholder="vpn, network" /></div>
+                    <div class="col-md-6"><label class="form-label text-muted">Remove tags</label><input class="form-control form-control-sm" @bind="editing.RemoveTags" /></div>
+                    <div class="col-md-3">
+                        <label class="form-label text-muted">Priority</label>
+                        <select class="form-select form-select-sm" @bind="priorityChoice">
+                            <option value="">leave as it is</option>
+                            @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                            {
+                                <option value="@p">@p</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-9"><label class="form-label text-muted">Reason for the priority — §14.3 requires it</label><input class="form-control form-control-sm" @bind="editing.PriorityReason" disabled="@string.IsNullOrEmpty(priorityChoice)" /></div>
+                    <div class="col-md-9"><label class="form-label text-muted">Note</label><input class="form-control form-control-sm" @bind="editing.Note" /></div>
+                    <div class="col-md-3 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" id="macro-visible" @bind="editing.NoteCustomerVisible" /><label class="form-check-label" for="macro-visible">The customer sees the note</label></div></div>
+                    <div class="col-md-3"><label class="form-label text-muted">Reminder after (hours)</label><input class="form-control form-control-sm" type="number" min="1" @bind="editing.ReminderAfterHours" /></div>
+                    <div class="col-md-9"><label class="form-label text-muted">Resolve with (the customer sees this)</label><input class="form-control form-control-sm" @bind="editing.Resolution" /></div>
+                    <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="macro-close" @bind="editing.Close" /><label class="form-check-label" for="macro-close">Close it — only a resolved ticket is closed</label></div></div>
+                    <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="macro-active" @bind="editing.IsActive" /><label class="form-check-label" for="macro-active">Active</label></div></div>
+                    <div class="col-12 form-text">
+                        A macro never mails the customer, never pauses a clock (a pause needs the party and reason written down each time) and never rejects a ticket.
+                        It is all or nothing: if it cannot finish on a ticket, it changes nothing there.
+                    </div>
+                    <div class="col-12 text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => editing = null">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">Save</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (rows.Count == 0)
+    {
+        <EmptyState Icon="bi-lightning" Title="No macros yet" Message="Create one for a sequence of changes you make often." />
+    }
+    else
+    {
+        <table class="table table-sm align-middle small">
+            <thead class="table-light"><tr><th>Name</th><th>What it does</th><th>Active</th><th></th></tr></thead>
+            <tbody>
+                @foreach (Macro m in rows)
+                {
+                    <tr>
+                        <td>@m.Name</td>
+                        <td class="text-muted">@Summary(m)</td>
+                        <td>@(m.IsActive ? "yes" : "no")</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => Edit(m)">Edit</button>
+                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(m)">Delete</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private List<Macro> rows = [];
+    private Macro? editing;
+    private string priorityChoice = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            rows = await Macros.ListAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    /// <summary>A macro's effect in one line, for the list.</summary>
+    public static string Summary(Macro m)
+    {
+        List<string> parts = [];
+        if (m.Assign == MacroAssign.Me) parts.Add("assign to runner");
+        if (m.Assign == MacroAssign.Nobody) parts.Add("unassign");
+        if (!string.IsNullOrWhiteSpace(m.AddTags)) parts.Add($"tag {m.AddTags}");
+        if (!string.IsNullOrWhiteSpace(m.RemoveTags)) parts.Add($"untag {m.RemoveTags}");
+        if (m.Priority is not null) parts.Add($"priority {m.Priority}");
+        if (m.Note is not null) parts.Add(m.NoteCustomerVisible ? "note (customer sees)" : "internal note");
+        if (m.ReminderAfterHours is int h) parts.Add($"reminder in {h} h");
+        if (m.Resolution is not null) parts.Add("resolve");
+        if (m.Close) parts.Add("close");
+        return parts.Count == 0 ? "nothing yet" : string.Join(", ", parts);
+    }
+
+    private void Edit(Macro m)
+    {
+        editing = new Macro
+        {
+            Id = m.Id, Name = m.Name, IsActive = m.IsActive, Assign = m.Assign, AddTags = m.AddTags, RemoveTags = m.RemoveTags,
+            ReminderAfterHours = m.ReminderAfterHours, Note = m.Note, NoteCustomerVisible = m.NoteCustomerVisible,
+            Priority = m.Priority, PriorityReason = m.PriorityReason, Resolution = m.Resolution, Close = m.Close, AfterRun = m.AfterRun,
+        };
+        priorityChoice = m.Priority?.ToString() ?? "";
+    }
+
+    private async Task SaveAsync()
+    {
+        editing!.Priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
+
+        try
+        {
+            await Macros.SaveAsync(TenantId, editing, await ActorService.NameAsync());
+            editing = null;
+            rows = await Macros.ListAsync(TenantId);
+            Toasts.Success("Saved.");
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task DeleteAsync(Macro m)
+    {
+        await Macros.DeleteAsync(TenantId, m.Id);
+        rows = await Macros.ListAsync(TenantId);
+        Toasts.Info($"“{m.Name}” deleted.");
+    }
+}

@@ -53,6 +53,12 @@ internal static class SupportModel
         builder.Entity<TicketLink>().ToTable("TicketLinks");
         builder.Entity<TicketSubscription>().ToTable("TicketSubscriptions");
         builder.Entity<TicketTag>().ToTable("TicketTags");
+        builder.Entity<TextModule>().ToTable("TextModules");
+        builder.Entity<TicketTemplate>().ToTable("TicketTemplates");
+        builder.Entity<Macro>().ToTable("Macros");
+        builder.Entity<TicketChecklist>().ToTable("TicketChecklists");
+        builder.Entity<TicketChecklistItem>().ToTable("TicketChecklistItems");
+        builder.Entity<ChecklistTemplate>().ToTable("ChecklistTemplates");
         builder.Entity<TicketPause>().ToTable("TicketPauses");
         builder.Entity<TimeEntry>().ToTable("TimeEntries");
         builder.Entity<WorkAuthorisation>().ToTable("WorkAuthorisations");
@@ -273,6 +279,59 @@ internal static class SupportModel
                   .WithMany()
                   .HasForeignKey(s => s.TicketId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── Ticket tools (docs/helpdesk.md, phase 2a) ──
+
+        builder.Entity<TextModule>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.TenantId, m.Name });
+            entity.Property(m => m.Name).HasMaxLength(200);
+            entity.Property(m => m.Keywords).HasMaxLength(500);
+            entity.HasOne(m => m.Tenant).WithMany().HasForeignKey(m => m.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketTemplate>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => new { t.TenantId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(200);
+            entity.Property(t => t.Tags).HasMaxLength(500);
+            entity.HasOne(t => t.Tenant).WithMany().HasForeignKey(t => t.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<Macro>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+            entity.HasIndex(m => new { m.TenantId, m.Name });
+            entity.Property(m => m.Name).HasMaxLength(200);
+            entity.Property(m => m.AddTags).HasMaxLength(500);
+            entity.Property(m => m.RemoveTags).HasMaxLength(500);
+            entity.HasOne(m => m.Tenant).WithMany().HasForeignKey(m => m.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketChecklist>(entity =>
+        {
+            entity.HasKey(c => c.TicketId);
+            entity.Property(c => c.Title).HasMaxLength(200);
+            entity.HasOne(c => c.Ticket).WithOne().HasForeignKey<TicketChecklist>(c => c.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketChecklistItem>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+            entity.HasIndex(i => new { i.TicketId, i.SortOrder });
+            entity.Property(i => i.Text).HasMaxLength(500);
+            entity.HasOne(i => i.Checklist).WithMany(c => c.Items).HasForeignKey(i => i.TicketId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ChecklistTemplate>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+            entity.HasIndex(t => new { t.TenantId, t.Name });
+            entity.Property(t => t.Name).HasMaxLength(200);
+            entity.HasOne(t => t.Tenant).WithMany().HasForeignKey(t => t.TenantId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TicketPause>(entity =>

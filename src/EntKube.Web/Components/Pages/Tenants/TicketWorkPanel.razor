@@ -95,7 +95,7 @@
         @if (!TicketWorkService.IsSettled(Ticket.Status))
         {
             <div class="input-group input-group-sm mb-1">
-                <input class="form-control" type="datetime-local" @bind="reminderLocal" />
+                <input class="form-control" type="datetime-local" @bind="reminderLocal" @bind:format="yyyy-MM-ddTHH:mm" />
                 <button class="btn btn-outline-secondary" @onclick="SetReminderAsync" disabled="@(reminderLocal is null)">Set</button>
             </div>
             <input class="form-control form-control-sm mb-1" placeholder="What for (optional)" @bind="reminderNote" />

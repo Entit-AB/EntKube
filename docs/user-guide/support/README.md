@@ -11,12 +11,16 @@ things work differently from a general helpdesk. These chapters say where.
 
 1. [Ticket basics](ticket-basics.md): what a ticket is, its statuses, priorities and clocks.
 2. [Find tickets](find-tickets.md): the queue, its overviews, and a ticket's own address.
-3. [Work with tickets](work-with-tickets.md): answering, notes, assigning, reminders and
+3. [Create tickets](create-tickets.md): registering a call or a message by hand, and templates.
+4. [Work with tickets](work-with-tickets.md): answering, notes, assigning, reminders and
    following, alone or many tickets at once.
 
 ## Advanced
 
-4. [Ticket actions](ticket-actions.md): merge, split and link.
-5. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
+5. [Ticket actions](ticket-actions.md): merge, split and link.
+6. [Text modules](text-modules.md): reusable text with placeholders.
+7. [Macros](macros.md): several changes in one click.
+8. [Checklist](checklist.md): the steps of a ticket's work.
+9. [Tickets from scripts](api-and-cli.md): the API and the `entkube` command line.
 
 More chapters arrive with the features they describe (see `docs/helpdesk.md` for the plan).

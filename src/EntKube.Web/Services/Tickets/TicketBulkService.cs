@@ -29,6 +29,13 @@ public abstract record BulkChange
     /// </summary>
     public sealed record Close : BulkChange;
 
+    /// <summary>
+    /// Run a macro on each — Zammad's drag-onto-a-macro. "Me" in the macro is the person running
+    /// it, so who that is travels with the change. The macro's after-run behaviour does not apply
+    /// in bulk (Zammad ignores it too): the operator stays on the list.
+    /// </summary>
+    public sealed record RunMacro(Guid MacroId, string RunnerName, string? RunnerUserId, string? RunnerEmail) : BulkChange;
+
     /// <summary>The same note on each — Zammad's bulk comment.</summary>
     public sealed record Comment(string Text, bool CustomerVisible) : BulkChange;
 }
@@ -45,7 +52,7 @@ public readonly record struct BulkOutcome(Guid TicketId, int? Number, string? Sk
 /// go ahead, because "17 done, 1 skipped because it is not resolved" is more useful than an
 /// all-or-nothing refusal over the one. Never asks for time (Zammad doesn't either).</para>
 /// </summary>
-public class TicketBulkService(TicketService tickets, TicketWorkService work)
+public class TicketBulkService(TicketService tickets, TicketWorkService work, MacroService? macros = null)
 {
     /// <summary>The most tickets one request may change.</summary>
     public const int MaxTickets = 200;
@@ -132,6 +139,11 @@ public class TicketBulkService(TicketService tickets, TicketWorkService work)
                 if (ticket.Status != TicketStatus.Resolved) return "Not resolved, so not closed.";
                 await tickets.CloseAsync(tenantId, ticket.Id, actor, at, ct);
                 return null;
+
+            case BulkChange.RunMacro(var macroId, var name, var userId, var email):
+                if (macros is null) throw new ArgumentException("Macros are not available here.");
+                MacroRun? run = await macros.RunAsync(tenantId, ticket.Id, macroId, actor, (name, userId, email), at, ct);
+                return run is null ? "No such macro here." : null;
 
             case BulkChange.Comment(var text, var visible):
                 await tickets.AddEventAsync(tenantId, ticket.Id, TicketEventKind.Note, text.Trim(), actor, at, visible, ct);
