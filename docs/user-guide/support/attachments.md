@@ -22,8 +22,22 @@ On an open ticket, choose files in the **Attachments** card. Tick **The customer
 attach** if it's for them. A note *Attached: …* goes on the history, visible to the customer
 when the files are. If attachments can't be kept, the card says why and no file chooser is shown.
 
+## What the customer sees
+
+In the customer portal, a ticket lists its **Files**: what the customer sent, and what you added
+with **The customer sees what I attach** ticked. The customer downloads them through the portal.
+
+- Files you added without ticking it are never listed, and can't be fetched by guessing an address.
+- A file that couldn't be kept is listed as *could not be kept; please send it again*, without the
+  technical reason.
+- A bounced mail's files are never shown. The bounce is an internal note, and what it carries is
+  our own returned mail.
+- A duplicate merged into the ticket brings its files along only if it was the same customer's.
+  A duplicate merged in from another customer shows its files to agents only.
+
 ## Safety
 
 Files are always downloaded, never opened inside EntKube, and a type a browser could run, such as
 a web page or an SVG image, is downloaded as a plain file. Files are fetched through EntKube, which
-checks that you have access to the tenant. Nobody gets a direct link to the storage.
+checks that you have access to the tenant, or, from the portal, to that customer and that the
+file is on one of their tickets. Nobody gets a direct link to the storage.

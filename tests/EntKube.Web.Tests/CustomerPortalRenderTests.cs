@@ -126,6 +126,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new OnCallService(factory));
         Services.AddSingleton(new ToastService());
         Services.AddScoped<CurrentActor>();
+        Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
     }
 
     public new void Dispose()
@@ -153,6 +154,36 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         Render<CustomerTicketsPanel>(p => p
             .Add(c => c.Customer, customer)
             .Add(c => c.AccessRole, CustomerAccessRole.Operator));
+
+    /// <summary>
+    /// Phase 7: the customer sees the files on their ticket — what they sent and what we shared —
+    /// each linked to the portal's own download, never internal files, and a file that could not be
+    /// kept says so instead of disappearing.
+    /// </summary>
+    [Fact]
+    public async Task The_customer_sees_the_files_on_their_ticket_with_links_through_the_portal()
+    {
+        SignIn("karin@entit.example");
+        Ticket ticket = await Raise();
+        Guid sent = Guid.NewGuid();
+        db.Set<TicketAttachment>().AddRange(
+            new TicketAttachment { Id = sent, TenantId = tenantId, TicketId = ticket.Id, FileName = "screenshot.png", Size = 2048,
+                Stored = true, CustomerVisible = true, Source = AttachmentSource.Agent, StorageLinkId = Guid.NewGuid(), ObjectKey = "k1" },
+            new TicketAttachment { Id = Guid.NewGuid(), TenantId = tenantId, TicketId = ticket.Id, FileName = "too-big.mov",
+                Stored = false, CustomerVisible = true, Source = AttachmentSource.Agent, Problem = "Over the size cap." },
+            new TicketAttachment { Id = Guid.NewGuid(), TenantId = tenantId, TicketId = ticket.Id, FileName = "internal-log.txt",
+                Stored = true, CustomerVisible = false, Source = AttachmentSource.Agent, StorageLinkId = Guid.NewGuid(), ObjectKey = "k2" });
+        await db.SaveChangesAsync();
+
+        IRenderedComponent<CustomerTicketsPanel> panel = RenderTickets();
+        await panel.InvokeAsync(() => panel.FindAll("tr").First(r => r.TextContent.Contains("Journalen", StringComparison.Ordinal)).Click());
+
+        AngleSharp.Dom.IElement files = panel.Find("[data-test=portal-files]");
+        files.QuerySelector("a")!.GetAttribute("href").Should().Be($"/portal/attachments/{customer.Id}/{sent}");
+        files.TextContent.Should().Contain("screenshot.png").And.Contain("2 kB")
+            .And.Contain("too-big.mov — could not be kept").And.NotContain("internal-log");
+        files.TextContent.Should().NotContain("Over the size cap", "the reason is for agents");
+    }
 
     private Task<Ticket> Raise() =>
         tickets.CreateAsync(

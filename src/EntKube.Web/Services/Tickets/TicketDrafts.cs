@@ -5,7 +5,14 @@ using Microsoft.EntityFrameworkCore;
 namespace EntKube.Web.Services.Tickets;
 
 /// <summary>A note draft as the composer needs it.</summary>
-public readonly record struct NoteDraft(string Text, bool CustomerVisible, string? By, DateTime At);
+public readonly record struct NoteDraft(string Text, bool CustomerVisible, string? By, DateTime At)
+{
+    /// <summary>
+    /// The draft as editor HTML. Since phase 7 a note draft is stored as sanitised HTML; one saved
+    /// before that is plain text and is converted, so nobody's half-written note is lost.
+    /// </summary>
+    public string Html => Text.TrimStart().StartsWith('<') ? RichText.Sanitize(Text) : RichText.FromText(Text);
+}
 
 /// <summary>
 /// Drafts: the note a person is typing (saved as they type, theirs alone), a note left on a
@@ -33,7 +40,11 @@ public class TicketDraftService(IDbContextFactory<SupportDbContext> dbFactory)
         TicketDraft? draft = await db.TicketDrafts.FirstOrDefaultAsync(d =>
             d.TicketId == ticketId && d.Kind == TicketDraftKind.PersonalNote && d.OwnerUserId == userId, ct);
 
-        if (string.IsNullOrWhiteSpace(text))
+        // The editor's HTML, sanitised before it is kept; an editor holding nothing ("<p></p>")
+        // is empty, and clears what would be restored.
+        text = RichText.Sanitize(text);
+
+        if (RichText.IsEmpty(text))
         {
             if (draft is not null)
             {
@@ -95,7 +106,9 @@ public class TicketDraftService(IDbContextFactory<SupportDbContext> dbFactory)
         Guid tenantId, Guid ticketId, string text, bool customerVisible, string actor, bool overwrite,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        text = RichText.Sanitize(text);
+
+        if (RichText.IsEmpty(text))
         {
             throw new ArgumentException("There is nothing to share.");
         }

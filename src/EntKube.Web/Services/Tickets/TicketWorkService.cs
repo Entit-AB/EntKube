@@ -798,30 +798,30 @@ public partial class TicketWorkService(
     public readonly record struct Mentioned(string UserId, string Name, string Email);
 
     /// <summary>
-    /// Adds a note that names colleagues: each is subscribed and mailed the note at once —
-    /// Zammad's <c>@@mention</c>.
+    /// Adds a note — written in the editor, so HTML — that names colleagues: each is subscribed
+    /// and mailed the note's text at once (Zammad's <c>@@mention</c>).
     /// </summary>
     /// <returns>
     /// Who could actually be told — a colleague whose mail did not leave is still subscribed,
     /// and the caller says which ones were not reached. Null when the ticket is not the tenant's.
     /// </returns>
     public async Task<List<string>?> AddNoteMentioningAsync(
-        Guid tenantId, Guid ticketId, string note, bool customerVisible, IReadOnlyList<Mentioned> mentioned,
-        string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string html, bool customerVisible, IReadOnlyList<Mentioned> mentioned,
+        string? actor, string? actorUserId, DateTime at, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(note))
+        if (RichText.IsEmpty(html))
         {
-            throw new ArgumentException("The note is empty.", nameof(note));
+            throw new ArgumentException("The note is empty.", nameof(html));
         }
 
         string names = string.Join(", ", mentioned.Select(m => m.Name));
+        string note = RichText.ToText(html);
 
-        bool written = await tickets.AddEventAsync(
-            tenantId, ticketId, TicketEventKind.Note,
-            mentioned.Count == 0 ? note.Trim() : $"{note.Trim()}\n\n\u2192 {names}",
-            actor, at, customerVisible, ct);
+        Guid? written = await tickets.AddNoteAsync(
+            tenantId, ticketId, html, actor, actorUserId, at, customerVisible,
+            mentioned.Count == 0 ? null : $"\u2192 {names}", ct);
 
-        if (!written)
+        if (written is null)
         {
             return null;
         }

@@ -60,6 +60,7 @@ public class TicketAttachmentTests : IDisposable
     private readonly Guid ours = Guid.NewGuid();
     private readonly Guid theirs = Guid.NewGuid();
     private readonly Guid customer = Guid.NewGuid();
+    private readonly Guid otherCustomer = Guid.NewGuid();
 
     public TicketAttachmentTests()
     {
@@ -70,6 +71,7 @@ public class TicketAttachmentTests : IDisposable
         db.Tenants.Add(new Tenant { Id = ours, Name = "ENTIT", Slug = "entit" });
         db.Tenants.Add(new Tenant { Id = theirs, Name = "Other", Slug = "other" });
         db.Customers.Add(new Customer { Id = customer, TenantId = ours, Name = "Vårdbolaget" });
+        db.Customers.Add(new Customer { Id = otherCustomer, TenantId = ours, Name = "Skolbolaget" });
         db.SaveChanges();
 
         TestDbContextFactory factory = new(connection);
@@ -90,12 +92,13 @@ public class TicketAttachmentTests : IDisposable
     private static IncomingAttachment File(string name, string type, int bytes) =>
         new(name, type, () => new MemoryStream(new byte[bytes]));
 
-    private Guid FiledMail(Guid ticketId)
+    private Guid FiledMail(Guid ticketId, bool deliveryReport = false)
     {
         InboundMailMessage m = new()
         {
             Id = Guid.NewGuid(), TenantId = ours, MessageId = Guid.NewGuid().ToString("N"),
             FromAddress = "karin@kund.example", Subject = "Screenshot", TicketId = ticketId,
+            IsDeliveryReport = deliveryReport,
         };
         db.InboundMailMessages.Add(m);
         db.SaveChanges();
@@ -230,5 +233,92 @@ public class TicketAttachmentTests : IDisposable
 
         files.Select(f => f.FileName).Should().Equal("report.pdf", "Original report.eml");
         new StreamReader(files[0].Open()).ReadToEnd().Should().Be("%PDF-1.7");
+    }
+
+    // ───────────────────────────── The customer portal (phase 7) ─────────────────────────────
+
+    private async Task<Guid> MailFile(Guid ticketId, string name, bool deliveryReport = false)
+    {
+        Guid mail = FiledMail(ticketId, deliveryReport);
+        await attachments.KeepFromMailAsync(ours, mail, [File(name, "image/png", 10)]);
+        db.ChangeTracker.Clear();
+        return db.TicketAttachments.Single(a => a.InboundMailMessageId == mail).Id;
+    }
+
+    [Fact]
+    public async Task The_portal_shows_what_the_customer_sent_and_what_we_shared_but_not_internal_files()
+    {
+        Ticket t = await Raise();
+        await MailFile(t.Id, "screenshot.png");
+        await attachments.AddToTicketAsync(ours, t.Id, null, [File("fix.pdf", "application/pdf", 10)], customerVisible: true, "nils");
+        await attachments.AddToTicketAsync(ours, t.Id, null, [File("internal-log.txt", "text/plain", 10)], customerVisible: false, "nils");
+
+        List<AttachmentView> seen = await attachments.ForCustomerTicketAsync(ours, customer, t.Id);
+
+        seen.Select(a => a.FileName).Should().BeEquivalentTo(["screenshot.png", "fix.pdf"]);
+    }
+
+    [Fact]
+    public async Task Another_customer_neither_sees_nor_opens_a_customers_files()
+    {
+        Ticket t = await Raise();
+        Guid shot = await MailFile(t.Id, "screenshot.png");
+
+        (await attachments.ForCustomerTicketAsync(ours, otherCustomer, t.Id)).Should().BeEmpty();
+        (await attachments.OpenForCustomerAsync(ours, otherCustomer, shot)).Should().BeNull();
+        (await attachments.OpenForCustomerAsync(theirs, customer, shot)).Should().BeNull();
+
+        (await attachments.OpenForCustomerAsync(ours, customer, shot)).Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task An_internal_file_cannot_be_opened_from_the_portal_by_its_id()
+    {
+        Ticket t = await Raise();
+        List<AttachmentView> added = (await attachments.AddToTicketAsync(
+            ours, t.Id, null, [File("internal-log.txt", "text/plain", 10)], customerVisible: false, "nils"))!;
+
+        (await attachments.OpenForCustomerAsync(ours, customer, added.Single().Id)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// Agents see a merged duplicate's files on the ticket it was merged into. If that duplicate
+    /// was another customer's, its files must not follow it into this customer's portal.
+    /// </summary>
+    [Fact]
+    public async Task A_duplicate_merged_in_from_another_customer_brings_its_files_to_agents_only()
+    {
+        Ticket mine = await Raise();
+        Ticket sameCustomerDuplicate = await Raise();
+        Ticket theirDuplicate = await tickets.CreateAsync(
+            ours, otherCustomer, null, "Login fails for us too", "", TicketChannel.Email, TicketPriority.P3, DateTime.UtcNow.AddHours(-1));
+        Guid ours1 = await MailFile(sameCustomerDuplicate.Id, "ours.png");
+        Guid theirs1 = await MailFile(theirDuplicate.Id, "theirs.png");
+
+        await db.Tickets.Where(x => x.Id == sameCustomerDuplicate.Id || x.Id == theirDuplicate.Id)
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.MergedIntoTicketId, mine.Id));
+
+        (await attachments.ForTicketAsync(ours, mine.Id)).Select(a => a.FileName).Should().BeEquivalentTo(["ours.png", "theirs.png"]);
+        (await attachments.ForCustomerTicketAsync(ours, customer, mine.Id)).Select(a => a.FileName).Should().Equal("ours.png");
+        (await attachments.OpenForCustomerAsync(ours, customer, theirs1)).Should().BeNull();
+        (await attachments.OpenForCustomerAsync(ours, customer, ours1)).Should().NotBeNull();
+    }
+
+    /// <summary>A bounce is filed as an internal note; what it carries is our own mail, returned.</summary>
+    [Fact]
+    public async Task A_delivery_reports_files_never_reach_the_portal()
+    {
+        Ticket t = await Raise();
+        Guid returned = await MailFile(t.Id, "original-message.eml", deliveryReport: true);
+
+        (await attachments.ForCustomerTicketAsync(ours, customer, t.Id)).Should().BeEmpty();
+        (await attachments.OpenForCustomerAsync(ours, customer, returned)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_portal_finds_the_customers_tenant_from_the_customer()
+    {
+        (await attachments.TenantOfCustomerAsync(customer)).Should().Be(ours);
+        (await attachments.TenantOfCustomerAsync(Guid.NewGuid())).Should().BeNull();
     }
 }

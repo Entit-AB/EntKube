@@ -59,5 +59,6 @@ use. **The customer never sees tags.**
 ## Who sees what
 
 The customer sees their tickets in the portal, with every history entry marked *the customer
-sees this*. They never see tags, links, reminders, followers, internal notes, or who on our
-side holds the ticket.
+sees this*, and the files on it that were shared with them (see [Attachments](attachments.md)).
+They never see tags, links, issue links, highlights, reminders, followers, internal notes or
+internal files, or who on our side holds the ticket.

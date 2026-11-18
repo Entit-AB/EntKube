@@ -807,6 +807,33 @@ public class Program
                 file.Meta.FileName);
         }).RequireAuthorization();
 
+        // A ticket's file, for the customer portal (docs/helpdesk.md, phase 7). The customer comes
+        // from the address and the person must have portal access to it; the service then serves
+        // only a stored, customer-visible file on one of that customer's tickets. Anything else is
+        // the same 404, so a guessed id says nothing about whether the file exists.
+        app.MapGet("/portal/attachments/{customerId:guid}/{id:guid}", async (
+            Guid customerId, Guid id, HttpContext httpContext, CustomerAccessService customerAccess,
+            EntKube.Web.Services.Tickets.TicketAttachmentService attachmentService, CancellationToken ct) =>
+        {
+            string? userId = httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (httpContext.User.Identity?.IsAuthenticated != true || userId is null)
+                return Results.Unauthorized();
+
+            if (await customerAccess.GetAccessAsync(userId, customerId, ct) is null)
+                return Results.NotFound();
+
+            if (await attachmentService.TenantOfCustomerAsync(customerId, ct) is not Guid tenant
+                || await attachmentService.OpenForCustomerAsync(tenant, customerId, id, ct) is not { } file)
+                return Results.NotFound();
+
+            httpContext.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            httpContext.Response.Headers["Content-Security-Policy"] = "sandbox";
+            return Results.File(
+                file.Content,
+                EntKube.Web.Services.Tickets.TicketAttachmentService.ServedContentType(file.Meta.ContentType),
+                file.Meta.FileName);
+        }).RequireAuthorization();
+
         // The support report's ticket list as .xlsx (docs/helpdesk.md, phase 6). Guarded like an
         // attachment: the tenant from the address, the person's access to it checked first.
         app.MapGet("/tenants/{slug}/support/report.xlsx", async (

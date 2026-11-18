@@ -2,10 +2,10 @@
 
 ## Your own note is saved as you type
 
-What you type in **Add a note** is saved on the server about a second after you stop. If you
-reload the page, lose the connection, or come back tomorrow, it's there when you open the note
-again. *Draft saved …* under the box says when. Only you see it. It's removed when you add the
-note, or when you empty the box.
+What you type in **Add a note** is saved on the server about a second after you stop, formatting
+and all. If you reload the page, lose the connection, or come back tomorrow, it's there when you
+open the note again. *Draft saved …* under the editor says when. Only you see it. It's removed
+when you add the note, or when you empty the editor.
 
 ## Leaving a note for a colleague
 

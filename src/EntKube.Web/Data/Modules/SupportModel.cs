@@ -240,6 +240,7 @@ internal static class SupportModel
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => new { e.TicketId, e.At });
+            entity.Property(e => e.ActorUserId).HasMaxLength(450);
 
             entity.HasOne(e => e.Ticket)
                   .WithMany(t => t.Events)

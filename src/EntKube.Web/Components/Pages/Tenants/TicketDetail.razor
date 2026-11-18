@@ -334,7 +334,7 @@
                     <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => previewShared = !previewShared">@(previewShared ? "Hide" : "Preview")</button>
                     @if (previewShared)
                     {
-                        <div class="border rounded bg-white p-2 my-2" style="white-space: pre-wrap">@shared.Text</div>
+                        <div class="border rounded bg-white p-2 my-2 rich-entry" data-test="shared-preview">@((MarkupString)shared.Html)</div>
                         <div class="text-muted mb-1">@(shared.CustomerVisible ? "Marked: the customer sees this." : "Marked: internal.")</div>
                         <button class="btn btn-sm btn-outline-primary me-1" @onclick="LoadSharedDraftAsync">
                             @(loadOverwrites ? "Replace what you have typed" : "Load into the note")
@@ -582,27 +582,9 @@
             @if (showNote)
             {
                 <div class="border rounded p-3 mb-2">
-                    <textarea class="form-control form-control-sm mb-2" rows="3" value="@formReason"
-                              @oninput="OnNoteInputAsync" placeholder="A status update, or a working note"></textarea>
-                    <div class="input-group input-group-sm mb-2" data-test="text-module-picker">
-                        <span class="input-group-text"><i class="bi bi-card-text"></i></span>
-                        <input class="form-control" placeholder="Insert a text module — type to find one" @bind="moduleQuery" @bind:event="oninput" />
-                    </div>
-                    @if (!string.IsNullOrWhiteSpace(moduleQuery))
-                    {
-                        <div class="list-group list-group-flush border rounded mb-2 small" style="max-height: 12rem; overflow-y: auto">
-                            @foreach (TextModule m in MatchingModules())
-                            {
-                                <button type="button" class="list-group-item list-group-item-action py-1" @onclick="() => InsertModule(m)">
-                                    <strong>@m.Name</strong> <span class="text-muted">@m.Keywords</span>
-                                </button>
-                            }
-                            @if (!MatchingModules().Any())
-                            {
-                                <div class="list-group-item text-muted py-1">No text module matches.</div>
-                            }
-                        </div>
-                    }
+                    <TicketNoteEditor @ref="noteEditor" TenantId="TenantId" Ticket="ticket" Actor="@Actor"
+                                      Modules="offeredModules" Colleagues="@(colleagues ?? [])" InitialHtml="@noteHtml"
+                                      OnChanged="OnNoteChangedAsync" OnMention="OnMentionPicked" />
                     @if (colleagues is { Count: > 0 })
                     {
                         <div class="small text-muted mb-1">Mention colleagues — they are mailed the note and follow the ticket:</div>
@@ -706,6 +688,13 @@
                                 <i class="bi bi-box-arrow-up-right me-1"></i>split
                             </button>
                         }
+                        @if (fromNumber is null && TicketService.CanDeleteNote(entry, userId, DateTime.UtcNow))
+                        {
+                            <button class="btn btn-sm btn-link text-danger p-0 ms-2" style="font-size: .75rem" data-test="delete-note"
+                                    title="Your internal note, written less than ten minutes ago" @onclick="() => DeleteNoteAsync(entry)">
+                                <i class="bi bi-trash me-1"></i>@(confirmDelete == entry.Id ? "delete — sure?" : "delete")
+                            </button>
+                        }
                     </div>
                     <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
                         @entry.At.ToLocalTime().ToString("MMM d HH:mm")
@@ -773,7 +762,12 @@
 
     // ---- Phase 2a: text modules, macros, the checklist guard ----
     private List<TextModule> offeredModules = [];
-    private string moduleQuery = "";
+
+    // The note being written (phase 7: rich text). The editor reports it as it is typed; the
+    // value read from the editor itself when the note is added is what counts.
+    private string noteHtml = "";
+    private TicketNoteEditor? noteEditor;
+    private Guid? confirmDelete;
     private List<Macro> macros = [];
     private string macroChoice = "";
     private int openChecklistItems;
@@ -1243,17 +1237,24 @@
 
     private async Task AddNoteAsync()
     {
-        if (string.IsNullOrWhiteSpace(formReason))
+        if (noteEditor is not null)
+        {
+            noteHtml = await noteEditor.GetHtmlAsync();
+        }
+
+        if (RichText.IsEmpty(noteHtml))
         {
             return;
         }
+
+        string html = noteHtml;
 
         List<TicketWorkService.Mentioned> named = [.. (colleagues ?? [])
             .Where(c => mentioned.Contains(c.UserId))
             .Select(c => new TicketWorkService.Mentioned(c.UserId, c.Name, c.Email!))];
 
         autosave?.Cancel();
-        PromptForTime(formReason);
+        PromptForTime(RichText.ToText(html));
 
         // Not conditional on knowing who this is: a shared draft the note was made from goes
         // either way, and an empty id simply matches no personal draft.
@@ -1264,15 +1265,17 @@
 
         if (named.Count == 0)
         {
-            await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
+            await Tickets.AddNoteAsync(TenantId, TicketId, html, Actor, userId, DateTime.UtcNow, formCustomerVisible);
+            noteHtml = "";
             await AfterChangeAsync("Note added.");
             return;
         }
 
         List<string>? reached = await Work.AddNoteMentioningAsync(
-            TenantId, TicketId, formReason, formCustomerVisible, named, Actor, DateTime.UtcNow);
+            TenantId, TicketId, html, formCustomerVisible, named, Actor, userId, DateTime.UtcNow);
 
         mentioned.Clear();
+        noteHtml = "";
 
         List<string> missed = [.. named.Select(n => n.Name).Except(reached ?? [])];
 
@@ -1286,10 +1289,10 @@
     {
         showNote = !showNote;
 
-        if (showNote && string.IsNullOrWhiteSpace(formReason) && userId is not null
+        if (showNote && RichText.IsEmpty(noteHtml) && userId is not null
             && await Drafts.GetPersonalNoteAsync(TenantId, TicketId, userId) is { } mine)
         {
-            formReason = mine.Text;
+            noteHtml = mine.Html;
             formCustomerVisible = mine.CustomerVisible;
             draftSavedAt = mine.At;
         }
@@ -1299,11 +1302,14 @@
     /// Saves the note as it is typed, a second after the last keystroke — on the server, so it
     /// survives a reload, a dropped connection or a move to another instance.
     /// </summary>
-    private Task OnNoteInputAsync(ChangeEventArgs e)
+    private Task OnNoteChangedAsync(string html)
     {
-        formReason = e.Value?.ToString() ?? "";
+        noteHtml = html;
         return NoteTypedAsync();
     }
+
+    /// <summary>A colleague picked after "@@" in the editor: ticked to be told, like the checkbox.</summary>
+    private void OnMentionPicked(SupportTechnician c) => mentioned.Add(c.UserId);
 
     private async Task NoteTypedAsync()
     {
@@ -1319,8 +1325,8 @@
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(1), token);
-            await Drafts.SavePersonalNoteAsync(TenantId, TicketId, userId, formReason, formCustomerVisible, token);
-            draftSavedAt = string.IsNullOrWhiteSpace(formReason) ? null : DateTime.UtcNow;
+            await Drafts.SavePersonalNoteAsync(TenantId, TicketId, userId, noteHtml, formCustomerVisible, token);
+            draftSavedAt = RichText.IsEmpty(noteHtml) ? null : DateTime.UtcNow;
         }
         catch (OperationCanceledException)
         {
@@ -1332,7 +1338,12 @@
     {
         try
         {
-            await Drafts.ShareNoteAsync(TenantId, TicketId, formReason, formCustomerVisible, Actor, overwrite: confirmOverwrite);
+            if (noteEditor is not null)
+            {
+                noteHtml = await noteEditor.GetHtmlAsync();
+            }
+
+            await Drafts.ShareNoteAsync(TenantId, TicketId, noteHtml, formCustomerVisible, Actor, overwrite: confirmOverwrite);
             confirmOverwrite = false;
             sharedDraft = await Drafts.GetSharedNoteAsync(TenantId, TicketId);
             Toasts.Success("Left on the ticket as a shared draft.");
@@ -1349,6 +1360,37 @@
         }
     }
 
+    /// <summary>
+    /// Deletes one of this person's own internal notes within ten minutes (decision 5). The first
+    /// press asks; the service checks the rule again, so a stale button cannot delete late.
+    /// </summary>
+    private async Task DeleteNoteAsync(TicketEvent entry)
+    {
+        if (confirmDelete != entry.Id)
+        {
+            confirmDelete = entry.Id;
+            return;
+        }
+
+        confirmDelete = null;
+
+        try
+        {
+            await Tickets.DeleteNoteAsync(TenantId, entry.Id, userId ?? "", DateTime.UtcNow);
+
+            // Not AfterChangeAsync: that closes every open form, and a note being written below
+            // has nothing to do with the one deleted.
+            Toasts.Success("Note deleted.");
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toasts.Warning(ex.Message);
+            await LoadAsync();
+        }
+    }
+
     private async Task LoadSharedDraftAsync()
     {
         if (sharedDraft is not { } shared)
@@ -1357,7 +1399,7 @@
         }
 
         // Loading over what you have typed is asked about first.
-        if (!string.IsNullOrWhiteSpace(formReason) && formReason != shared.Text && !loadOverwrites)
+        if (!RichText.IsEmpty(noteHtml) && RichText.Sanitize(noteHtml) != shared.Html && !loadOverwrites)
         {
             loadOverwrites = true;
             return;
@@ -1365,8 +1407,15 @@
 
         loadOverwrites = false;
         showNote = true;
-        formReason = shared.Text;
+        noteHtml = shared.Html;
         formCustomerVisible = shared.CustomerVisible;
+
+        // An open editor is filled now; a closed one opens with it (InitialHtml).
+        if (noteEditor is not null)
+        {
+            await noteEditor.SetHtmlAsync(noteHtml);
+        }
+
         fromSharedDraft = true;
         previewShared = false;
         await NoteTypedAsync();
@@ -1651,24 +1700,6 @@
         {
             await action();
         }
-    }
-
-    private IEnumerable<TextModule> MatchingModules()
-    {
-        string q = moduleQuery.Trim();
-        return offeredModules.Where(m =>
-            m.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || m.Keywords.Contains(q, StringComparison.OrdinalIgnoreCase)).Take(10);
-    }
-
-    /// <summary>Adds the module, its placeholders filled from this ticket, to the end of the note.</summary>
-    private void InsertModule(TextModule module)
-    {
-        Dictionary<string, string?> values = TextModuleRenderer.ValuesFor(
-            ticket!, ticket!.Customer?.Name, null, References.For(ticket.Number), Actor, DateTime.UtcNow);
-
-        string text = TextModuleRenderer.Render(module.Content, values);
-        formReason = string.IsNullOrWhiteSpace(formReason) ? text : formReason.TrimEnd() + "\n\n" + text;
-        moduleQuery = "";
     }
 
     private async Task RunMacroAsync()

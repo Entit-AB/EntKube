@@ -24,19 +24,40 @@ between us and the customer (§14.6): entries are added, and never edited or rem
 **Add a note** writes an entry on the history. Tick **The customer sees this** for a status
 update the customer should read in the portal. Leave it unticked for a working note.
 
+A note is written in the same editor as a mail: bold, italics, lists, quotes, code and links.
+In the editor:
+
+| Type | To |
+|---|---|
+| `::` and a word | insert a [text module](text-modules.md), its placeholders filled in from the ticket |
+| `??` and a word or two | insert a [help answer](knowledge-base.md) |
+| `@@` and a name | mention a colleague (below) |
+
+Formatting is kept on the ticket. The portal, follower digests and mention mails show the
+note's text.
+
 ### Mentioning colleagues
 
-Under the note, tick the colleagues you want to bring in. Each of them is mailed the note at
-once and starts [following](#following-a-ticket) the ticket. If a mail could not be sent, the
-confirmation names who was not reached; they still follow the ticket.
+Type `@@` and the start of a name in the note, then pick the colleague: their name is written into
+the note and they are ticked under it. You can also tick colleagues there directly. Each one ticked
+is mailed the note at once and starts [following](#following-a-ticket) the ticket. If a mail could
+not be sent, the confirmation names who was not reached; they still follow the ticket.
+
+Removing a name from the text doesn't untick the colleague. Untick them under the note.
 
 Replying to a mention mail does **not** reach the customer. Answer the customer from the
 ticket.
 
-### Text modules
+### Deleting a note
 
-Under the note, **Insert a text module** finds reusable text by name or keyword and adds it with
-its placeholders filled in. See [Text modules](text-modules.md).
+For **ten minutes** after you write an **internal** note, it has a **delete** link in the history.
+Press it, then press **delete — sure?** to confirm. Any highlights on the note go with it. Files you
+added with it stay on the ticket.
+
+Only internal notes can be deleted, only by the person who wrote them, and only in those ten
+minutes. Anything the customer can see may already have been read or mailed, and it is part of
+the record between us. Delete doesn't undo what the note set off: colleagues you mentioned have
+already been mailed, and followers may already have had it in a digest.
 
 ## Who has the ticket
 
