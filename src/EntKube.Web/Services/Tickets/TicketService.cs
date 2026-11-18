@@ -110,6 +110,7 @@ public class TicketService(
         string? requestedBy = null,
         string? requestedByEmail = null,
         Guid? alertIncidentId = null,
+        string? descriptionHtml = null,
         CancellationToken ct = default)
     {
         (SupportWindow window, bool windowKnown, bool slaApplied) =
@@ -130,6 +131,7 @@ public class TicketService(
             AppId = appId,
             Title = title,
             Description = description,
+            DescriptionHtml = string.IsNullOrWhiteSpace(descriptionHtml) || RichText.IsEmpty(descriptionHtml) ? null : RichText.Sanitize(descriptionHtml),
             Channel = channel,
             Status = TicketStatus.New,
             ProposedPriority = proposedPriority,
@@ -900,6 +902,36 @@ public class TicketService(
         }
 
         db.TicketEvents.Add(Event(ticketId, kind, at, actor, detail, customerVisible));
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Files an arrived mail on a ticket (helpdesk phase 8): its text as the entry's
+    /// <see cref="TicketEvent.Detail"/>, exactly as before, and — when the mail had HTML — the
+    /// sanitised HTML beside it for display, headed with who sent it. Customer-visible, as a mail
+    /// from the customer's side is.
+    /// </summary>
+    public async Task<bool> AddMailEntryAsync(
+        Guid tenantId, Guid ticketId, string fromAddress, string text, string? html, string? actor, DateTime at,
+        CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        string? safe = string.IsNullOrWhiteSpace(html) ? null : RichText.Sanitize(html);
+
+        if (safe is not null && RichText.IsEmpty(safe))
+        {
+            safe = null;
+        }
+
+        db.TicketEvents.Add(Event(ticketId, TicketEventKind.Note, at, actor, $"From {fromAddress}: {text}", customerVisible: true,
+            safe is null ? null : $"<p>From {System.Net.WebUtility.HtmlEncode(fromAddress)}:</p>{safe}"));
         await db.SaveChangesAsync(ct);
         return true;
     }

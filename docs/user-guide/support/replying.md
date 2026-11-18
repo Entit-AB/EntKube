@@ -31,6 +31,18 @@ Under the editor, tick any of the ticket's stored files to send with the mail. I
 marked *(internal)*, so check before you send one. Add new files in the ticket's
 [Attachments](attachments.md) card first.
 
+## Mail from customers
+
+A mail that arrived as HTML is shown formatted on the ticket, as the description of a ticket it
+opened or as its entry in the history. It is cleaned by the same rules as what you send:
+formatting, lists, quotes, code and links stay, but **images are never shown**, so a tracking
+pixel in a customer's mail never reports that you read it. A picture pasted into the mail, such as
+a screenshot, is kept as a file in the ticket's [Attachments](attachments.md) card. A very large
+HTML mail, such as a newsletter, is shown as its text.
+
+Search, the triage phrases, the cut line in replies and the customer portal all read the mail's
+text, exactly as before.
+
 ## What is sent
 
 What you write is cleaned before it's sent or stored. Formatting, lists, quotes, code and

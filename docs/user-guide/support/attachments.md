@@ -4,6 +4,8 @@
 
 Files attached to a mail sent to the support address are kept with the mail and shown in the
 ticket's **Attachments** card when the mail is filed on the ticket. Click a file to download it.
+Pictures pasted into the mail itself, such as screenshots, are kept the same way, named after
+their file name or *inline-image-1.png*.
 Files from a duplicate merged into a ticket are shown there too.
 
 A file that couldn't be kept is still listed, in red, with the reason:

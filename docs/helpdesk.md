@@ -248,7 +248,7 @@ they survive a reload, a dropped circuit or another instance. They are never on 
 - **Not yet:** notes are still plain text (only mail is rich). Inbound HTML is shown as its text
   (remote images are therefore never loaded). Neither the `@@` trigger inside the editor nor
   customer downloads from the portal exist yet. *(Rich notes, `@@` and portal downloads: done in
-  Phase 7. Inbound HTML is still shown as text.)*
+  Phase 7. Inbound HTML: done in Phase 8.)*
 
 Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and organisation views).
 
@@ -403,7 +403,33 @@ but never built), customers downloading their files from the portal, and rich-te
   text agree. Stored like a mail: sanitised `DetailHtml`, with its text in `Detail` for search,
   digests, mention mail and the portal. Note drafts are kept as sanitised HTML; a plain-text draft
   from before is converted, so nobody's half-written note is lost.
-- **Still not done:** inbound HTML mail is still shown as its text.
+- **Still not done:** inbound HTML mail is still shown as its text *(done in Phase 8)*.
+
+### Phase 8: Inbound HTML and quick search
+
+**Status (2026-11-18): built.** Tests: the HTML sections of `MailMessageReaderTests` and
+`SupportMailTests`, `QuickSearchTests`, and the Phase 8 parts of `TicketWorkRenderTests`. Decisions:
+
+- **HTML is for display only.** At arrival, the mail's HTML part is sanitised by the same allow-list
+  (`RichText`) and kept as `InboundMailMessage.BodyHtml`. `Body`, the text, stays what search, the
+  triage phrases, the reply cut line and the portal read, which is the line decision 3 drew. A ticket
+  opened from the mail gets `Ticket.DescriptionHtml`; a mail filed on a ticket gets the entry's
+  `DetailHtml`, headed with the sender (HTML-encoded). Both are sanitised again when filed and again
+  when shown.
+- **No images, so no tracking pixels.** `img` was never on the allow-list.
+- **Pasted pictures were being lost, and are now kept.** A screenshot pasted into a mail is an
+  *inline* MIME part, which MimeKit's `Attachments` leaves out, so it was neither shown nor kept.
+  `MailAttachments` now also keeps every inline part that isn't the mail's own text.
+- **Large HTML is shown as text.** Over 200,000 characters once sanitised (newsletters), the HTML
+  isn't kept.
+- **Quick search runs on plain words only**, so it can't change what a ticket query means. It finds
+  this tenant's customers (every word in the name, with their open-ticket count) and knowledge-base
+  answers (title, keywords or text; drafts and internal included, archived not, because the
+  searcher is an agent). A customer opens `customer:"…"`: all their tickets, open and closed, at the
+  cost of the name being a contains match. An answer opens in the knowledge base via `?answer=`,
+  which only opens this tenant's.
+- **Still not done:** separate customer and organisation pages. The customer card and these searches
+  cover what they showed.
 
 ## Decisions (2026-11-16)
 

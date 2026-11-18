@@ -91,6 +91,20 @@ customer:"Vårdbolaget" reported:>now-7d
 "certificate expired" OR "cert expired"
 ```
 
+### Customers and help answers
+
+When the search is plain words, with no fields, quotes, ranges or `AND`/`OR`/`NOT`, a box above the
+results also lists:
+
+- **Customers** whose name contains every word, with how many of their tickets are open. Click one
+  to search all of that customer's tickets, open and closed. This runs `customer:"…"`, which
+  matches by name, so customers whose names contain that name are included too.
+- **Help answers** whose title, keywords or text contain every word: drafts and internal ones too,
+  marked as such, but never archived ones. Click one to open it in the
+  [knowledge base](knowledge-base.md).
+
+Only this tenant's customers and answers are searched.
+
 ## The customer card
 
 On a ticket, the card at the top of the right-hand column shows the customer: how many tickets are

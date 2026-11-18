@@ -119,6 +119,15 @@ public class InboundMailMessage
     public string Body { get; set; } = "";
 
     /// <summary>
+    /// The mail's HTML part, sanitised by the same allow-list as everything else (RichText)
+    /// before it is stored, or null when it had none, nothing survived, or it was too large
+    /// (helpdesk phase 8). Only ever DISPLAYED: <see cref="Body"/> stays what search, the triage
+    /// phrases, the reply cut line and the portal read (decision 3). Images are not on the
+    /// allow-list, so a tracking pixel never loads.
+    /// </summary>
+    public string? BodyHtml { get; set; }
+
+    /// <summary>
     /// When the message was sent, from the mail itself — not when we happened to fetch it.
     /// This is what a response time is counted from.
     /// </summary>

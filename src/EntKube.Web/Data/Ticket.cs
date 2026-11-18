@@ -144,6 +144,13 @@ public class Ticket
 
     public string Description { get; set; } = "";
 
+    /// <summary>
+    /// The description as formatted, when the ticket was opened from an HTML mail (helpdesk
+    /// phase 8). Sanitised when stored and again when shown; <see cref="Description"/> always
+    /// holds the text, which is what search, mail and the portal read.
+    /// </summary>
+    public string? DescriptionHtml { get; set; }
+
     public TicketChannel Channel { get; set; }
 
     public TicketStatus Status { get; set; } = TicketStatus.New;

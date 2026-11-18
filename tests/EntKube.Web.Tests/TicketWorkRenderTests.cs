@@ -73,6 +73,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new TicketPresenceService(factory));
         Services.AddSingleton(new KnowledgeBaseService(factory));
         Services.AddSingleton(new TicketHighlightService(factory));
+        Services.AddSingleton(new SupportQuickSearch(factory));
         Services.AddSingleton(NoIssueTrackers.For(factory));
         Services.AddSingleton(new TicketAttachmentService(factory, new UnconfiguredAttachmentStore()));
         Services.AddSingleton(TestTicketReference.Instance);
@@ -591,6 +592,26 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
     // ───────────────────────────── Phase 7 ─────────────────────────────
 
+    /// <summary>Phase 8: a ticket opened from an HTML mail reads as the mail did — without its images.</summary>
+    [Fact]
+    public async Task A_ticket_from_an_html_mail_shows_its_formatting_and_no_remote_image()
+    {
+        Ticket ticket = await tickets.CreateAsync(tenantId, customerId, null, "From mail", "Restart please.",
+            TicketChannel.Email, TicketPriority.P3, DateTime.UtcNow, "Karin", "karin@kund.example",
+            descriptionHtml: "<p>Restart <strong>please</strong>.</p>");
+
+        // As if it had reached the database unsanitised (an older row, a hand-made restore): the
+        // view sanitises again before it shows anything.
+        await db.Tickets.Where(t => t.Id == ticket.Id).ExecuteUpdateAsync(u => u.SetProperty(t => t.DescriptionHtml,
+            "<p>Restart <strong>please</strong>.</p><img src=\"https://track.example/p.gif\"><script>steal()</script>"));
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        string shown = detail.Find("[data-test=description-html]").InnerHtml;
+        shown.Should().Contain("<strong>please</strong>").And.NotContain("<img").And.NotContain("track.example").And.NotContain("script");
+    }
+
+
     [Fact]
     public async Task Ones_own_internal_note_can_be_deleted_from_the_history_after_a_second_press()
     {
@@ -745,6 +766,43 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         queue.Markup.Should().Contain("Login fails").And.NotContain("Printer offline");
         queue.FindAll("[data-test=overviews]").Should().BeEmpty();
         _ = match;
+    }
+
+    /// <summary>Phase 8: plain words also find the customer and the help answer; picking the customer searches their tickets.</summary>
+    [Fact]
+    public async Task Plain_words_in_the_search_also_find_customers_and_help_answers()
+    {
+        await Raise("Printer offline");
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Printing", null);
+        KbAnswer answer = await kb.SaveAnswerAsync(tenantId, new KbAnswer
+        {
+            Title = "Printer queue stuck", CategoryId = cat.Id, Visibility = KbVisibility.Internal, Language = "en", BodyHtml = "<p>Restart the spooler.</p>",
+        }, "nils");
+        string customerName = db.Customers.AsNoTracking().Single(c => c.Id == customerId).Name;
+        string word = customerName.Split(' ')[0];
+
+        IRenderedComponent<TicketQueue> byCustomer = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, word));
+        byCustomer.WaitForAssertion(() => byCustomer.Find("[data-test=quick-results]").TextContent.Should().Contain(customerName).And.Contain("1 open"));
+
+        IRenderedComponent<TicketQueue> byAnswer = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "spooler"));
+        byAnswer.WaitForAssertion(() => byAnswer.Find("[data-test=quick-results] a").GetAttribute("href")
+            .Should().Contain("section=knowledge-base").And.Contain($"answer={answer.Id}"));
+        byAnswer.Find("[data-test=quick-results]").TextContent.Should().Contain("Printer queue stuck").And.Contain("(internal)");
+    }
+
+    [Fact]
+    public async Task A_field_search_finds_tickets_only()
+    {
+        await Raise("Printer offline");
+
+        IRenderedComponent<TicketQueue> queue = Render<TicketQueue>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "title:printer"));
+
+        queue.WaitForAssertion(() => queue.Find("[data-test=search-summary]"));
+        queue.FindAll("[data-test=quick-results]").Should().BeEmpty();
     }
 
     [Fact]

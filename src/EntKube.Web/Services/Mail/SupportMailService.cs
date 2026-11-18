@@ -836,6 +836,7 @@ public class SupportMailService(
                     message.SentAt,
                     message.FromName ?? message.FromAddress,
                     message.FromAddress,
+                    descriptionHtml: message.BodyHtml,
                     ct: ct);
 
                 message.TicketId = ticket.Id;
@@ -897,9 +898,8 @@ public class SupportMailService(
             {
                 Guid appendOwner = await OwningTenantOf(ticketId);
 
-                if (!await tickets.AddEventAsync(appendOwner, ticketId, TicketEventKind.Note,
-                        $"From {message.FromAddress}: {message.Body}",
-                        actor, message.SentAt, customerVisible: true, ct))
+                if (!await tickets.AddMailEntryAsync(appendOwner, ticketId, message.FromAddress, message.Body,
+                        message.BodyHtml, actor, message.SentAt, ct))
                 {
                     return await NotDoneAsync("the ticket it belongs to is no longer there");
                 }

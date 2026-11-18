@@ -279,6 +279,7 @@ public static partial class ModuleMap
         [typeof(EntKube.Web.Services.Tickets.SupportReportService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.IssueLinkService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketHighlightService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.SupportQuickSearch)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.VaultIssueTrackerTokens)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUp)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketFollowUpSweep)] = Module.Support,

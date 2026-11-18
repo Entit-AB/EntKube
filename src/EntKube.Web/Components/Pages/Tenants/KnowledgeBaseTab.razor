@@ -141,6 +141,10 @@
 @code {
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
+    /// <summary>An answer to open on arrival — quick search links here. Only this tenant's opens.</summary>
+    [Parameter] public Guid? OpenAnswerId { get; set; }
+
+    private Guid? openedFromAddress;
     private bool loading = true;
     private string? error;
     private List<KbCategory> categories = [];
@@ -165,6 +169,16 @@
             categories = await KnowledgeBase.CategoriesAsync(TenantId);
             customers = await Templates.CustomersAsync(TenantId);
             answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+
+            if (OpenAnswerId is Guid wanted && wanted != openedFromAddress)
+            {
+                openedFromAddress = wanted;
+
+                if (await KnowledgeBase.GetAsync(TenantId, wanted) is { } found)
+                {
+                    OpenAnswer(found);
+                }
+            }
         }
         catch (Exception ex)
         {
