@@ -6339,6 +6339,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<int>("Escalation")
                         .HasColumnType("integer");
 
+                    b.Property<int>("Mail")
+                        .HasColumnType("integer");
+
                     b.Property<int>("NewTicket")
                         .HasColumnType("integer");
 

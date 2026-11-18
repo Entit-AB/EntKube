@@ -272,6 +272,7 @@ public static partial class ModuleMap
         [typeof(EntKube.Web.Services.Tickets.S3AttachmentObjectStore)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketAttachmentService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketNotificationService)] = Module.Support,
+        [typeof(EntKube.Web.Services.Tickets.TicketNotifierMailer)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.OutOfOfficeService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.TicketPresenceService)] = Module.Support,
         [typeof(EntKube.Web.Services.Tickets.CalendarFeedService)] = Module.Support,

@@ -11,6 +11,22 @@ public enum NotificationKind
 }
 
 /// <summary>
+/// The kinds of news a person also wants by mail, besides the bell (helpdesk phase 9) — the
+/// e-mail column of Zammad's matrix. Which tickets is still the scope's to say: mail goes only
+/// where the bell would ring.
+/// </summary>
+[Flags]
+public enum NotifyByMail
+{
+    None = 0,
+    NewTicket = 1,
+    Update = 2,
+    Assigned = 4,
+    Reminder = 8,
+    Escalation = 16,
+}
+
+/// <summary>
 /// Which tickets a person hears about for one kind of event — the columns of Zammad's matrix.
 /// Flags, so one column per kind holds the whole row.
 /// </summary>
@@ -79,6 +95,9 @@ public class NotificationPreference
     public NotifyScope Reminder { get; set; }
 
     public NotifyScope Escalation { get; set; }
+
+    /// <summary>Which of the above also come by mail. None unless chosen.</summary>
+    public NotifyByMail Mail { get; set; }
 
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

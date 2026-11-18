@@ -26,6 +26,16 @@ public static class NotificationPreferences
         Escalation = NotifyScope.Mine | NotifyScope.Unassigned,
     };
 
+    /// <summary>The mail flag for a kind of news.</summary>
+    public static NotifyByMail MailFlag(NotificationKind kind) => kind switch
+    {
+        NotificationKind.NewTicket => NotifyByMail.NewTicket,
+        NotificationKind.Update => NotifyByMail.Update,
+        NotificationKind.Assigned => NotifyByMail.Assigned,
+        NotificationKind.Reminder => NotifyByMail.Reminder,
+        _ => NotifyByMail.Escalation,
+    };
+
     public static NotifyScope For(NotificationPreference p, NotificationKind kind) => kind switch
     {
         NotificationKind.NewTicket => p.NewTicket,
@@ -51,8 +61,22 @@ public readonly record struct NotificationView(
 /// <para>One line per person per ticket per pass: three notes in a minute are "3 updates", not
 /// three lines. The person who did something is not told about it.</para>
 /// </summary>
+/// <summary>How a notification is mailed. <see cref="TicketNotifierMailer"/> in the app; a recorder in tests.</summary>
+public interface INotificationMailer
+{
+    Task<bool> SendAsync(Ticket ticket, string toEmail, string subject, string body, CancellationToken ct);
+}
+
+/// <summary>Notifications by mail through the tenant's own relay, as mentions are sent.</summary>
+public sealed class TicketNotifierMailer(TicketNotifier notifier) : INotificationMailer
+{
+    public Task<bool> SendAsync(Ticket ticket, string toEmail, string subject, string body, CancellationToken ct) =>
+        notifier.NotifyColleagueAsync(ticket, toEmail, subject, body, ct);
+}
+
 public class TicketNotificationService(
-    IDbContextFactory<SupportDbContext> dbFactory, SupportDutyService duty, OutOfOfficeService outOfOffice)
+    IDbContextFactory<SupportDbContext> dbFactory, SupportDutyService duty, OutOfOfficeService outOfOffice,
+    INotificationMailer mailer)
 {
     /// <summary>How long a read notification is kept, and any notification at all.</summary>
     public static readonly TimeSpan KeepRead = TimeSpan.FromDays(1), KeepAny = TimeSpan.FromDays(90);
@@ -85,6 +109,7 @@ public class TicketNotificationService(
         row.Assigned = input.Assigned;
         row.Reminder = input.Reminder;
         row.Escalation = input.Escalation;
+        row.Mail = input.Mail;
         row.UpdatedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
@@ -214,7 +239,42 @@ public class TicketNotificationService(
 
         db.UserNotifications.AddRange(lines);
         await db.SaveChangesAsync(ct);
+
+        // By mail too, where chosen — after the cursor claim above, so once across instances.
+        // An update to a followed ticket is left to the follower digest, which already mails it.
+        foreach (UserNotification line in lines)
+        {
+            if (line.Kind == NotificationKind.Update && line.TicketId is Guid onTicket
+                && audience.Followers.TryGetValue(onTicket, out HashSet<string>? following) && following.Contains(line.UserId))
+            {
+                continue;
+            }
+
+            await MailAsync(audience, line, events.First(e => e.TicketId == line.TicketId).Ticket, ct);
+        }
+
         return lines.Count;
+    }
+
+    /// <summary>
+    /// Mails one notification to its person, when they chose mail for its kind and have an address.
+    /// A mail that cannot leave is not retried: the bell already has it.
+    /// </summary>
+    private async Task MailAsync(Audience audience, UserNotification line, Ticket ticket, CancellationToken ct)
+    {
+        NotificationPreference p = audience.Preferences.TryGetValue(line.UserId, out NotificationPreference? chosen)
+            ? chosen
+            : NotificationPreferences.Defaults(line.UserId, ticket.TenantId);
+
+        if (!p.Mail.HasFlag(NotificationPreferences.MailFlag(line.Kind))
+            || !audience.Emails.TryGetValue(line.UserId, out string? email) || string.IsNullOrWhiteSpace(email))
+        {
+            return;
+        }
+
+        await mailer.SendAsync(ticket, email, line.Text,
+            $"{line.Text}\n\nOpen the ticket in EntKube to see it. You chose to have this kind of notification mailed"
+            + " (Support › My notifications & absence).", ct);
     }
 
     /// <summary>
@@ -274,13 +334,23 @@ public class TicketNotificationService(
             string when = deadline <= now ? "was due" : "is due";
             string text = $"#{ticket.Number} {Clip(ticket.Title)} — {ticket.Priority} {what} {when} {BusinessCalendar.ToLocal(deadline):HH:mm}";
 
+            List<UserNotification> told = [];
+
             foreach ((string userId, _) in audience.Members.Where(m => audience.Wants(m.UserId, ticket, NotificationKind.Escalation)))
             {
-                db.UserNotifications.Add(Line(tenantId, userId, ticket, NotificationKind.Escalation, text, now));
+                UserNotification line = Line(tenantId, userId, ticket, NotificationKind.Escalation, text, now);
+                db.UserNotifications.Add(line);
+                told.Add(line);
                 written++;
             }
 
             await db.SaveChangesAsync(ct);
+
+            // After the NotifiedEscalation insert claimed this deadline: mailed once, by one instance.
+            foreach (UserNotification line in told)
+            {
+                await MailAsync(audience, line, ticket, ct);
+            }
         }
 
         return written;
@@ -305,6 +375,8 @@ public class TicketNotificationService(
     private sealed class Audience
     {
         public required List<(string UserId, string Name)> Members { get; init; }
+        public Dictionary<string, string> Emails { get; init; } = [];
+
         public required Dictionary<string, NotificationPreference> Preferences { get; init; }
         public required Dictionary<Guid, HashSet<string>> Followers { get; init; }
 
@@ -341,6 +413,7 @@ public class TicketNotificationService(
         return new Audience
         {
             Members = [.. roster.Select(m => (m.UserId, m.Name))],
+            Emails = roster.Where(m => !string.IsNullOrWhiteSpace(m.Email)).ToDictionary(m => m.UserId, m => m.Email!),
             Preferences = await db.NotificationPreferences.AsNoTracking()
                 .Where(p => p.TenantId == tenantId).ToDictionaryAsync(p => p.UserId, ct),
             Followers = follows.GroupBy(f => f.TicketId).ToDictionary(g => g.Key, g => g.Select(x => x.UserId).ToHashSet()),

@@ -431,6 +431,23 @@ but never built), customers downloading their files from the portal, and rich-te
 - **Still not done:** separate customer and organisation pages. The customer card and these searches
   cover what they showed.
 
+### Phase 9: Mail and sound for notifications
+
+**Status (2026-11-18): built.** Tests: the "By mail" section of `TicketNotificationTests`, and
+`NotificationBellRenderTests`. Decisions:
+
+- **The e-mail column follows the bell.** `NotificationPreference.Mail` is a flags column with one
+  flag per kind, none by default. Mail goes only where the scope already rings the bell; it never
+  widens who hears what. It is sent after the claim that already makes the bell once-only (the
+  cursor compare-and-set, or the `NotifiedEscalation` insert), so several instances mail once.
+- **No duplicate of the digest.** An *update* to a ticket the person follows is not mailed this
+  way, because the follower digest has mailed updates since Phase 1.
+- **Sent through the tenant's relay** (`TicketNotifier.NotifyColleagueAsync`, as mentions are),
+  behind `INotificationMailer` so tests can record it. A failed mail isn't retried; the bell has it.
+- **Sound is per browser and off by default**, like the keyboard shortcuts. It is a two-note chime
+  made with Web Audio, so there's no file to ship. It plays when the 30-second refresh finds more
+  unread than before. Browsers that block audio until a click are woken by the first click.
+
 ## Decisions (2026-11-16)
 
 1. **No groups. The tenant is the queue.** One support team works every customer, and
