@@ -245,6 +245,8 @@ public class BackupService(
             KbAnswers = await db.KbAnswers.AsNoTracking().ToListAsync(),
             KbAnswerLinks = await db.KbAnswerLinks.AsNoTracking().ToListAsync(),
             KbAnswerTickets = await db.KbAnswerTickets.AsNoTracking().ToListAsync(),
+            KbAnswerRevisions = await db.KbAnswerRevisions.AsNoTracking().ToListAsync(),
+            KnowledgeSectionMoves = await db.KnowledgeSectionMoves.AsNoTracking().ToListAsync(),
             IssueTrackers = await db.IssueTrackers.AsNoTracking().ToListAsync(),
             TicketIssueLinks = await db.TicketIssueLinks.AsNoTracking().ToListAsync(),
             TicketHighlights = await db.TicketHighlights.AsNoTracking().ToListAsync(),
@@ -388,6 +390,21 @@ public class BackupService(
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""Tenants"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetUsers"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetRoles"" CASCADE");
+
+                // ⚠️ The three roots do NOT cover the whole schema: the helpdesk tables keep their
+                // tenant as a plain column (one cascade path for SQL Server), so nothing references
+                // them from Tenants and CASCADE never reaches them — knowledge-base categories,
+                // notification preferences, issue trackers, dashboards… A restore then collided with
+                // their leftover rows. The tables the roots miss AND the bundle restores are
+                // computed and truncated too. Only those: a table the bundle leaves out on purpose
+                // (the telemetry segment catalogue, which indexes objects in S3; metric rollups) is
+                // not restored, so wiping it would destroy what the restore never brings back.
+                foreach (string table in TablesToWipeBeyondTheRoots(db.Model))
+                {
+#pragma warning disable EF1002 // Table names come from the EF model, never from input.
+                    await db.Database.ExecuteSqlRawAsync($"TRUNCATE \"{table}\" CASCADE");
+#pragma warning restore EF1002
+                }
                 // NotificationProviderConfig used to need clearing here: it was global, so the
                 // CASCADE above could not reach it. It now hangs off Tenants by FK, so the
                 // TRUNCATE ""Tenants"" CASCADE takes it with everything else.
@@ -625,6 +642,10 @@ public class BackupService(
             // Parents before children: a category's parent must exist when it is inserted.
             await InsertEntities(db, db.KbCategories, KbCategoriesParentsFirst(bundle.KbCategories));
             await InsertEntities(db, db.KbAnswers, bundle.KbAnswers);
+            await InsertEntities(db, db.KbAnswerRevisions, bundle.KbAnswerRevisions);
+            // The move ledger MUST travel: without it a restored database would move its sections
+            // again and bring back answers people had deleted.
+            await InsertEntities(db, db.KnowledgeSectionMoves, bundle.KnowledgeSectionMoves);
             await InsertEntities(db, db.KbAnswerLinks, bundle.KbAnswerLinks);
             await InsertEntities(db, db.IssueTrackers, bundle.IssueTrackers);
             await InsertEntities(db, db.TicketIssueLinks, bundle.TicketIssueLinks);
@@ -923,5 +944,64 @@ public class BackupService(
         }
 
         return ordered;
+    }
+
+    /// <summary>
+    /// What a wipe truncates besides the three roots: the tables the roots miss that the bundle
+    /// restores — so the restore cannot collide with leftovers, and nothing it does not bring back
+    /// is destroyed.
+    /// </summary>
+    public static List<string> TablesToWipeBeyondTheRoots(Microsoft.EntityFrameworkCore.Metadata.IModel model)
+    {
+        HashSet<Type> bundled = [.. typeof(BackupBundle).GetProperties()
+            .Select(p => p.PropertyType)
+            .Where(t => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>))
+            .Select(t => t.GetGenericArguments()[0])];
+
+        HashSet<string> restored = [.. model.GetEntityTypes()
+            .Where(t => bundled.Contains(t.ClrType) && t.GetTableName() is not null)
+            .Select(t => t.GetTableName()!)];
+
+        return [.. TablesTheRootsMiss(model).Where(restored.Contains)];
+    }
+
+    /// <summary>
+    /// The tables a <c>TRUNCATE … CASCADE</c> of Tenants, AspNetUsers and AspNetRoles leaves behind:
+    /// those with no chain of foreign keys up to one of them. Postgres follows every foreign key
+    /// whatever its ON DELETE rule, so reachability is all that counts.
+    /// </summary>
+    public static List<string> TablesTheRootsMiss(Microsoft.EntityFrameworkCore.Metadata.IModel model)
+    {
+        HashSet<string> roots = ["Tenants", "AspNetUsers", "AspNetRoles"];
+        Dictionary<Microsoft.EntityFrameworkCore.Metadata.IEntityType, bool> reaches = [];
+
+        bool Reaches(Microsoft.EntityFrameworkCore.Metadata.IEntityType type, HashSet<Microsoft.EntityFrameworkCore.Metadata.IEntityType> seen)
+        {
+            if (reaches.TryGetValue(type, out bool known))
+            {
+                return known;
+            }
+
+            if (type.GetTableName() is string name && roots.Contains(name))
+            {
+                return reaches[type] = true;
+            }
+
+            if (!seen.Add(type))
+            {
+                return false;
+            }
+
+            bool any = type.GetForeignKeys().Any(fk => Reaches(fk.PrincipalEntityType, seen));
+            reaches[type] = any;
+            return any;
+        }
+
+        return [.. model.GetEntityTypes()
+            .Where(t => !t.IsOwned() && t.FindPrimaryKey() is not null && t.GetTableName() is not null && t.GetViewName() is null)
+            .Where(t => !Reaches(t, []))
+            .Select(t => t.GetTableName()!)
+            .Distinct()
+            .Order()];
     }
 }

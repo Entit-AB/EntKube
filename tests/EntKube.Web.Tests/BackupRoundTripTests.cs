@@ -203,6 +203,43 @@ public class BackupRoundTripTests : IDisposable
     }
 
     /// <summary>
+    /// An application's knowledge travels whole (knowledge merge, release A): the answer tied to
+    /// its app, its history, and the move ledger. Without the ledger a restored database would move
+    /// its sections again and bring back answers somebody had deleted.
+    /// </summary>
+    [Fact]
+    public async Task Application_knowledge_its_history_and_the_move_ledger_travel()
+    {
+        Seed();
+        Guid appId = Guid.NewGuid(), categoryId = Guid.NewGuid(), answerId = Guid.NewGuid();
+
+        using (ApplicationDbContext db = Source())
+        {
+            Guid customerId = db.Customers.Single().Id;
+            db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
+            db.KbCategories.Add(new KbCategory { Id = categoryId, TenantId = tenantId, Name = "Applications" });
+            db.KbAnswers.Add(new KbAnswer
+            {
+                Id = answerId, TenantId = tenantId, CategoryId = categoryId, Title = "Runbook", BodyHtml = "<p>Now</p>",
+                Visibility = KbVisibility.Operations, AppId = appId, Section = KnowledgeSectionKind.Runbook, CustomerId = customerId,
+            });
+            db.KbAnswerRevisions.Add(new KbAnswerRevision
+            {
+                Id = Guid.NewGuid(), AnswerId = answerId, TenantId = tenantId, Body = "Before", BodyFormat = KbBodyFormat.Markdown,
+            });
+            db.KnowledgeSectionMoves.Add(new KnowledgeSectionMove { SectionId = answerId, TenantId = tenantId, AppId = appId, AnswerId = answerId });
+            db.SaveChanges();
+        }
+
+        await RoundTripAsync();
+
+        using ApplicationDbContext restored = Destination();
+        restored.KbAnswers.Should().ContainSingle(a => a.AppId == appId && a.Visibility == KbVisibility.Operations);
+        restored.KbAnswerRevisions.Should().ContainSingle(r => r.AnswerId == answerId && r.BodyFormat == KbBodyFormat.Markdown);
+        restored.KnowledgeSectionMoves.Should().ContainSingle(m => m.SectionId == answerId);
+    }
+
+    /// <summary>
     /// The audit trail travels, within its window. This was the last entry on
     /// <c>BackupCoverageTests</c>'s gap list: pure evidence rather than configuration, kept out
     /// because a busy installation's whole history could be most of a one-document bundle.

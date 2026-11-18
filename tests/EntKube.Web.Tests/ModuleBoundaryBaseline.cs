@@ -65,7 +65,11 @@ public partial class ModuleBoundaryTests
         // 1 → 2 (helpdesk phase 6): an issue tracker's token is a vault secret owned by the tracker
         // row, cascading with it — the same arrangement as the support mailbox's password.
         [(Module.Secrets, Module.Support)] = 2,
-        [(Module.Support, Module.Delivery)] = 11,
+        // 11 → 12 (2026-11-18, knowledge merge release A): KbAnswer.AppId → App, Restrict. A key
+        // rather than a plain column ON PURPOSE: a deletion path that forgets an application's
+        // knowledge must fail loudly, not leave its access notes in the tenant-wide knowledge base.
+        // Comes back down by one in release C, when KnowledgeSection's own App key goes.
+        [(Module.Support, Module.Delivery)] = 12,
         // 28 → 32: text modules, ticket templates, macros and checklist templates each belong to a
         // tenant by foreign key, like every other tenant-owned Support table — the tenant purge
         // cascades through it (docs/helpdesk.md, phase 2a).

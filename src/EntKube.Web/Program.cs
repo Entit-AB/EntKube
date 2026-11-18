@@ -649,6 +649,7 @@ public class Program
             await EnsureNotificationProviderConfigsAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
             await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
+            await ForecastKnowledgeMergeAsync(scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -1509,6 +1510,31 @@ public class Program
     // One-time/idempotent: secrets imported before TLS detection existed are sitting in the
     // vault as separate opaque keys (tls.crt + tls.key). Merge each such group into a single
     // readable Certificate secret so it shows expiry and syncs as kubernetes.io/tls.
+    /// <summary>
+    /// Release A of the knowledge merge (docs/helpdesk.md, phase 11): a DRY RUN. Logs, per tenant,
+    /// how the runbook sections still to move would convert. Writes nothing; never fails startup.
+    /// The service is resolved outside the catch, so a broken registration fails loudly.
+    /// </summary>
+    private static async Task ForecastKnowledgeMergeAsync(IServiceProvider services, ILogger logger)
+    {
+        EntKube.Web.Services.Knowledge.KnowledgeMerge merge = services.GetRequiredService<EntKube.Web.Services.Knowledge.KnowledgeMerge>();
+
+        try
+        {
+            foreach (EntKube.Web.Services.Knowledge.KnowledgeMergeForecast f in await merge.ForecastAsync())
+            {
+                logger.LogInformation(
+                    "Knowledge merge dry run, tenant {Tenant}: {Total} section(s) to move — {Exact} exact, {Mapped} with mappings, "
+                    + "{Fallback} would be kept as preformatted markdown, {Detached} belong to an application outside the tenant. Nothing was moved.",
+                    f.TenantSlug, f.Total, f.Exact, f.Mapped, f.Fallback, f.Detached);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "The knowledge merge dry run failed; nothing was changed.");
+        }
+    }
+
     private static async Task EnsureImportedTlsSecretsAsCertificatesAsync(
         IServiceProvider services, ILogger logger)
     {

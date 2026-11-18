@@ -199,13 +199,23 @@
     {
         kbQuery = null;
 
+        // Asked for again under the same rules (phase 11): the offered list may be minutes old,
+        // and an answer since made Operations or narrowed to another customer must not go out.
+        KbAnswer? current = await KnowledgeBase.ForInsertAsync(TenantId, Ticket.Id, a.Id, DateTime.UtcNow);
+
+        if (current is null)
+        {
+            Toasts.Warning("That answer can no longer be given on this ticket.");
+            return;
+        }
+
         if (module is not null)
         {
-            await module.InvokeVoidAsync("insertAnswer", editor, RichText.Sanitize(a.BodyHtml));
+            await module.InvokeVoidAsync("insertAnswer", editor, RichText.Sanitize(current.BodyHtml));
         }
 
         // Phase 10: the answer now shows where it was given, and the ticket which answers it got.
-        await KnowledgeBase.LinkTicketAsync(TenantId, a.Id, Ticket.Id, Actor);
+        await KnowledgeBase.LinkTicketAsync(TenantId, current.Id, Ticket.Id, Actor);
     }
 
     private IEnumerable<TextModule> Matching() =>
