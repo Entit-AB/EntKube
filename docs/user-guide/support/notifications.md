@@ -20,6 +20,11 @@ make one line ("3 updates, last by anna"). You're never told about what you did 
 
 Read notifications disappear after a day, and unread ones after 90 days.
 
+**Sound.** Switch on **Sound** at the top of the list for a short chime when new notifications
+arrive. The count is checked every 30 seconds. Sound is off until you switch it on, and the
+setting is kept in this browser only. Some browsers keep a page silent until you've clicked
+somewhere on it.
+
 ## Choosing what you hear about
 
 **Support › Tickets › My notifications & absence** has a matrix. For each kind, tick which tickets
@@ -33,6 +38,16 @@ you want to hear about:
 The defaults: everything about your own tickets, new and escalating unassigned ones, and updates
 on tickets you follow. **Reset to defaults** puts them back. Following a ticket still also mails
 you a digest, as before.
+
+### By mail
+
+Tick **By mail** on a row to have that kind of notification mailed to you as well, from the
+tenant's support relay. Mail goes only where the bell would ring: for the tickets ticked on that
+row, and nowhere else. Nothing is mailed until you choose it.
+
+An update to a ticket you follow isn't mailed this way, because the follower digest already mails
+it. Each notification is mailed once, even with several EntKube servers. A mail that can't be sent
+isn't retried; the bell still has it.
 
 ## Out of office
 

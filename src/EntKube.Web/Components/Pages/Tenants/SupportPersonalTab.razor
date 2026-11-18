@@ -22,10 +22,10 @@
 else if (!loading)
 {
     <h6 class="mb-1">Notifications</h6>
-    <div class="text-muted small mb-2">What the bell tells you, for which tickets. Followers also get the mail digest they already had.</div>
+    <div class="text-muted small mb-2">What the bell tells you, for which tickets — and, ticked under <strong>By mail</strong>, mailed to you as well. Followers also get the mail digest they already had, so updates to followed tickets are not mailed twice.</div>
     <table class="table table-sm small align-middle" data-test="notification-matrix" style="max-width: 44rem">
         <thead class="table-light">
-            <tr><th></th><th class="text-center">My tickets</th><th class="text-center">Unassigned</th><th class="text-center">Followed</th><th class="text-center">All tickets</th></tr>
+            <tr><th></th><th class="text-center">My tickets</th><th class="text-center">Unassigned</th><th class="text-center">Followed</th><th class="text-center">All tickets</th><th class="text-center border-start">By mail</th></tr>
         </thead>
         <tbody>
             @foreach ((NotificationKind kind, string label) in Rows)
@@ -39,6 +39,10 @@ else if (!loading)
                                    checked="@Get(kind).HasFlag(scope)" @onchange="e => Set(kind, scope, e.Value is true)" />
                         </td>
                     }
+                    <td class="text-center border-start">
+                        <input class="form-check-input" type="checkbox" aria-label="@($"{label}: by mail")"
+                               checked="@prefs.Mail.HasFlag(NotificationPreferences.MailFlag(kind))" @onchange="e => SetMail(kind, e.Value is true)" />
+                    </td>
                 </tr>
             }
         </tbody>
@@ -174,6 +178,12 @@ else if (!loading)
             case NotificationKind.Reminder: prefs.Reminder = value; break;
             default: prefs.Escalation = value; break;
         }
+    }
+
+    private void SetMail(NotificationKind kind, bool on)
+    {
+        NotifyByMail flag = NotificationPreferences.MailFlag(kind);
+        prefs.Mail = on ? prefs.Mail | flag : prefs.Mail & ~flag;
     }
 
     private async Task SavePreferencesAsync()

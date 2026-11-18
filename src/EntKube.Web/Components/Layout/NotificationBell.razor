@@ -4,6 +4,7 @@
 @inject TicketNotificationService Notifications
 @inject AuthenticationStateProvider AuthState
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 
 @* The bell (docs/helpdesk.md, phase 4): unread support notifications across every tenant the
    person belongs to. An interactive island in the static top bar; the count is re-read every
@@ -28,10 +29,16 @@
             <div class="dropdown-menu dropdown-menu-end show p-0 shadow" style="right: 0; left: auto; width: 24rem; max-height: 28rem; overflow-y: auto">
                 <div class="d-flex justify-content-between align-items-center px-3 py-2 border-bottom small">
                     <strong>Notifications</strong>
-                    @if (unread > 0)
-                    {
-                        <button class="btn btn-sm btn-link p-0" @onclick="MarkAllAsync">Mark all read</button>
-                    }
+                    <span>
+                        <span class="form-check form-switch d-inline-block me-2 mb-0" title="A short chime when new notifications arrive — in this browser only">
+                            <input class="form-check-input" type="checkbox" id="bell-sound" checked="@soundOn" @onchange="SetSoundAsync" />
+                            <label class="form-check-label" for="bell-sound">Sound</label>
+                        </span>
+                        @if (unread > 0)
+                        {
+                            <button class="btn btn-sm btn-link p-0" @onclick="MarkAllAsync">Mark all read</button>
+                        }
+                    </span>
                 </div>
                 @if (items.Count == 0)
                 {
@@ -69,18 +76,36 @@
 
         unread = await Notifications.UnreadCountAsync(userId);
 
-        timer = new Timer(_ => InvokeAsync(async () =>
+        timer = new Timer(_ => InvokeAsync(RefreshAsync), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// The thirty-second refresh: re-reads the count, and chimes when it rose (if this browser has
+    /// sound on). Public so a test can drive it without waiting for the timer.
+    /// </summary>
+    public async Task RefreshAsync()
+    {
+        if (userId is null)
         {
-            try
+            return;
+        }
+
+        try
+        {
+            int before = unread;
+            unread = await Notifications.UnreadCountAsync(userId);
+
+            if (unread > before)
             {
-                unread = await Notifications.UnreadCountAsync(userId);
-                StateHasChanged();
+                await ChimeAsync();
             }
-            catch
-            {
-                // A missed refresh is the next refresh's job; the bell must never break a page.
-            }
-        }), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+
+            StateHasChanged();
+        }
+        catch
+        {
+            // A missed refresh is the next refresh's job; the bell must never break a page.
+        }
     }
 
     private async Task ToggleAsync()
@@ -90,7 +115,34 @@
         if (open && userId is not null)
         {
             items = await Notifications.ListAsync(userId);
+            soundOn = await SoundAsync<bool>("enabled");
         }
+    }
+
+    // ---- The sound (phase 9): per browser, off by default; wwwroot/js/notify-sound.js ----
+    private bool soundOn;
+    private IJSObjectReference? sound;
+
+    /// <summary>A call into the sound module; anything going wrong is silence, never a broken bell.</summary>
+    private async Task<T?> SoundAsync<T>(string function, params object[] args)
+    {
+        try
+        {
+            sound ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/notify-sound.js");
+            return await sound.InvokeAsync<T>(function, args);
+        }
+        catch (Exception)
+        {
+            return default;
+        }
+    }
+
+    private Task ChimeAsync() => SoundAsync<bool>("chime");
+
+    private async Task SetSoundAsync(ChangeEventArgs e)
+    {
+        soundOn = e.Value is true;
+        await SoundAsync<object>("setEnabled", soundOn);
     }
 
     private async Task OpenAsync(NotificationView n)
@@ -121,5 +173,9 @@
         _ => "bi-chat-left-text",
     };
 
-    public void Dispose() => timer?.Dispose();
+    public void Dispose()
+    {
+        timer?.Dispose();
+        _ = sound?.DisposeAsync().AsTask().ContinueWith(_ => { }, TaskScheduler.Default);
+    }
 }

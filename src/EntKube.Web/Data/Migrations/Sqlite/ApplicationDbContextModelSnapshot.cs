@@ -6334,6 +6334,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<int>("Escalation")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("Mail")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("NewTicket")
                         .HasColumnType("INTEGER");
 

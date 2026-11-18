@@ -6343,6 +6343,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<int>("Escalation")
                         .HasColumnType("int");
 
+                    b.Property<int>("Mail")
+                        .HasColumnType("int");
+
                     b.Property<int>("NewTicket")
                         .HasColumnType("int");
 
