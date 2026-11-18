@@ -217,6 +217,8 @@ public static partial class ModuleMap
         [typeof(CalendarFeed)] = Module.Support,
         [typeof(KbCategory)] = Module.Support,
         [typeof(KbAnswer)] = Module.Support,
+        [typeof(KbAnswerLink)] = Module.Support,
+        [typeof(KbAnswerTicket)] = Module.Support,
         [typeof(IssueTracker)] = Module.Support,
         [typeof(TicketIssueLink)] = Module.Support,
         [typeof(TicketHighlight)] = Module.Support,

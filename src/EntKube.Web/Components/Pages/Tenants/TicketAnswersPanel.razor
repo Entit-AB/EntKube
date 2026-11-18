@@ -1,0 +1,47 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services.Tickets
+@inject KnowledgeBaseService KnowledgeBase
+@inject NavigationManager Nav
+
+@* Help answers given on this ticket (docs/helpdesk.md, phase 10): recorded when an agent inserts
+   one with ??. Agents only — the customer sees what was written, not where it came from.
+   Hidden until there is one. *@
+
+@if (answers.Count > 0)
+{
+    <div class="card mb-3" data-test="ticket-answers">
+        <div class="card-body py-2 small">
+            <div class="fw-semibold mb-1"><i class="bi bi-book me-1"></i>Help answers given</div>
+            @foreach (KbAnswer a in answers)
+            {
+                <div>
+                    <a href="@Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "knowledge-base", ["answer"] = a.Id, ["ticket"] = null, ["q"] = null })">@a.Title</a>
+                    @if (a.Visibility == KbVisibility.Archived) { <span class="text-muted">(archived since)</span> }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+
+    /// <summary>Bumped by the ticket view after a mail or note is added, so a just-inserted answer appears.</summary>
+    [Parameter] public int Version { get; set; }
+
+    private (Guid, int) loadedFor;
+    private List<KbAnswer> answers = [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == (TicketId, Version))
+        {
+            return;
+        }
+
+        loadedFor = (TicketId, Version);
+        answers = await KnowledgeBase.AnswersOnTicketAsync(TenantId, TicketId);
+    }
+}

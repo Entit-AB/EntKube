@@ -8,6 +8,10 @@
 @inject CurrentActor ActorService
 @inject IJSRuntime JS
 @inject ToastService Toasts
+@inject TenantRoleService Roles
+@inject UserAccessService Access
+@inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
 
 @* The help-answer library (docs/helpdesk.md, phase 5). Public answers appear in customers'
    portals; internal ones are offered to agents only (?? in a reply). Bodies are sanitised on save. *@
@@ -15,6 +19,12 @@
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
+    @if (!mayEdit)
+    {
+        <div class="alert alert-light border py-2 small" data-test="kb-read-only">
+            <i class="bi bi-lock me-1"></i>Only roles granted <strong>Support knowledge base: Edit</strong> change answers in this tenant. You can read them.
+        </div>
+    }
     <div class="row g-3" data-test="knowledge-base">
         <div class="col-lg-3 small">
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -31,6 +41,8 @@
                 }
                 @if (categories.Count == 0) { <li class="text-muted">none yet</li> }
             </ul>
+            @if (mayEdit)
+            {
             <div class="border rounded p-2">
                 <input class="form-control form-control-sm mb-1" placeholder="Category name" @bind="categoryName" />
                 <select class="form-select form-select-sm mb-1" @bind="categoryParent" aria-label="Parent category">
@@ -47,6 +59,7 @@
                     <button class="btn btn-sm btn-link text-danger" @onclick="() => DeleteCategoryAsync(id)">Delete</button>
                 }
             </div>
+            }
         </div>
 
         <div class="col-lg-9">
@@ -54,14 +67,17 @@
             {
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <strong class="small">@(categoryId is null ? "All answers" : categories.FirstOrDefault(c => c.Id == categoryId)?.Name)</strong>
-                    <button class="btn btn-sm btn-primary" @onclick="NewAnswer" disabled="@(categories.Count == 0)"><i class="bi bi-plus me-1"></i>New answer</button>
+                    @if (mayEdit)
+                    {
+                        <button class="btn btn-sm btn-primary" @onclick="NewAnswer" disabled="@(categories.Count == 0)"><i class="bi bi-plus me-1"></i>New answer</button>
+                    }
                 </div>
                 <table class="table table-sm small align-middle">
                     <thead class="table-light"><tr><th>Title</th><th>Language</th><th>State</th><th>For</th><th>Updated</th></tr></thead>
                     <tbody>
                         @foreach (KbAnswer a in answers)
                         {
-                            <tr style="cursor: pointer" @onclick="() => OpenAnswer(a)">
+                            <tr style="cursor: pointer" @onclick="() => OpenAnswerAsync(a)">
                                 <td>@a.Title</td>
                                 <td>@a.Language</td>
                                 <td><span class="badge @StateClass(KnowledgeBaseService.StateOf(a, DateTime.UtcNow))">@KnowledgeBaseService.StateOf(a, DateTime.UtcNow)</span></td>
@@ -119,16 +135,57 @@
                         <div class="col-md-3"><label class="form-label text-muted">Keywords</label><input class="form-control form-control-sm" @bind="answer.Keywords" /></div>
                     </div>
                     <div @ref="editor" style="min-height: 12rem" class="bg-white mb-2"></div>
+
+                    @* Phase 10: related answers, shown on both; customers see only those they could open. *@
+                    <div class="mb-2" data-test="related-answers">
+                        <span class="text-muted me-1">Related answers:</span>
+                        @foreach (KbAnswer r in related)
+                        {
+                            <span class="badge bg-light text-dark border me-1">
+                                @r.Title
+                                @if (mayEdit)
+                                {
+                                    <button class="btn btn-sm btn-link p-0 ms-1 text-muted" aria-label="@($"Unrelate {r.Title}")" @onclick="() => related.Remove(r)"><i class="bi bi-x"></i></button>
+                                }
+                            </span>
+                        }
+                        @if (related.Count == 0) { <span class="text-muted">none</span> }
+                        @if (mayEdit)
+                        {
+                            <select class="form-select form-select-sm d-inline-block w-auto ms-2" aria-label="Add a related answer" value="" @onchange="AddRelated">
+                                <option value="">add one…</option>
+                                @foreach (KbAnswer other in allAnswers.Where(o => o.Id != answer.Id && related.All(r => r.Id != o.Id)))
+                                {
+                                    <option value="@other.Id">@other.Title</option>
+                                }
+                            </select>
+                        }
+                    </div>
+
+                    @if (usedOn.Count > 0)
+                    {
+                        <div class="mb-2" data-test="answer-used-on">
+                            <span class="text-muted me-1">Given on tickets:</span>
+                            @foreach ((Guid _, int number, string title) in usedOn)
+                            {
+                                <a class="me-2" href="@Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "tickets", ["ticket"] = number, ["answer"] = null })" title="@title">#@number</a>
+                            }
+                        </div>
+                    }
+
                     <div class="d-flex justify-content-between">
                         <span>
-                            @if (answer.Id != Guid.Empty)
+                            @if (answer.Id != Guid.Empty && mayEdit)
                             {
                                 <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteAnswerAsync">Delete</button>
                             }
                         </span>
                         <span>
-                            <button class="btn btn-sm btn-link" @onclick="CloseAnswer">Cancel</button>
-                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAnswerAsync">Save</AsyncButton>
+                            <button class="btn btn-sm btn-link" @onclick="CloseAnswer">@(mayEdit ? "Cancel" : "Close")</button>
+                            @if (mayEdit)
+                            {
+                                <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAnswerAsync">Save</AsyncButton>
+                            }
                         </span>
                     </div>
                 </div>
@@ -146,6 +203,13 @@
 
     private Guid? openedFromAddress;
     private bool loading = true;
+
+    // Phase 10. mayEdit: the opt-in editor permission (TenantFeature.KnowledgeBase); checked in
+    // every write handler too, since those run on the server whatever the page shows.
+    private bool mayEdit = true;
+    private List<KbAnswer> allAnswers = [];
+    private List<KbAnswer> related = [];
+    private List<(Guid Id, int Number, string Title)> usedOn = [];
     private string? error;
     private List<KbCategory> categories = [];
     private List<KbAnswer> answers = [];
@@ -169,6 +233,8 @@
             categories = await KnowledgeBase.CategoriesAsync(TenantId);
             customers = await Templates.CustomersAsync(TenantId);
             answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+            allAnswers = await KnowledgeBase.AnswersAsync(TenantId, null);
+            mayEdit = await MayEditAsync();
 
             if (OpenAnswerId is Guid wanted && wanted != openedFromAddress)
             {
@@ -176,7 +242,7 @@
 
                 if (await KnowledgeBase.GetAsync(TenantId, wanted) is { } found)
                 {
-                    OpenAnswer(found);
+                    await OpenAnswerAsync(found);
                 }
             }
         }
@@ -237,8 +303,44 @@
         categoryParent = c.ParentId?.ToString() ?? "";
     }
 
+    /// <summary>
+    /// Whether this person may change the knowledge base: always, until some role in the tenant is
+    /// granted "Support knowledge base: Edit"; after that, members of such roles and global admins.
+    /// </summary>
+    private async Task<bool> MayEditAsync()
+    {
+        string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        (bool anyRoleGrants, bool granted) = await Roles.FeatureGrantAsync(TenantId, userId, TenantFeature.KnowledgeBase, AccessLevel.Edit);
+
+        return !anyRoleGrants || granted || (userId is not null && await Access.IsGlobalAdminAsync(userId));
+    }
+
+    private bool Refused()
+    {
+        if (mayEdit)
+        {
+            return false;
+        }
+
+        Toasts.Error("Only knowledge-base editors can change the knowledge base here.");
+        return true;
+    }
+
+    private void AddRelated(ChangeEventArgs e)
+    {
+        if (Guid.TryParse(e.Value?.ToString(), out Guid id) && allAnswers.FirstOrDefault(a => a.Id == id) is { } other
+            && related.All(r => r.Id != id))
+        {
+            related.Add(other);
+        }
+    }
+
     private async Task SaveCategoryAsync()
     {
+        if (Refused()) return;
+
         Guid? parent = Guid.TryParse(categoryParent, out Guid p) && categories.Any(c => c.Id == p) ? p : null;
 
         try
@@ -257,6 +359,8 @@
 
     private async Task DeleteCategoryAsync(Guid id)
     {
+        if (Refused()) return;
+
         try
         {
             await KnowledgeBase.DeleteCategoryAsync(TenantId, id);
@@ -271,10 +375,22 @@
         }
     }
 
-    private void NewAnswer() => OpenAnswer(new KbAnswer
+    private void NewAnswer()
     {
-        Title = "", CategoryId = categoryId ?? Tree().First().Category.Id, Visibility = KbVisibility.Draft, Language = "sv",
-    });
+        OpenAnswer(new KbAnswer
+        {
+            Title = "", CategoryId = categoryId ?? Tree().First().Category.Id, Visibility = KbVisibility.Draft, Language = "sv",
+        });
+        related = [];
+        usedOn = [];
+    }
+
+    private async Task OpenAnswerAsync(KbAnswer a)
+    {
+        OpenAnswer(a);
+        related = a.Id == Guid.Empty ? [] : await KnowledgeBase.RelatedAsync(TenantId, a.Id);
+        usedOn = a.Id == Guid.Empty ? [] : await KnowledgeBase.TicketsUsingAsync(TenantId, a.Id);
+    }
 
     private void OpenAnswer(KbAnswer a)
     {
@@ -300,6 +416,8 @@
 
     private async Task SaveAnswerAsync()
     {
+        if (Refused()) return;
+
         answer!.BodyHtml = module is null ? answer.BodyHtml : await module.InvokeAsync<string>("html", editor);
         answer.PublishAt = publishLocal is DateTime local
             ? TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), BusinessCalendar.SwedishTime)
@@ -308,10 +426,12 @@
 
         try
         {
-            await KnowledgeBase.SaveAnswerAsync(TenantId, answer, await ActorService.NameAsync());
+            KbAnswer saved = await KnowledgeBase.SaveAnswerAsync(TenantId, answer, await ActorService.NameAsync());
+            await KnowledgeBase.SetRelatedAsync(TenantId, saved.Id, [.. related.Select(r => r.Id)]);
             Toasts.Success("Saved.");
             await CloseAnswer();
             answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
+            allAnswers = await KnowledgeBase.AnswersAsync(TenantId, null);
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
@@ -321,6 +441,8 @@
 
     private async Task DeleteAnswerAsync()
     {
+        if (Refused()) return;
+
         await KnowledgeBase.DeleteAnswerAsync(TenantId, answer!.Id);
         await CloseAnswer();
         answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);

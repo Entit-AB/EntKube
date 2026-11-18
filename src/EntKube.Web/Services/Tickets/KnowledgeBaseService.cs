@@ -190,7 +190,117 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
     public async Task<bool> DeleteAnswerAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await db.KbAnswers.AnyAsync(a => a.Id == id && a.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        // Links on the side that does not cascade go first.
+        await db.KbAnswerLinks.Where(l => l.TenantId == tenantId && (l.AnswerId == id || l.RelatedId == id)).ExecuteDeleteAsync(ct);
         return await db.KbAnswers.Where(a => a.Id == id && a.TenantId == tenantId).ExecuteDeleteAsync(ct) > 0;
+    }
+
+    // ───────────────────────────── Related answers (phase 10) ─────────────────────────────
+
+    /// <summary>Every answer linked to this one, either way round — for the knowledge base's own editor.</summary>
+    public async Task<List<KbAnswer>> RelatedAsync(Guid tenantId, Guid answerId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        List<Guid> ids = await RelatedIds(db, tenantId, answerId).ToListAsync(ct);
+        return await db.KbAnswers.AsNoTracking().Where(a => a.TenantId == tenantId && ids.Contains(a.Id)).OrderBy(a => a.Title).ToListAsync(ct);
+    }
+
+    /// <summary>The related answers a customer may see: each must pass the same rules as opening it directly.</summary>
+    public async Task<List<KbAnswer>> RelatedForCustomerAsync(
+        Guid tenantId, Guid customerId, Guid answerId, DateTime now, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        List<Guid> ids = await RelatedIds(db, tenantId, answerId).ToListAsync(ct);
+        return await Published(db, tenantId, customerId, now).Where(a => ids.Contains(a.Id)).OrderBy(a => a.Title).ToListAsync(ct);
+    }
+
+    private static IQueryable<Guid> RelatedIds(SupportDbContext db, Guid tenantId, Guid answerId) =>
+        db.KbAnswerLinks.Where(l => l.TenantId == tenantId && l.AnswerId == answerId).Select(l => l.RelatedId)
+            .Concat(db.KbAnswerLinks.Where(l => l.TenantId == tenantId && l.RelatedId == answerId).Select(l => l.AnswerId));
+
+    /// <summary>
+    /// Replaces the answers related to this one. All must be this tenant's, and an answer is not
+    /// related to itself. Each pair is stored once, lower id first.
+    /// </summary>
+    public async Task SetRelatedAsync(Guid tenantId, Guid answerId, IReadOnlyCollection<Guid> relatedIds, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        HashSet<Guid> wanted = [.. relatedIds.Where(r => r != answerId)];
+        List<Guid> known = await db.KbAnswers.Where(a => a.TenantId == tenantId && (a.Id == answerId || wanted.Contains(a.Id)))
+            .Select(a => a.Id).ToListAsync(ct);
+
+        if (!known.Contains(answerId) || wanted.Any(w => !known.Contains(w)))
+        {
+            throw new InvalidOperationException("Every related answer must be one of this knowledge base's.");
+        }
+
+        await db.KbAnswerLinks.Where(l => l.TenantId == tenantId && (l.AnswerId == answerId || l.RelatedId == answerId)).ExecuteDeleteAsync(ct);
+
+        foreach (Guid other in wanted)
+        {
+            (Guid low, Guid high) = answerId.CompareTo(other) < 0 ? (answerId, other) : (other, answerId);
+            db.KbAnswerLinks.Add(new KbAnswerLink { AnswerId = low, RelatedId = high, TenantId = tenantId });
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    // ───────────────────────────── Answers used on tickets (phase 10) ─────────────────────────────
+
+    /// <summary>Records that an answer was given on a ticket. Both must be this tenant's; twice is once.</summary>
+    public async Task<bool> LinkTicketAsync(Guid tenantId, Guid answerId, Guid ticketId, string? actor, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await db.KbAnswers.AnyAsync(a => a.Id == answerId && a.TenantId == tenantId, ct)
+            || !await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        if (await db.KbAnswerTickets.AnyAsync(l => l.AnswerId == answerId && l.TicketId == ticketId, ct))
+        {
+            return true;
+        }
+
+        db.KbAnswerTickets.Add(new KbAnswerTicket { AnswerId = answerId, TicketId = ticketId, TenantId = tenantId, LinkedBy = actor });
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Two inserts of the same answer at once: the key already holds it.
+        }
+
+        return true;
+    }
+
+    /// <summary>The tickets an answer was given on, newest first.</summary>
+    public async Task<List<(Guid Id, int Number, string Title)>> TicketsUsingAsync(Guid tenantId, Guid answerId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        var rows = await db.KbAnswerTickets.AsNoTracking()
+            .Where(l => l.TenantId == tenantId && l.AnswerId == answerId)
+            .Join(db.Tickets.Where(t => t.TenantId == tenantId), l => l.TicketId, t => t.Id, (l, t) => new { t.Id, t.Number, t.Title, l.LinkedAt })
+            .OrderByDescending(x => x.LinkedAt).Take(50).ToListAsync(ct);
+        return [.. rows.Select(r => (r.Id, r.Number, r.Title))];
+    }
+
+    /// <summary>The answers given on a ticket.</summary>
+    public async Task<List<KbAnswer>> AnswersOnTicketAsync(Guid tenantId, Guid ticketId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        List<Guid> ids = await db.KbAnswerTickets.Where(l => l.TenantId == tenantId && l.TicketId == ticketId).Select(l => l.AnswerId).ToListAsync(ct);
+        return await db.KbAnswers.AsNoTracking().Where(a => a.TenantId == tenantId && ids.Contains(a.Id)).OrderBy(a => a.Title).ToListAsync(ct);
     }
 
     // ───────────────────────────── Reading ─────────────────────────────

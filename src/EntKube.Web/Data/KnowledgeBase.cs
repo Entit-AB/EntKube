@@ -82,3 +82,35 @@ public class KbAnswer
     // Navigation
     public KbCategory Category { get; set; } = null!;
 }
+
+/// <summary>
+/// Two help answers that belong together (helpdesk phase 10) — Zammad's linked answers. Stored
+/// once per pair, the lower id first, and shown on both. A customer sees a related answer only if
+/// they could open it themselves.
+/// </summary>
+public class KbAnswerLink
+{
+    public Guid AnswerId { get; set; }
+
+    public Guid RelatedId { get; set; }
+
+    public Guid TenantId { get; set; }
+}
+
+/// <summary>
+/// A help answer used on a ticket (helpdesk phase 10): recorded when an agent inserts it with
+/// <c>??</c>, so an answer shows where it has helped and a ticket which answers it was given.
+/// Agents only.
+/// </summary>
+public class KbAnswerTicket
+{
+    public Guid AnswerId { get; set; }
+
+    public Guid TicketId { get; set; }
+
+    public Guid TenantId { get; set; }
+
+    public DateTime LinkedAt { get; set; } = DateTime.UtcNow;
+
+    public string? LinkedBy { get; set; }
+}

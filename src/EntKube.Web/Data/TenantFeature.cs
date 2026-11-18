@@ -29,4 +29,11 @@ public enum TenantFeature
     /// stored.
     /// </summary>
     JitAccess,
+
+    /// <summary>
+    /// Editing the support knowledge base (helpdesk phase 10) — Zammad's "KB editor". Opt-in: until
+    /// some role in a tenant grants it at Edit or above, every member may edit, as before; once one
+    /// does, only members of such roles may. Appended last, for the reason given on JitAccess.
+    /// </summary>
+    KnowledgeBase,
 }

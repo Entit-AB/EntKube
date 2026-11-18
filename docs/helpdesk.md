@@ -448,6 +448,27 @@ but never built), customers downloading their files from the portal, and rich-te
   made with Web Audio, so there's no file to ship. It plays when the 30-second refresh finds more
   unread than before. Browsers that block audio until a click are woken by the first click.
 
+### Phase 10: Knowledge-base links and editors
+
+**Status (2026-11-18): built.** Tests: `KnowledgeBaseLinkTests`, and the Phase 10 parts of
+`TicketWorkRenderTests`. Decisions:
+
+- **Related answers** (`KbAnswerLink`) are stored once per pair, lower id first, and shown on both.
+  The portal lists a related answer only if it passes the same rules as opening it
+  (`Published`). One foreign key cascades and the other is `NoAction`, because SQL Server allows only
+  one cascade path from `KbAnswers` into the table. Deleting an answer removes its links on both
+  sides first. Bundle v21.
+- **Answers given on tickets** (`KbAnswerTicket`) are recorded when an agent inserts one with `??`,
+  in a reply or a note. They are shown on the ticket and on the answer, to agents only.
+- **The editor permission is opt-in.** `TenantFeature.KnowledgeBase` is appended last; stored
+  permissions are numbers. Until some role in a tenant grants it at Edit or above, everyone may
+  edit, as before. Enforcing it outright would have locked every existing tenant out, because
+  roles without explicit permissions grant nothing. Once granted, only members of such roles and
+  global admins may edit. The check is made on the server in each write handler, not only by
+  hiding buttons. The knowledge base has no API, so those handlers are the only way to write.
+- **Not supported, with reasons** (also in the manual): video embeds (they'd need iframes on the
+  allow-list), RSS (the portal requires sign-in), and files on answers.
+
 ## Decisions (2026-11-16)
 
 1. **No groups. The tenant is the queue.** One support team works every customer, and

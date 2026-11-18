@@ -29,7 +29,36 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
         (TenantFeature.Monitoring,         "Monitoring",         "bi-activity"),
         (TenantFeature.Audit,              "Audit Log",          "bi-journal-text"),
         (TenantFeature.JitAccess,          "JIT cluster access", "bi-terminal"),
+        (TenantFeature.KnowledgeBase,      "Support knowledge base", "bi-book"),
     ];
+
+    /// <summary>
+    /// Whether <paramref name="userId"/>'s role in the tenant grants <paramref name="feature"/> at
+    /// <paramref name="atLeast"/> — and whether any role there does at all, for a permission that
+    /// only binds once somebody has set it (see <see cref="TenantFeature.KnowledgeBase"/>).
+    /// </summary>
+    public async Task<(bool AnyRoleGrants, bool UserGranted)> FeatureGrantAsync(
+        Guid tenantId, string? userId, TenantFeature feature, AccessLevel atLeast, CancellationToken ct = default)
+    {
+        using IdentityDbContext db = dbFactory.CreateDbContext();
+
+        List<(Guid Id, string? Json)> roles = [.. (await db.TenantRoles.AsNoTracking()
+            .Where(r => r.TenantId == tenantId)
+            .Select(r => new { r.Id, r.PermissionsJson })
+            .ToListAsync(ct)).Select(r => (r.Id, r.PermissionsJson))];
+
+        HashSet<Guid> granting = [.. roles.Where(r => GetPermission(DecodePermissions(r.Json), feature) >= atLeast).Select(r => r.Id)];
+
+        if (granting.Count == 0 || userId is null)
+        {
+            return (granting.Count > 0, false);
+        }
+
+        bool member = await db.TenantMemberships.AsNoTracking()
+            .AnyAsync(m => m.TenantId == tenantId && m.UserId == userId && granting.Contains(m.RoleId), ct);
+
+        return (true, member);
+    }
 
     // ── Role CRUD ──────────────────────────────────────────────────────────────
 

@@ -726,6 +726,7 @@
         <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
                               OnOpenItems="n => openChecklistItems = n" />
         <TicketIssuesPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" />
+        <TicketAnswersPanel TenantId="TenantId" TicketId="ticket.Id" Version="@historyVersion" />
         <TicketAttachmentsPanel TenantId="TenantId" TicketId="ticket.Id" TenantSlug="@TenantSlug" Actor="@Actor"
                                 Editable="IsOpen" OnChanged="ReloadAfterWorkAsync" />
     </div>
@@ -773,6 +774,9 @@
     // The note being written (phase 7: rich text). The editor reports it as it is typed; the
     // value read from the editor itself when the note is added is what counts.
     private string noteHtml = "";
+
+    // Changes whenever the history does, so side panels that read per-ticket records refresh.
+    private int historyVersion => ticket?.Events.Count ?? 0;
     private TicketNoteEditor? noteEditor;
     private Guid? confirmDelete;
     private List<Macro> macros = [];

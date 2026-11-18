@@ -243,6 +243,8 @@ public class BackupService(
             CalendarFeeds = await db.CalendarFeeds.AsNoTracking().ToListAsync(),
             KbCategories = await db.KbCategories.AsNoTracking().ToListAsync(),
             KbAnswers = await db.KbAnswers.AsNoTracking().ToListAsync(),
+            KbAnswerLinks = await db.KbAnswerLinks.AsNoTracking().ToListAsync(),
+            KbAnswerTickets = await db.KbAnswerTickets.AsNoTracking().ToListAsync(),
             IssueTrackers = await db.IssueTrackers.AsNoTracking().ToListAsync(),
             TicketIssueLinks = await db.TicketIssueLinks.AsNoTracking().ToListAsync(),
             TicketHighlights = await db.TicketHighlights.AsNoTracking().ToListAsync(),
@@ -623,9 +625,11 @@ public class BackupService(
             // Parents before children: a category's parent must exist when it is inserted.
             await InsertEntities(db, db.KbCategories, KbCategoriesParentsFirst(bundle.KbCategories));
             await InsertEntities(db, db.KbAnswers, bundle.KbAnswers);
+            await InsertEntities(db, db.KbAnswerLinks, bundle.KbAnswerLinks);
             await InsertEntities(db, db.IssueTrackers, bundle.IssueTrackers);
             await InsertEntities(db, db.TicketIssueLinks, bundle.TicketIssueLinks);
             await InsertEntities(db, db.TicketHighlights, bundle.TicketHighlights);
+            await InsertEntities(db, db.KbAnswerTickets, bundle.KbAnswerTickets);
             await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
             await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
             await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);
