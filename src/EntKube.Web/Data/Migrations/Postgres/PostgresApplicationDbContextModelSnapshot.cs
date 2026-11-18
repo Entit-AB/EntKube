@@ -5158,6 +5158,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("BodyHtml")
                         .IsRequired()
                         .HasColumnType("text");
@@ -5188,6 +5191,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime?>("PublishAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTime?>("ReviewedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReviewedBy")
+                        .HasColumnType("text");
+
+                    b.Property<int?>("Section")
+                        .HasColumnType("integer");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
 
@@ -5207,11 +5219,18 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.HasKey("Id");
 
+                    b.HasIndex("AppId");
+
                     b.HasIndex("CategoryId");
+
+                    b.HasIndex("TenantId", "AppId");
 
                     b.HasIndex("TenantId", "Visibility");
 
-                    b.ToTable("KbAnswers", (string)null);
+                    b.ToTable("KbAnswers", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_KbAnswers_AppShape", "(\"AppId\" IS NULL AND \"Section\" IS NULL) OR (\"AppId\" IS NOT NULL AND \"Section\" IS NOT NULL AND \"Visibility\" IN (3, 4) AND \"PublishAt\" IS NULL AND \"CustomerId\" IS NOT NULL)");
+                        });
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KbAnswerLink", b =>
@@ -5232,6 +5251,46 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("TenantId");
 
                     b.ToTable("KbAnswerLinks", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerRevision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AnswerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("BodyFormat")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("SavedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SavedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Summary")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Title")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("AnswerId", "SavedAt");
+
+                    b.ToTable("KbAnswerRevisions", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KbAnswerTicket", b =>
@@ -5641,6 +5700,49 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("AppId", "Kind");
 
                     b.ToTable("KnowledgeSections", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeSectionMove", b =>
+                {
+                    b.Property<Guid>("SectionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AnswerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("LegacyReviewedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LegacyReviewedBy")
+                        .HasColumnType("text");
+
+                    b.Property<int>("LegacyRevisionCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("LegacyUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("MovedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Verdict")
+                        .HasColumnType("integer");
+
+                    b.HasKey("SectionId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("KnowledgeSectionMoves", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KubernetesCluster", b =>
@@ -11938,6 +12040,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
             modelBuilder.Entity("EntKube.Web.Data.KbAnswer", b =>
                 {
+                    b.HasOne("EntKube.Web.Data.App", null)
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("EntKube.Web.Data.KbCategory", "Category")
                         .WithMany()
                         .HasForeignKey("CategoryId")
@@ -11959,6 +12066,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .WithMany()
                         .HasForeignKey("RelatedId")
                         .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerRevision", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KbAnswer", null)
+                        .WithMany()
+                        .HasForeignKey("AnswerId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

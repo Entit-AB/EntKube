@@ -60,6 +60,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KbAnswer> KbAnswers => Set<KbAnswer>();
     public DbSet<KbAnswerLink> KbAnswerLinks => Set<KbAnswerLink>();
     public DbSet<KbAnswerTicket> KbAnswerTickets => Set<KbAnswerTicket>();
+    public DbSet<KbAnswerRevision> KbAnswerRevisions => Set<KbAnswerRevision>();
+    public DbSet<KnowledgeSectionMove> KnowledgeSectionMoves => Set<KnowledgeSectionMove>();
     public DbSet<IssueTracker> IssueTrackers => Set<IssueTracker>();
     public DbSet<TicketIssueLink> TicketIssueLinks => Set<TicketIssueLink>();
     public DbSet<TicketHighlight> TicketHighlights => Set<TicketHighlight>();

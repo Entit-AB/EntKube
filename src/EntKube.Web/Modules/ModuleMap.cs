@@ -219,6 +219,8 @@ public static partial class ModuleMap
         [typeof(KbAnswer)] = Module.Support,
         [typeof(KbAnswerLink)] = Module.Support,
         [typeof(KbAnswerTicket)] = Module.Support,
+        [typeof(KbAnswerRevision)] = Module.Support,
+        [typeof(KnowledgeSectionMove)] = Module.Support,
         [typeof(IssueTracker)] = Module.Support,
         [typeof(TicketIssueLink)] = Module.Support,
         [typeof(TicketHighlight)] = Module.Support,

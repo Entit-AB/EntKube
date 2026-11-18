@@ -17,6 +17,16 @@ internal static class SupportModel
     /// <summary>The longest tag name stored. Long enough for a phrase, short enough to be a label.</summary>
     internal const int TicketTagNameMaxLength = 50;
 
+    /// <summary>
+    /// An application's answer is agents-only, carries a section and its app's customer, and is
+    /// never scheduled for the portal; a tenant-wide answer has neither app nor section. The
+    /// visibility list is POSITIVE (Archived = 3, Operations = 4), so any visibility added later is
+    /// refused for an app's answer until a migration says otherwise on purpose — and an older
+    /// EntKube rolled back onto this schema gets an error, not a published runbook.
+    /// </summary>
+    internal const string KbAnswerAppShape =
+        "(\"AppId\" IS NULL AND \"Section\" IS NULL) OR (\"AppId\" IS NOT NULL AND \"Section\" IS NOT NULL AND \"Visibility\" IN (3, 4) AND \"PublishAt\" IS NULL AND \"CustomerId\" IS NOT NULL)";
+
     internal static void Configure(ModelBuilder builder)
     {
         // Table names, stated rather than inferred.
@@ -70,7 +80,9 @@ internal static class SupportModel
         builder.Entity<TicketPresence>().ToTable("TicketPresences");
         builder.Entity<CalendarFeed>().ToTable("CalendarFeeds");
         builder.Entity<KbCategory>().ToTable("KbCategories");
-        builder.Entity<KbAnswer>().ToTable("KbAnswers");
+        builder.Entity<KbAnswer>().ToTable("KbAnswers", t => t.HasCheckConstraint("CK_KbAnswers_AppShape", KbAnswerAppShape));
+        builder.Entity<KbAnswerRevision>().ToTable("KbAnswerRevisions");
+        builder.Entity<KnowledgeSectionMove>().ToTable("KnowledgeSectionMoves");
         builder.Entity<KbAnswerLink>().ToTable("KbAnswerLinks");
         builder.Entity<KbAnswerTicket>().ToTable("KbAnswerTickets");
         builder.Entity<IssueTracker>().ToTable("IssueTrackers");
@@ -379,6 +391,29 @@ internal static class SupportModel
             entity.HasIndex(a => new { a.TenantId, a.Visibility });
             entity.HasIndex(a => a.CategoryId);
             entity.HasOne(a => a.Category).WithMany().HasForeignKey(a => a.CategoryId).OnDelete(DeleteBehavior.Restrict);
+
+            // Phase 11: an application's knowledge. Restrict, not cascade: a cascade would give
+            // SQL Server a second path into KbAnswerTickets (Customer→App→KbAnswer→… beside
+            // Customer→Ticket→…). And a deletion path that forgets the knowledge base should fail
+            // loudly rather than leave a deleted application's access notes in the tenant-wide KB:
+            // TenantService deletes an app's answers itself first.
+            entity.HasIndex(a => new { a.TenantId, a.AppId });
+            entity.HasOne<App>().WithMany().HasForeignKey(a => a.AppId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<KbAnswerRevision>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.AnswerId, r.SavedAt });
+            entity.HasIndex(r => r.TenantId);
+            entity.HasOne<KbAnswer>().WithMany().HasForeignKey(r => r.AnswerId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // The move ledger: plain columns, no FKs, so a deleted answer leaves its provenance behind.
+        builder.Entity<KnowledgeSectionMove>(entity =>
+        {
+            entity.HasKey(m => m.SectionId);
+            entity.HasIndex(m => m.TenantId);
         });
 
         // ── Phase 6: issue links and the highlighter. Tenant as a column, as above. ──

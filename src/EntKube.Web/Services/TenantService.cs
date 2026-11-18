@@ -157,6 +157,16 @@ public class TenantService(
         // Connectivity rules that reference a tenant app as a peer (PeerApp is Restrict). Rules
         // an app owns cascade with it; these cross-references must go first.
         await db.ConnectivityRules.Where(r => r.PeerApp!.Customer.TenantId == id).ExecuteDeleteAsync(ct);
+        // The knowledge base BEFORE the apps: an application's answers hold their app by a Restrict
+        // key (phase 11). Answers before categories (Restrict), and categories leaf-first via
+        // clearing parents. Their links first: a related-answer link's second side does not cascade.
+        await db.KbAnswerLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbAnswerTickets.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbAnswerRevisions.Where(r => r.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbAnswers.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbCategories.Where(c => c.TenantId == id).ExecuteUpdateAsync(u => u.SetProperty(c => c.ParentId, (Guid?)null), ct);
+        await db.KbCategories.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KnowledgeSectionMoves.Where(m => m.TenantId == id).ExecuteDeleteAsync(ct);
         // Apps → cascades deployments and every app-scoped child that Restrict-refs Env/Cluster.
         await db.Apps.Where(a => a.Customer.TenantId == id).ExecuteDeleteAsync(ct);
         // VPN tunnels → cascades local endpoints that Restrict-ref Cluster.
@@ -180,13 +190,6 @@ public class TenantService(
         await db.OutOfOffices.Where(o => o.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TicketPresences.Where(p => p.TenantId == id).ExecuteDeleteAsync(ct);
         await db.CalendarFeeds.Where(f => f.TenantId == id).ExecuteDeleteAsync(ct);
-        // Answers before categories (Restrict), and categories leaf-first via clearing parents.
-        // Their links first: a related-answer link's second side does not cascade.
-        await db.KbAnswerLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
-        await db.KbAnswerTickets.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
-        await db.KbAnswers.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
-        await db.KbCategories.Where(c => c.TenantId == id).ExecuteUpdateAsync(u => u.SetProperty(c => c.ParentId, (Guid?)null), ct);
-        await db.KbCategories.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);
         // Phase 6: highlights and issue links (their tickets cascade them too), then the trackers,
         // which take their vaulted tokens with them.
         await db.TicketHighlights.Where(h => h.TenantId == id).ExecuteDeleteAsync(ct);
@@ -440,9 +443,31 @@ public class TenantService(
             return false;
         }
 
+        // The customer's applications go with it; their knowledge first (phase 11: Restrict).
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await DeleteAppKnowledgeAsync(db, tenantId, db.Apps.Where(a => a.CustomerId == id).Select(a => a.Id), ct);
         db.Customers.Remove(customer);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return true;
+    }
+
+    /// <summary>
+    /// An application's knowledge, removed before the application is (helpdesk phase 11). Its
+    /// answers hold the app by a Restrict key on purpose — so this step cannot be forgotten silently,
+    /// which would leave a deleted (perhaps patient-data) application's access notes in the
+    /// tenant-wide knowledge base. Today's meaning is kept: the runbook goes with its application.
+    /// Links first (one side does not cascade); revisions and given-on-ticket rows cascade.
+    /// </summary>
+    private static async Task DeleteAppKnowledgeAsync(ApplicationDbContext db, Guid tenantId, IQueryable<Guid> appIds, CancellationToken ct)
+    {
+        IQueryable<Guid> answers = db.KbAnswers
+            .Where(a => a.TenantId == tenantId && a.AppId != null && appIds.Contains(a.AppId.Value))
+            .Select(a => a.Id);
+
+        await db.KbAnswerLinks.Where(l => answers.Contains(l.AnswerId) || answers.Contains(l.RelatedId)).ExecuteDeleteAsync(ct);
+        await db.KbAnswers.Where(a => a.TenantId == tenantId && a.AppId != null && appIds.Contains(a.AppId.Value)).ExecuteDeleteAsync(ct);
+        await db.KnowledgeSectionMoves.Where(m => m.TenantId == tenantId && appIds.Contains(m.AppId)).ExecuteDeleteAsync(ct);
     }
 
     // --- App CRUD ---
@@ -551,10 +576,13 @@ public class TenantService(
         // Connectivity rules where OTHER apps reference this app as a peer are held by a
         // Restrict FK (ConnectivityRule.PeerApp), so they must be cleared first or the
         // delete fails. Rules this app owns cascade with it.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.ConnectivityRules.Where(r => r.PeerAppId == id).ExecuteDeleteAsync(ct);
+        await DeleteAppKnowledgeAsync(db, tenantId, db.Apps.Where(a => a.Id == id).Select(a => a.Id), ct);
 
         db.Apps.Remove(app);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return true;
     }
 

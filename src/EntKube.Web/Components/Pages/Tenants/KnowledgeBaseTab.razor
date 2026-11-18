@@ -112,7 +112,8 @@
                             <label class="form-label text-muted">Who sees it</label>
                             <select class="form-select form-select-sm" @bind="answer.Visibility">
                                 <option value="@KbVisibility.Draft">Draft — nobody yet</option>
-                                <option value="@KbVisibility.Internal">Internal — agents only</option>
+                                <option value="@KbVisibility.Internal">Internal — agents may insert it into replies to customers (??)</option>
+                                <option value="@KbVisibility.Operations">Operations — our own operating knowledge; never offered in replies, never shown to customers</option>
                                 <option value="@KbVisibility.Public">Public — customers too</option>
                                 <option value="@KbVisibility.Archived">Archived — nobody</option>
                             </select>
@@ -454,6 +455,7 @@
         "scheduled" => "bg-info text-dark",
         "internal" => "bg-warning text-dark",
         "archived" => "bg-secondary",
+        "operations" => "bg-dark",
         _ => "bg-light text-dark border",
     };
 

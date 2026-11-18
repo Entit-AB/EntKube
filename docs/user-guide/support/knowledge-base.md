@@ -21,7 +21,7 @@ under itself or anything beneath it, and only an empty category can be deleted.
 |---|---|
 | Title, Category, Keywords | Keywords help both search and `??` find the answer. |
 | Language | A tag such as `sv`, `en` or `en-GB`. Each answer is written in one language. There are no translation sets: write a second answer for a second language. |
-| Who sees it | **Draft**: nobody yet. **Internal**: agents only. **Public**: customers too. **Archived**: kept, shown to nobody. |
+| Who sees it | **Draft**: nobody yet. **Internal**: agents, and offered by `??`, so it may be inserted into a reply a customer reads. **Public**: customers too, in the portal. **Operations**: our own operating knowledge; agents only, never offered by `??`, never in the portal. **Archived**: kept, shown to nobody. |
 | Publish from | For a public answer, the time (Swedish) it appears to customers. Until then the list shows it as *scheduled*. |
 | For | Every customer, or one customer only, for an answer about their own setup. |
 

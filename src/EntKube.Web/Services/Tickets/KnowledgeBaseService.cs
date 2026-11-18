@@ -23,6 +23,7 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
         KbVisibility.Public => "public",
         KbVisibility.Internal => "internal",
         KbVisibility.Archived => "archived",
+        KbVisibility.Operations => "operations",
         _ => "draft",
     };
 
@@ -134,8 +135,20 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
     /// <summary>
     /// Adds or changes an answer. The body is sanitised here, before it is stored; its text is
     /// kept beside it for search. The category and any customer must be this tenant's.
+    ///
+    /// <para><b>One rule set for every answer</b> (helpdesk phase 11):</para>
+    /// <list type="bullet">
+    /// <item>A non-empty id that is not this tenant's answer is refused — it used to create a new
+    /// row from the form, so a deleted answer came back as a copy.</item>
+    /// <item>An application's answer (<see cref="KbAnswer.AppId"/>) is agents-only: Operations or
+    /// Archived, no publish date, its app's customer, a section. The application is taken from the
+    /// STORED row on every update; only a new answer names one, and it must be this tenant's.</item>
+    /// <item>A change to the title or body keeps what it said before as a revision, with the
+    /// optional <paramref name="changeSummary"/>.</item>
+    /// </list>
     /// </summary>
-    public async Task<KbAnswer> SaveAnswerAsync(Guid tenantId, KbAnswer input, string actor, CancellationToken ct = default)
+    public async Task<KbAnswer> SaveAnswerAsync(
+        Guid tenantId, KbAnswer input, string actor, CancellationToken ct = default, string? changeSummary = null)
     {
         if (string.IsNullOrWhiteSpace(input.Title))
         {
@@ -156,35 +169,197 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
             throw new InvalidOperationException("Choose a category of this knowledge base.");
         }
 
-        if (input.CustomerId is Guid customerId && !await db.Customers.AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct))
+        KbAnswer? row = null;
+
+        if (input.Id != Guid.Empty)
+        {
+            row = await db.KbAnswers.FirstOrDefaultAsync(a => a.Id == input.Id && a.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException("This answer no longer exists; it may have been deleted while you edited it.");
+        }
+
+        // The application: the stored row's on an update, the input's only on creation.
+        Guid? appId = row is null ? input.AppId : row.AppId;
+        Guid? appCustomer = null;
+
+        if (appId is Guid app)
+        {
+            appCustomer = await db.Apps.Where(a => a.Id == app && a.Customer.TenantId == tenantId)
+                .Select(a => (Guid?)a.CustomerId).FirstOrDefaultAsync(ct)
+                ?? throw new InvalidOperationException("Application not found, or it is not this tenant's.");
+
+            if (input.Visibility is not (KbVisibility.Operations or KbVisibility.Archived))
+            {
+                throw new ArgumentException("An application's knowledge is for agents only: Operations or Archived.");
+            }
+        }
+        else if (input.CustomerId is Guid customerId && !await db.Customers.AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct))
         {
             throw new InvalidOperationException("That customer is not this tenant's.");
         }
 
-        KbAnswer? row = input.Id == Guid.Empty
-            ? null
-            : await db.KbAnswers.FirstOrDefaultAsync(a => a.Id == input.Id && a.TenantId == tenantId, ct);
+        string body = RichText.Sanitize(input.BodyHtml);
+        string title = input.Title.Trim();
+        DateTime now = DateTime.UtcNow;
 
         if (row is null)
         {
-            row = new KbAnswer { Id = Guid.NewGuid(), TenantId = tenantId, Title = "" };
+            row = new KbAnswer
+            {
+                Id = Guid.NewGuid(), TenantId = tenantId, Title = "", AppId = appId, CreatedAt = now,
+                ReviewedAt = now, ReviewedBy = actor,
+            };
             db.KbAnswers.Add(row);
         }
+        else if (row.Title != title || row.BodyHtml != body)
+        {
+            // What it said before — for every answer, as the runbook sections always had.
+            db.KbAnswerRevisions.Add(new KbAnswerRevision
+            {
+                Id = Guid.NewGuid(), AnswerId = row.Id, TenantId = tenantId, Title = row.Title, Body = row.BodyHtml,
+                BodyFormat = KbBodyFormat.Html, SavedAt = now, SavedBy = actor,
+                Summary = string.IsNullOrWhiteSpace(changeSummary) ? null : changeSummary.Trim(),
+            });
+        }
 
-        row.Title = input.Title.Trim();
+        row.Title = title;
         row.CategoryId = input.CategoryId;
-        row.BodyHtml = RichText.Sanitize(input.BodyHtml);
-        row.BodyText = RichText.ToText(row.BodyHtml);
+        row.BodyHtml = body;
+        row.BodyText = RichText.ToText(body);
         row.Language = language;
         row.Visibility = input.Visibility;
-        row.PublishAt = input.Visibility == KbVisibility.Public ? input.PublishAt : null;
-        row.CustomerId = input.CustomerId;
         row.Keywords = (input.Keywords ?? "").Trim();
-        row.UpdatedAt = DateTime.UtcNow;
+        row.UpdatedAt = now;
         row.UpdatedBy = actor;
+
+        if (appId is not null)
+        {
+            row.PublishAt = null;
+            row.CustomerId = appCustomer;
+            row.Section = input.Section ?? row.Section ?? KnowledgeSectionKind.Other;
+        }
+        else
+        {
+            row.PublishAt = input.Visibility == KbVisibility.Public ? input.PublishAt : null;
+            row.CustomerId = input.CustomerId;
+            row.Section = null;
+        }
 
         await db.SaveChangesAsync(ct);
         return row;
+    }
+
+    /// <summary>
+    /// "Still true": somebody confirmed the answer holds. Not an edit — no revision, and the
+    /// last-changed date stays (a fixed typo is not a review; a review changes no words).
+    /// </summary>
+    public async Task<bool> MarkReviewedAsync(Guid tenantId, Guid answerId, string reviewer, DateTime at, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.KbAnswers.Where(a => a.Id == answerId && a.TenantId == tenantId)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.ReviewedAt, at).SetProperty(a => a.ReviewedBy, reviewer), ct) > 0;
+    }
+
+    /// <summary>What an answer said before each edit, newest first.</summary>
+    public async Task<List<KbAnswerRevision>> RevisionsAsync(Guid tenantId, Guid answerId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.KbAnswerRevisions.AsNoTracking()
+            .Where(r => r.TenantId == tenantId && r.AnswerId == answerId)
+            .OrderByDescending(r => r.SavedAt).ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Puts an earlier version back. An ordinary edit: what it says now becomes a revision. A
+    /// version kept as markdown (from before the move) is converted first.
+    /// </summary>
+    public async Task<KbAnswer?> RestoreAsync(Guid tenantId, Guid answerId, Guid revisionId, string actor, CancellationToken ct = default)
+    {
+        KbAnswer? answer = await GetAsync(tenantId, answerId, ct);
+        KbAnswerRevision? revision;
+
+        using (SupportDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            revision = await db.KbAnswerRevisions.AsNoTracking()
+                .FirstOrDefaultAsync(r => r.Id == revisionId && r.AnswerId == answerId && r.TenantId == tenantId, ct);
+        }
+
+        if (answer is null || revision is null)
+        {
+            return null;
+        }
+
+        answer.BodyHtml = revision.BodyFormat == KbBodyFormat.Markdown
+            ? EntKube.Web.Services.Knowledge.KnowledgeConversion.Convert(revision.Body).Html
+            : revision.Body;
+
+        if (!string.IsNullOrWhiteSpace(revision.Title))
+        {
+            answer.Title = revision.Title;
+        }
+
+        return await SaveAnswerAsync(tenantId, answer, actor, ct, $"Restored the version of {revision.SavedAt:yyyy-MM-dd HH:mm}");
+    }
+
+    // ───────────────────────────── An application's knowledge (phase 11) ─────────────────────────────
+
+    /// <summary>An application's answers, by section then title — what its Knowledge button shows.</summary>
+    public async Task<List<KbAnswer>> AnswersForAppAsync(Guid tenantId, Guid appId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.KbAnswers.AsNoTracking()
+            .Where(a => a.TenantId == tenantId && a.AppId == appId)
+            .OrderBy(a => a.Section).ThenBy(a => a.Title).ToListAsync(ct);
+    }
+
+    /// <summary>The names of this tenant's applications that have knowledge, for labelling lists.</summary>
+    public async Task<Dictionary<Guid, string>> AppNamesAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        List<Guid> ids = await db.KbAnswers.Where(a => a.TenantId == tenantId && a.AppId != null)
+            .Select(a => a.AppId!.Value).Distinct().ToListAsync(ct);
+        return await db.Apps.Where(a => ids.Contains(a.Id) && a.Customer.TenantId == tenantId)
+            .ToDictionaryAsync(a => a.Id, a => a.Name, ct);
+    }
+
+    /// <summary>The fixed id of a tenant's "Applications" category: the same on every instance.</summary>
+    public static Guid AppCategoryId(Guid tenantId)
+    {
+        byte[] bytes = System.Security.Cryptography.SHA256.HashData(
+            [.. AppCategoryNamespace.ToByteArray(), .. tenantId.ToByteArray()]);
+        bytes[6] = (byte)((bytes[6] & 0x0F) | 0x50);
+        bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
+        return new Guid(bytes.AsSpan(0, 16));
+    }
+
+    private static readonly Guid AppCategoryNamespace = new("7d1c3e1a-5b2f-4f0e-9a41-3c0d2b6e8f11");
+
+    /// <summary>
+    /// The category applications' knowledge is filed under, created on first need. Scope is the
+    /// answer's application, never its category — editors may rename this or move answers out.
+    /// Two instances creating it at once: one insert loses on the key, and re-reads.
+    /// </summary>
+    public async Task<Guid> EnsureAppCategoryAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        Guid id = AppCategoryId(tenantId);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (await db.KbCategories.AnyAsync(c => c.Id == id && c.TenantId == tenantId, ct))
+        {
+            return id;
+        }
+
+        db.KbCategories.Add(new KbCategory { Id = id, TenantId = tenantId, Name = "Applications", SortOrder = 1000 });
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Another instance made it first.
+        }
+
+        return id;
     }
 
     public async Task<bool> DeleteAnswerAsync(Guid tenantId, Guid id, CancellationToken ct = default)
@@ -259,7 +434,9 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        if (!await db.KbAnswers.AnyAsync(a => a.Id == answerId && a.TenantId == tenantId, ct)
+        // Only an answer that can be given to a customer: a runbook is never recorded as given.
+        if (!await db.KbAnswers.AnyAsync(a => a.Id == answerId && a.TenantId == tenantId && a.AppId == null
+                                              && (a.Visibility == KbVisibility.Internal || a.Visibility == KbVisibility.Public), ct)
             || !await db.Tickets.AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct))
         {
             return false;
@@ -314,13 +491,31 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        IQueryable<KbAnswer> q = db.KbAnswers.AsNoTracking()
-            .Where(a => a.TenantId == tenantId
-                        && (a.Visibility == KbVisibility.Internal
-                            || (a.Visibility == KbVisibility.Public && (a.PublishAt == null || a.PublishAt <= now)))
-                        && (a.CustomerId == null || a.CustomerId == customerId));
+        IQueryable<KbAnswer> q = db.KbAnswers.AsNoTracking().Where(KbAudience.OfferableInReplies(tenantId, customerId, now));
 
         return await Matching(q, query).OrderBy(a => a.Title).Take(20).ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// The answer to insert, asked for AGAIN under the same rules for this ticket's customer —
+    /// the list item shown when <c>??</c> was typed may be minutes old, and an answer since moved
+    /// to Operations or narrowed to another customer must not go out. Null when it may not.
+    /// </summary>
+    public async Task<KbAnswer?> ForInsertAsync(Guid tenantId, Guid ticketId, Guid answerId, DateTime now, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        var ticket = await db.Tickets.Where(t => t.Id == ticketId && t.TenantId == tenantId)
+            .Select(t => new { t.CustomerId }).FirstOrDefaultAsync(ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        return await db.KbAnswers.AsNoTracking()
+            .Where(KbAudience.OfferableInReplies(tenantId, ticket.CustomerId, now))
+            .FirstOrDefaultAsync(a => a.Id == answerId, ct);
     }
 
     /// <summary>What a customer sees in the portal: public, published, and theirs or everybody's.</summary>
@@ -340,11 +535,7 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
     }
 
     private static IQueryable<KbAnswer> Published(SupportDbContext db, Guid tenantId, Guid customerId, DateTime now) =>
-        db.KbAnswers.AsNoTracking().Where(a =>
-            a.TenantId == tenantId
-            && a.Visibility == KbVisibility.Public
-            && (a.PublishAt == null || a.PublishAt <= now)
-            && (a.CustomerId == null || a.CustomerId == customerId));
+        db.KbAnswers.AsNoTracking().Where(KbAudience.VisibleInPortal(tenantId, customerId, now));
 
     /// <summary>Every word must appear in the title, the text or the keywords. Case-insensitive, LIKE-escaped.</summary>
     private static IQueryable<KbAnswer> Matching(IQueryable<KbAnswer> q, string? query)

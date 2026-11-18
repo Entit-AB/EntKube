@@ -469,6 +469,49 @@ but never built), customers downloading their files from the portal, and rich-te
 - **Not supported, with reasons** (also in the manual): video embeds (they'd need iframes on the
   allow-list), RSS (the portal requires sign-in), and files on answers.
 
+### Phase 11: One knowledge base, and contracts on the customer
+
+The user's decisions (2026-11-18):
+
+- **One knowledge store.** Each application's runbook (the Knowledge button's sections) moves INTO
+  the knowledge base as agents-only answers tied to the application, keeping its revision history and
+  review stamps. The app's Knowledge button shows only that app's part. The app's structured facts
+  (classification, dependencies, end-of-life) stay on the button.
+- **Two edit rules.** Help answers follow the opt-in editor permission. An application's runbook stays
+  editable by anyone who can open the application.
+- **Contracts on the customer alone.** The application's Contract button goes. Annex A moves to the
+  customer's Contract page (PR #479).
+
+The merge ships in three releases (full plan from a judged design: `.git/kb-merge-plan.md` locally):
+
+- **A, enabling (this release):** nothing moves and nothing visible switches.
+  - A new visibility, **Operations**, which `??` never offers and the portal never shows.
+  - A CHECK constraint `CK_KbAnswers_AppShape`. An application's answer is Operations or Archived,
+    carries a section and its app's customer, and is never scheduled. The visibility list is positive,
+    so a future visibility is refused for app answers until a migration says otherwise.
+  - `KbAudience`, the one place that says what may reach a customer, with a per-method ratchet over
+    every reader of KbAnswers and a source ratchet over the portal.
+  - `ForInsertAsync`: `??` re-reads an answer before inserting it.
+  - Save rules for every answer:
+    - an unknown id is refused, where it used to create a copy;
+    - the application comes from the stored row;
+    - a change keeps a revision.
+  - Review stamps.
+  - Deleting an app, a customer or a tenant removes the app's knowledge first.
+  - Bundle v22 with revisions and the move ledger.
+  - The converter, in dry run only: startup logs per tenant how sections would convert.
+  - Ships with the sanitiser change that keeps tables (#478).
+- **B, the move:** the startup mover, claimed by a ledger, verified and falling back to the markdown
+  as preformatted text. The panel and the knowledge-base tab switch over.
+- **C, at least a release later:** drop the old tables, only when every installation logs zero left
+  to move.
+
+Found on the way: a backup restore with *wipe* truncated three root tables and trusted CASCADE to
+reach the rest. Every table that keeps its tenant as a plain column was left behind, including
+knowledge-base categories, notification settings, issue trackers, dashboards, CA-trust bundles,
+telemetry alert rules and SLOs, so the restore collided with leftover rows. The tables the roots
+miss are now computed from the model and truncated too.
+
 ## Decisions (2026-11-16)
 
 1. **No groups. The tenant is the queue.** One support team works every customer, and
