@@ -181,6 +181,9 @@ public class TenantService(
         await db.TicketPresences.Where(p => p.TenantId == id).ExecuteDeleteAsync(ct);
         await db.CalendarFeeds.Where(f => f.TenantId == id).ExecuteDeleteAsync(ct);
         // Answers before categories (Restrict), and categories leaf-first via clearing parents.
+        // Their links first: a related-answer link's second side does not cascade.
+        await db.KbAnswerLinks.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.KbAnswerTickets.Where(l => l.TenantId == id).ExecuteDeleteAsync(ct);
         await db.KbAnswers.Where(a => a.TenantId == id).ExecuteDeleteAsync(ct);
         await db.KbCategories.Where(c => c.TenantId == id).ExecuteUpdateAsync(u => u.SetProperty(c => c.ParentId, (Guid?)null), ct);
         await db.KbCategories.Where(c => c.TenantId == id).ExecuteDeleteAsync(ct);

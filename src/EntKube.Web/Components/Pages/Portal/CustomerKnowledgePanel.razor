@@ -18,6 +18,17 @@
         <h5>@shown.Title</h5>
         <div class="text-muted small mb-3">Updated @shown.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd")</div>
         <div class="kb-answer">@((MarkupString)RichText.Sanitize(shown.BodyHtml))</div>
+        @if (related.Count > 0)
+        {
+            @* Phase 10: only related answers this customer could open themselves. *@
+            <div class="mt-3 small" data-test="portal-related">
+                <div class="text-muted mb-1">Related articles</div>
+                @foreach (KbAnswer r in related)
+                {
+                    <button class="btn btn-sm btn-link p-0 me-3" @onclick="() => OpenAsync(r.Id)">@r.Title</button>
+                }
+            </div>
+        }
     }
     else
     {
@@ -43,14 +54,18 @@
     private string query = "";
     private List<KbAnswer> answers = [];
     private KbAnswer? open;
+    private List<KbAnswer> related = [];
 
     protected override Task OnParametersSetAsync() => SearchAsync();
 
     private async Task SearchAsync() =>
         answers = await KnowledgeBase.ForCustomerAsync(Customer.TenantId, Customer.Id, query, DateTime.UtcNow);
 
-    private async Task OpenAsync(Guid id) =>
+    private async Task OpenAsync(Guid id)
+    {
         open = await KnowledgeBase.GetForCustomerAsync(Customer.TenantId, Customer.Id, id, DateTime.UtcNow);
+        related = open is null ? [] : await KnowledgeBase.RelatedForCustomerAsync(Customer.TenantId, Customer.Id, open.Id, DateTime.UtcNow);
+    }
 
     private static string Snippet(string text) => text.Length > 160 ? text[..160] + "…" : text;
 }

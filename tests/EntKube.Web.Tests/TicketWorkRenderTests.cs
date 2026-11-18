@@ -86,6 +86,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));
         Services.AddScoped<CurrentActor>();
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
     }
 
     public new void Dispose()
@@ -863,9 +864,9 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
             Language = "sv", CustomerId = elsewhere, BodyHtml = "<p>Theirs.</p>" }, "nils");
 
         BunitJSModuleInterop editor = JSInterop.SetupModule("./js/ticket-editor.js");
-        editor.SetupVoid("create", _ => true);
-        editor.SetupVoid("insertAnswer", _ => true);
-        editor.SetupVoid("dispose", _ => true);
+        editor.SetupVoid("create", _ => true).SetVoidResult();
+        editor.SetupVoid("insertAnswer", _ => true).SetVoidResult();
+        editor.SetupVoid("dispose", _ => true).SetVoidResult();
 
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
         await detail.InvokeAsync(() => detail.FindAll("button").First(b => b.TextContent.Trim() == "Reply").Click());
@@ -879,5 +880,74 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await detail.InvokeAsync(() => detail.Find("[data-test=composer-answers] button").Click());
         editor.Invocations["insertAnswer"].Should().ContainSingle()
             .Which.Arguments[1].Should().Be("<p>Install the client.</p>");
+
+        // Phase 10: inserting it recorded that this answer was given on this ticket.
+        // The handler's database write finishes after Click() returns; wait for it.
+        detail.WaitForAssertion(() => db.KbAnswerTickets.AsNoTracking().Should().ContainSingle(l => l.TicketId == ticket.Id));
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        editor.Mode = JSRuntimeMode.Loose;
+        IRenderedComponent<TicketDetail> again = RenderDetail(ticket.Id);
+        again.WaitForAssertion(() => again.Find("[data-test=ticket-answers]").TextContent.Should().Contain("VPN setup"));
+    }
+
+    // ───────────────────────────── Phase 10 ─────────────────────────────
+
+    [Fact]
+    public async Task An_open_article_lists_the_related_ones_the_customer_may_open()
+    {
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Inloggning", null);
+        KbAnswer reset = await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Reset your password", CategoryId = cat.Id,
+            Visibility = KbVisibility.Public, Language = "sv", BodyHtml = "<p>x</p>" }, "nils");
+        KbAnswer mfa = await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Set up MFA", CategoryId = cat.Id,
+            Visibility = KbVisibility.Public, Language = "sv", BodyHtml = "<p>y</p>" }, "nils");
+        KbAnswer secret = await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Admin backdoor", CategoryId = cat.Id,
+            Visibility = KbVisibility.Internal, Language = "sv", BodyHtml = "<p>z</p>" }, "nils");
+        await kb.SetRelatedAsync(tenantId, reset.Id, [mfa.Id, secret.Id]);
+
+        Customer customer = db.Customers.AsNoTracking().Single(c => c.Id == customerId);
+        IRenderedComponent<EntKube.Web.Components.Pages.Portal.CustomerKnowledgePanel> panel =
+            Render<EntKube.Web.Components.Pages.Portal.CustomerKnowledgePanel>(p => p.Add(c => c.Customer, customer));
+        panel.WaitForAssertion(() => panel.FindAll(".list-group-item").Should().NotBeEmpty());
+
+        await panel.InvokeAsync(() => panel.FindAll(".list-group-item").First(b => b.TextContent.Contains("Reset your password")).Click());
+
+        panel.Find("[data-test=portal-related]").TextContent.Should().Contain("Set up MFA").And.NotContain("Admin backdoor");
+    }
+
+    private IRenderedComponent<KnowledgeBaseTab> RenderKnowledgeBase()
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        return Render<KnowledgeBaseTab>(p => p.Add(c => c.TenantId, tenantId));
+    }
+
+    [Fact]
+    public async Task Everyone_edits_the_knowledge_base_until_a_role_is_made_its_editor()
+    {
+        await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
+
+        tab.WaitForAssertion(() => tab.FindAll("button").Should().Contain(b => b.TextContent.Contains("New answer")));
+        tab.FindAll("[data-test=kb-read-only]").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Once_a_role_edits_the_knowledge_base_everyone_else_only_reads_it()
+    {
+        await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        Guid editors = Guid.NewGuid(), agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = editors, TenantId = tenantId, Name = "KB editors",
+            PermissionsJson = $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)AccessLevel.Edit}}}" });
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
+
+        tab.WaitForAssertion(() => tab.Find("[data-test=kb-read-only]").TextContent.Should().Contain("Support knowledge base: Edit"));
+        tab.FindAll("button").Should().NotContain(b => b.TextContent.Contains("New answer") || b.TextContent.Contains("Add category"));
     }
 }

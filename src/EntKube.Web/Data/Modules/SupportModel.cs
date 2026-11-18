@@ -71,6 +71,8 @@ internal static class SupportModel
         builder.Entity<CalendarFeed>().ToTable("CalendarFeeds");
         builder.Entity<KbCategory>().ToTable("KbCategories");
         builder.Entity<KbAnswer>().ToTable("KbAnswers");
+        builder.Entity<KbAnswerLink>().ToTable("KbAnswerLinks");
+        builder.Entity<KbAnswerTicket>().ToTable("KbAnswerTickets");
         builder.Entity<IssueTracker>().ToTable("IssueTrackers");
         builder.Entity<TicketIssueLink>().ToTable("TicketIssueLinks");
         builder.Entity<TicketHighlight>().ToTable("TicketHighlights");
@@ -408,6 +410,30 @@ internal static class SupportModel
             entity.HasIndex(h => h.EventId);
             entity.HasIndex(h => h.TenantId);
             entity.HasOne(h => h.Event).WithMany().HasForeignKey(h => h.EventId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── Phase 10: related answers and answers used on tickets. ──
+
+        builder.Entity<KbAnswerLink>(entity =>
+        {
+            entity.HasKey(l => new { l.AnswerId, l.RelatedId });
+            entity.HasIndex(l => l.RelatedId);
+            entity.HasIndex(l => l.TenantId);
+
+            // One side cascades; the other cannot (SQL Server allows one cascade path from
+            // KbAnswers into this table). The service deletes an answer's links on either side first.
+            entity.HasOne<KbAnswer>().WithMany().HasForeignKey(l => l.AnswerId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<KbAnswer>().WithMany().HasForeignKey(l => l.RelatedId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<KbAnswerTicket>(entity =>
+        {
+            entity.HasKey(l => new { l.AnswerId, l.TicketId });
+            entity.HasIndex(l => l.TicketId);
+            entity.HasIndex(l => l.TenantId);
+            entity.Property(l => l.LinkedBy).HasMaxLength(200);
+            entity.HasOne<KbAnswer>().WithMany().HasForeignKey(l => l.AnswerId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Ticket>().WithMany().HasForeignKey(l => l.TicketId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<UserNotification>(entity =>

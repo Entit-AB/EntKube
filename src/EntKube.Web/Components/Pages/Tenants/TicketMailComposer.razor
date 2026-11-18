@@ -203,6 +203,9 @@
         {
             await module.InvokeVoidAsync("insertAnswer", editor, RichText.Sanitize(a.BodyHtml));
         }
+
+        // Phase 10: the answer now shows where it was given, and the ticket which answers it got.
+        await KnowledgeBase.LinkTicketAsync(TenantId, a.Id, Ticket.Id, Actor);
     }
 
     private IEnumerable<TextModule> Matching() =>

@@ -5216,6 +5216,53 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("KbAnswers", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerLink", b =>
+                {
+                    b.Property<Guid>("AnswerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("RelatedId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("AnswerId", "RelatedId");
+
+                    b.HasIndex("RelatedId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("KbAnswerLinks", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerTicket", b =>
+                {
+                    b.Property<Guid>("AnswerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("LinkedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("LinkedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("AnswerId", "TicketId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.ToTable("KbAnswerTickets", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KbCategory", b =>
                 {
                     b.Property<Guid>("Id")
@@ -11904,6 +11951,36 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Category");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerLink", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KbAnswer", null)
+                        .WithMany()
+                        .HasForeignKey("AnswerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.KbAnswer", null)
+                        .WithMany()
+                        .HasForeignKey("RelatedId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KbAnswerTicket", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KbAnswer", null)
+                        .WithMany()
+                        .HasForeignKey("AnswerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KbCategory", b =>
