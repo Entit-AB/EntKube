@@ -2,6 +2,25 @@ using EntKube.Web.Data;
 
 namespace EntKube.Web.Services.Contracts;
 
+/// <summary>Where an application stands under Annex A today.</summary>
+public enum AnnexAStatus
+{
+    /// <summary>No Annex A recorded: the application is not managed under the agreement.</summary>
+    NotUnderManagement,
+
+    /// <summary>An Annex A with no on-boarding date yet, or one in the future.</summary>
+    NotYetStarted,
+
+    UnderManagement,
+
+    /// <summary>Taken out of management (§19).</summary>
+    Ended,
+}
+
+/// <summary>One of a customer's applications as the customer's Annex A list shows it.</summary>
+public readonly record struct AnnexARow(
+    Guid AppId, string AppName, AnnexAStatus Status, ApplicationContract? Contract, ResolvedServiceLevel? InForce);
+
 /// <summary>What one application contributes to the monthly base fee.</summary>
 /// <param name="AppId">The application charged for.</param>
 /// <param name="AppName">Its name as it stood when the fee was computed.</param>

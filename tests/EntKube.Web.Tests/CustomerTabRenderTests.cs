@@ -122,4 +122,36 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
         tab.Markup.Should().Contain("Acme AB");
         tab.Markup.Should().Contain("Boliden");
     }
+
+    /// <summary>
+    /// Contracts are managed on the customer page; the application page has no Contract button
+    /// and no Annex A editor any more (its Knowledge button stays).
+    /// </summary>
+    [Fact]
+    public void The_application_page_has_no_contract_button()
+    {
+        Microsoft.Extensions.Configuration.IConfiguration none = new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate = new(none, NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
+        Mock<IKubernetesClientFactory> k8s = new();
+        Services.AddSingleton(new KubernetesOperationsService(
+            testDb.Factory,
+            new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
+            new KyvernoPolicyService(testDb.Factory, k8s.Object,
+                new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object), gate,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), NullLogger<KyvernoPolicyService>.Instance),
+            gate,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
+            NullLogger<KubernetesOperationsService>.Instance));
+        Services.AddSingleton(new ToastService());
+        JSInterop.Mode = JSRuntimeMode.Loose;
+
+        App app = db.Apps.AsNoTracking().Single(a => a.CustomerId == acme.Id);
+        IRenderedComponent<AppDetail> page = Render<AppDetail>(p => p.Add(c => c.App, app).Add(c => c.TenantId, tenantId));
+
+        page.WaitForAssertion(() => page.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Knowledge"));
+        page.FindAll("button").Should().NotContain(b => b.TextContent.Trim() == "Contract");
+        page.Markup.Should().NotContain("Annex A");
+    }
 }

@@ -95,6 +95,11 @@ of work across the categories it crossed.
 | **Annex C** | The price list, versioned. §19 indexes it every January | [`PriceList`](../src/EntKube.Web/Data/PriceList.cs) |
 | §23 contacts | Technical contact, deputy, escalation levels 2 and 3, both sides | [`ContractContact`](../src/EntKube.Web/Data/ContractContact.cs) |
 
+A parent application (§10.2.1) may belong to another customer of the same tenant: the
+instance then inherits that parent's window and counts towards its 21st-instance rate.
+The service refuses a parent from another tenant, or the application itself. The
+Annex A editor offers the customer's own applications as parents.
+
 Everything dated is resolved **as of a date** rather than read as "current", and
 [`ContractService`](../src/EntKube.Web/Services/Contracts/ContractService.cs) is
 the only place that resolution happens.
@@ -867,9 +872,12 @@ acted on, so it belongs with the work, while a cost report is only ever read.
 Nothing in it changes the platform, and "what is this costing, and who for" is the
 same kind of question as what the latency is.
 
-The per-record panels hang off what they describe: Annex A on the application,
-Annex B/C and the §23 contacts on the customer, the knowledge panel on the
-application.
+The contract lives on the customer: the customer's **Contract** page holds Annex A
+for every one of its applications ("Annex A — applications", including
+applications not yet under management), Annex B/C and the §23 contacts. Annex A is
+signed per application, but the fee, the 21st-instance count and the gaps are
+portfolio facts, so they are kept together; the application page has no Contract
+button. The knowledge panel stays on the application.
 
 **Customer portal.** `Support` (raise, reply, accept a resolution), `Service
 report`, `Hours` behind the operator gate, and upcoming maintenance.

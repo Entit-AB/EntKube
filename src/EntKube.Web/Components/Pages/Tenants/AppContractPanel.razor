@@ -6,9 +6,13 @@
 @inject ContractService Contracts
 @inject IDbContextFactory<SupportDbContext> DbFactory
 @inject ToastService Toasts
+@inject CurrentActor Actor
 
 @* ═══════════════════════════════════════════════════════════════════
    Annex A for one application — the terms it is managed on.
+   Opened from the customer's Contract page (PortfolioContractPanel,
+   "Annex A — applications"); the application page has no Contract
+   button any more — contracts live on the customer.
 
    The classification is deliberately not editable in place: §4.1 and
    §16.2 both change it over the life of the agreement and the
@@ -156,6 +160,14 @@
         </div>
 
         @* ───────────── Classification history ───────────── *@
+        @if (!persisted)
+        {
+            <div class="alert alert-light border small" data-test="save-annex-first">
+                Save Annex A first, then record its service level and support window.
+            </div>
+        }
+        else
+        {
         <div class="d-flex justify-content-between align-items-center mb-2">
             <div>
                 <h6 class="mb-0">Service level and support window</h6>
@@ -281,6 +293,7 @@
                 </table>
             </div>
         }
+        }
     }
 }
 </LoadingPanel>
@@ -288,6 +301,14 @@
 @code {
     [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    /// <summary>Raised after Annex A or its classification changed, so the customer's list can refresh.</summary>
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    // Whether the contract on screen is saved. "Record Annex A" makes one in memory only, and
+    // recording a classification against it failed with a misleading tenancy error.
+    private bool persisted;
+    private (Guid, Guid) loadedFor;
 
     private bool loading = true;
     private bool busy;
@@ -315,7 +336,18 @@
               .ThenByDescending(l => l.RecordedAt)
               .FirstOrDefault();
 
-    protected override async Task OnParametersSetAsync() => await LoadAsync();
+    // Only when the application changes: the parent re-renders this often, and reloading on
+    // every render threw away a half-filled form.
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == (TenantId, App.Id))
+        {
+            return;
+        }
+
+        loadedFor = (TenantId, App.Id);
+        await LoadAsync();
+    }
 
     private async Task LoadAsync()
     {
@@ -325,6 +357,7 @@
         try
         {
             contract = await Contracts.GetContractAsync(TenantId, App.Id);
+            persisted = contract is not null;
             current = await Contracts.ResolveServiceLevelAsync(TenantId, App.Id, DateTime.UtcNow);
 
             levels = contract is null ? [] : await Contracts.ListServiceLevelsAsync(TenantId, contract.Id);
@@ -376,6 +409,7 @@
             contract = await Contracts.SaveContractAsync(TenantId, contract);
             Toasts.Success("Annex A saved.");
             await LoadAsync();
+            await OnChanged.InvokeAsync();
         }
         catch (Exception ex)
         {
@@ -402,12 +436,13 @@
             await Contracts.RecordServiceLevelAsync(
                 TenantId, contract.Id, newLevel, newWindow,
                 DateTime.SpecifyKind(newEffectiveFrom.Value.Date, DateTimeKind.Utc),
-                newReason, null);
+                newReason, await Actor.NameAsync());
 
             addingLevel = false;
             newReason = "";
             Toasts.Success("Classification recorded.");
             await LoadAsync();
+            await OnChanged.InvokeAsync();
         }
         catch (Exception ex)
         {
@@ -433,6 +468,12 @@
             await Contracts.DeleteServiceLevelAsync(TenantId, pendingDeleteLevelId.Value);
             pendingDeleteLevelId = null;
             await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            pendingDeleteLevelId = null;
+            Toasts.Error($"Could not delete: {ex.Message}");
         }
         finally
         {

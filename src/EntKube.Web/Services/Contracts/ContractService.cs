@@ -93,6 +93,47 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
+    /// Every one of a customer's applications with where it stands under Annex A on a date —
+    /// including those with no Annex A at all, which appear nowhere else. This is the customer
+    /// page's list; the app page no longer edits contracts.
+    /// </summary>
+    public async Task<List<AnnexARow>> ListAnnexAAsync(Guid tenantId, Guid customerId, DateTime asOf, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        var apps = await db.Apps.AsNoTracking()
+            .Where(a => a.CustomerId == customerId && a.Customer.TenantId == tenantId)
+            .OrderBy(a => a.Name)
+            .Select(a => new { a.Id, a.Name })
+            .ToListAsync(ct);
+
+        if (apps.Count == 0)
+        {
+            return [];
+        }
+
+        // The whole tenant's contracts: an instance may inherit its window from a parent at
+        // another customer of the tenant.
+        Dictionary<Guid, ApplicationContract> byApp = (await db.ApplicationContracts
+            .Include(c => c.ServiceLevels)
+            .AsNoTracking()
+            .Where(c => c.TenantId == tenantId)
+            .ToListAsync(ct)).ToDictionary(c => c.AppId);
+
+        return [.. apps.Select(a =>
+        {
+            byApp.TryGetValue(a.Id, out ApplicationContract? contract);
+
+            AnnexAStatus status = contract is null ? AnnexAStatus.NotUnderManagement
+                : contract.ManagementEndedAt is DateTime ended && ended <= asOf ? AnnexAStatus.Ended
+                : IsUnderManagement(contract, asOf) ? AnnexAStatus.UnderManagement
+                : AnnexAStatus.NotYetStarted;
+
+            return new AnnexARow(a.Id, a.Name, status, contract, Resolve(a.Id, asOf, byApp));
+        })];
+    }
+
+    /// <summary>
     /// The Annex B terms in force for a customer on a date — the latest agreement that had
     /// taken effect by then.
     /// </summary>
@@ -259,6 +300,22 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         if (!await db.Apps.AnyAsync(a => a.Id == edited.AppId && a.Customer.TenantId == tenantId, ct))
         {
             throw new InvalidOperationException("The application does not belong to this tenant.");
+        }
+
+        // The parent (§10.2.1) was copied unchecked: another tenant's application, or the
+        // application itself, was accepted. A parent at another customer of the SAME tenant
+        // stays allowed — the service has always resolved inheritance across customers there.
+        if (edited.ParentAppId is Guid parent)
+        {
+            if (parent == edited.AppId)
+            {
+                throw new InvalidOperationException("An application cannot be its own parent.");
+            }
+
+            if (!await db.Apps.AnyAsync(a => a.Id == parent && a.Customer.TenantId == tenantId, ct))
+            {
+                throw new InvalidOperationException("The parent application does not belong to this tenant.");
+            }
         }
 
         edited.TenantId = tenantId;
