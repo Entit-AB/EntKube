@@ -351,6 +351,8 @@ public static class MailMessageReader
     [
         "br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
         "table", "blockquote", "pre",
+        // Each cell its own line: adjacent cells used to glue into one word ("Hostdb1").
+        "td", "th", "caption",
     ];
 
     /// <summary>

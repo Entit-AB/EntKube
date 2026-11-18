@@ -1164,3 +1164,16 @@ h1:focus {
 [data-bs-theme="dark"] ::highlight(entkube-yellow), [data-bs-theme="dark"] ::highlight(entkube-green),
 [data-bs-theme="dark"] ::highlight(entkube-blue), [data-bs-theme="dark"] ::highlight(entkube-pink),
 [data-bs-theme="dark"] ::highlight(entkube-purple) { color: #111; }
+
+/* Tables in sanitised rich text (mail on a ticket, help answers, runbooks). The content carries
+   no attributes or classes — RichText strips them — so all of the look is ours. Wide tables
+   scroll inside their box instead of widening the page. */
+.rich-entry table, .kb-answer table, .kb-prose table {
+    display: block; overflow-x: auto; max-width: 100%;
+    border-collapse: collapse; margin: .5rem 0;
+}
+.rich-entry th, .rich-entry td, .kb-answer th, .kb-answer td, .kb-prose th, .kb-prose td {
+    border: 1px solid var(--bs-border-color); padding: .25rem .5rem; vertical-align: top;
+}
+.rich-entry th, .kb-answer th, .kb-prose th { background: var(--bs-tertiary-bg); font-weight: 600; }
+.rich-entry caption, .kb-answer caption, .kb-prose caption { caption-side: top; color: var(--bs-secondary-color); }

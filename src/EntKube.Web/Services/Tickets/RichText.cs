@@ -6,11 +6,17 @@ namespace EntKube.Web.Services.Tickets;
 /// <summary>
 /// The one place HTML written in EntKube is made safe (docs/helpdesk.md, decision 3).
 ///
-/// <para><b>An allow-list, not a filter.</b> What survives is the formatting the composer can
-/// produce — paragraphs, emphasis, lists, quotes, code, links — and nothing else: no images (files
-/// go as attachments), no styles or classes (they can hide text or impersonate our own UI), no
-/// scripts, frames, forms or event handlers. Links keep only <c>http</c>, <c>https</c> and
-/// <c>mailto</c>, and open in a new tab without a referrer.</para>
+/// <para><b>An allow-list, not a filter.</b> What survives is document formatting — paragraphs,
+/// emphasis, lists, quotes, code, links, headings of every level and plain tables — and nothing
+/// else: no images (files go as attachments), no styles or classes (they can hide text or
+/// impersonate our own UI), no scripts, frames, forms or event handlers. Links keep only
+/// <c>http</c>, <c>https</c> and <c>mailto</c>, and open in a new tab without a referrer.</para>
+///
+/// <para><b>Tables carry no attributes</b> — no colspan, no alignment, no width; the only attribute
+/// anywhere is a link's <c>href</c>. They were added for the knowledge base, whose runbooks are
+/// full of them: a disallowed element is removed WITH its text, so before this a table in a
+/// customer's HTML mail, or in a document pasted into an answer, silently lost every word in
+/// it.</para>
 ///
 /// <para>Applied when HTML is <b>written</b> (so what is stored and mailed is already safe) and
 /// again when it is <b>rendered</b> (so a row written before a rule changed, or restored from a
@@ -26,7 +32,8 @@ public static class RichText
 
         s.AllowedTags.Clear();
         foreach (string tag in new[] { "p", "br", "strong", "b", "em", "i", "u", "s", "a", "ul", "ol", "li",
-                                       "blockquote", "pre", "code", "h1", "h2", "h3" })
+                                       "blockquote", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6",
+                                       "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td" })
         {
             s.AllowedTags.Add(tag);
         }

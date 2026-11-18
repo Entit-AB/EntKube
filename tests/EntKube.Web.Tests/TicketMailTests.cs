@@ -74,6 +74,15 @@ public class TicketMailTests : IDisposable
     [InlineData("<img src=\"data:image/png;base64,AAAA\"><p>x</p>", "<p>x</p>")]
     [InlineData("<a href=\"javascript:alert(1)\">x</a>", "<a target=\"_blank\" rel=\"noopener noreferrer nofollow\">x</a>")]
     [InlineData("<iframe src=\"https://evil.example\"></iframe><p>ok</p>", "<p>ok</p>")]
+    // Tables survive with every attribute stripped (the parser inserts the tbody).
+    [InlineData("<table border=\"1\" style=\"width:100%\" class=\"grid\"><tr><td colspan=\"2\" onclick=\"x()\">Host</td><td align=\"right\">db1</td></tr></table>",
+                "<table><tbody><tr><td>Host</td><td>db1</td></tr></tbody></table>")]
+    [InlineData("<table><caption>Servers</caption><thead><tr><th>Name</th></tr></thead><tbody><tr><td>db1</td></tr></tbody><tfoot><tr><td>1 total</td></tr></tfoot></table>",
+                "<table><caption>Servers</caption><thead><tr><th>Name</th></tr></thead><tbody><tr><td>db1</td></tr></tbody><tfoot><tr><td>1 total</td></tr></tfoot></table>")]
+    [InlineData("<h4>Restore</h4><h5>Step</h5><h6>Note</h6>", "<h4>Restore</h4><h5>Step</h5><h6>Note</h6>")]
+    // A table cell is no way in: what is not allowed inside it goes as anywhere else.
+    [InlineData("<table><tr><td><img src=\"https://track.example/p.gif\"><script>steal()</script>ok</td></tr></table>",
+                "<table><tbody><tr><td>ok</td></tr></tbody></table>")]
     public void Only_the_formatting_the_composer_makes_survives(string html, string safe) =>
         RichText.Sanitize(html).Should().Be(safe);
 
