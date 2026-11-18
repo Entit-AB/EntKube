@@ -4676,6 +4676,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("BodyHtml")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("uniqueidentifier");
 
@@ -8881,6 +8884,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("Description")
                         .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("DescriptionHtml")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<bool>("ExcludedFromSla")

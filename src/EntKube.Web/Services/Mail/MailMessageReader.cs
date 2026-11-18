@@ -48,6 +48,7 @@ public static class MailMessageReader
             FromName = string.IsNullOrWhiteSpace(from?.Name) ? null : from.Name,
             Subject = message.Subject ?? "",
             Body = BodyOf(message),
+            BodyHtml = HtmlOf(message),
             SentAt = SentAtOf(message, receivedAt),
             ReceivedAt = receivedAt,
             SenderAuthenticity = SenderAuthentication.Of(message, trustedServer),
@@ -324,6 +325,25 @@ public static class MailMessageReader
         }
 
         return string.IsNullOrWhiteSpace(message.HtmlBody) ? "" : PlainTextFrom(message.HtmlBody);
+    }
+
+    /// <summary>The largest sanitised HTML body kept for display; a bigger one is shown as its text.</summary>
+    public const int MaxBodyHtmlLength = 200_000;
+
+    /// <summary>
+    /// The HTML part, sanitised for display, or null: no HTML part, nothing left once sanitised,
+    /// or larger than <see cref="MaxBodyHtmlLength"/> (a newsletter is not worth a page of
+    /// markup on a ticket — its text is there either way).
+    /// </summary>
+    public static string? HtmlOf(MimeMessage message)
+    {
+        if (string.IsNullOrWhiteSpace(message.HtmlBody))
+        {
+            return null;
+        }
+
+        string safe = EntKube.Web.Services.Tickets.RichText.Sanitize(message.HtmlBody);
+        return EntKube.Web.Services.Tickets.RichText.IsEmpty(safe) || safe.Length > MaxBodyHtmlLength ? null : safe;
     }
 
     /// <summary>The block-level tags worth a line break; every other tag just disappears.</summary>

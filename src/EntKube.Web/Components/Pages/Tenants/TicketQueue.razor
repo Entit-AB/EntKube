@@ -13,6 +13,7 @@
 @inject NavigationManager Nav
 @inject ToastService Toasts
 @inject IJSRuntime JS
+@inject SupportQuickSearch Quick
 
 @* ═══════════════════════════════════════════════════════════════════
    The open queue, worst first, with every §14.4 clock shown as time
@@ -110,6 +111,38 @@ else
                         <tr><td><code>@field:</code></td><td class="text-muted">@aliases</td><td>@takes</td></tr>
                     }
                 </table>
+            </div>
+        }
+        @if (searchResults is not null && !quick.IsEmpty)
+        {
+            @* Quick search (phase 8): plain words also find customers and help answers. *@
+            <div class="border rounded p-2 mb-2 small" data-test="quick-results">
+                @if (quick.Customers.Count > 0)
+                {
+                    <div class="mb-1">
+                        <span class="text-muted me-1">Customers:</span>
+                        @foreach (CustomerHit c in quick.Customers)
+                        {
+                            <button class="btn btn-sm btn-outline-secondary py-0 me-1 mb-1" title="All of this customer's tickets"
+                                    @onclick="() => SearchCustomerAsync(c)">
+                                <i class="bi bi-building me-1"></i>@c.Name <span class="text-muted">(@c.OpenTickets open)</span>
+                            </button>
+                        }
+                    </div>
+                }
+                @if (quick.Answers.Count > 0)
+                {
+                    <div>
+                        <span class="text-muted me-1">Help answers:</span>
+                        @foreach (KbAnswer a in quick.Answers)
+                        {
+                            <a class="btn btn-sm btn-outline-secondary py-0 me-1 mb-1" href="@AnswerHref(a)">
+                                <i class="bi bi-book me-1"></i>@a.Title
+                                @if (a.Visibility != KbVisibility.Public) { <span class="text-muted">(@a.Visibility.ToString().ToLowerInvariant())</span> }
+                            </a>
+                        }
+                    </div>
+                }
             </div>
         }
         @if (searchResults is not null)
@@ -451,13 +484,30 @@ else
             TicketService.SearchResult result = await Tickets.SearchAsync(tenant, query, DateTime.UtcNow);
             searchResults = result.Tickets;
             searchTruncated = result.Truncated;
+            quick = await Quick.SearchAsync(tenant, query);
         }
         catch (TicketSearchException ex)
         {
             searchResults = null;
             searchError = ex.Message;
+            quick = QuickResults.None;
         }
     }
+
+    private QuickResults quick = QuickResults.None;
+
+    /// <summary>A customer picked from quick search: all of their tickets, open and closed.</summary>
+    private async Task SearchCustomerAsync(CustomerHit c)
+    {
+        searchText = $"customer:\"{c.Name.Replace("\"", "")}\"";
+        await SearchAsync();
+    }
+
+    /// <summary>A help answer, opened in the knowledge base.</summary>
+    private string AnswerHref(KbAnswer a) => Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+    {
+        ["section"] = "knowledge-base", ["answer"] = a.Id, ["q"] = null, ["ticket"] = null,
+    });
 
     /// <summary>
     /// The tenant the detail view acts as. Every ticket operation is scoped to it now, so the

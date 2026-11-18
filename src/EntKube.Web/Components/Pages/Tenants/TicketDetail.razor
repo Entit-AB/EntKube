@@ -197,7 +197,14 @@
         <div class="card mb-3">
             <div class="card-body">
                 <div class="small text-muted mb-1">Description</div>
-                <div style="white-space: pre-wrap">@ticket.Description</div>
+                @if (ticket.DescriptionHtml is string described)
+                {
+                    <div class="rich-entry" data-test="description-html">@((MarkupString)RichText.Sanitize(described))</div>
+                }
+                else
+                {
+                    <div style="white-space: pre-wrap">@ticket.Description</div>
+                }
             </div>
         </div>
     }

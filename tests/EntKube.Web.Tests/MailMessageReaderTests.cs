@@ -478,4 +478,40 @@ public class MailMessageReaderTests
         row.Subject.Should().Be("Ärende 5512 vidarebefordrat");
         row.State.Should().Be(MailTriageState.Received);
     }
+
+    // ───────────────────────────── HTML for display (helpdesk phase 8) ─────────────────────────────
+
+    [Fact]
+    public void An_html_mail_keeps_its_formatting_for_display_but_never_its_images_or_scripts()
+    {
+        InboundMailMessage read = MailMessageReader.Read(Message(
+            text: "Vi kommer inte in.",
+            html: "<p>Vi kommer <b>inte</b> in.</p><img src=\"https://track.example/pixel.gif\"><script>steal()</script>"
+                  + "<a href=\"https://status.example\" onclick=\"x()\">status</a>"), Tenant, Fetched);
+
+        read.BodyHtml.Should().Be("<p>Vi kommer <b>inte</b> in.</p>"
+            + "<a href=\"https://status.example\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">status</a>");
+        read.Body.Should().Be("Vi kommer inte in.", "the text part is still what search, triage and the cut line read");
+    }
+
+    [Fact]
+    public void A_plain_text_mail_has_no_html_to_show()
+    {
+        MailMessageReader.Read(Message(text: "Bara text.", html: null), Tenant, Fetched).BodyHtml.Should().BeNull();
+    }
+
+    [Fact]
+    public void Html_with_nothing_left_once_sanitised_is_not_kept()
+    {
+        MailMessageReader.Read(Message(text: "x", html: "<img src=\"https://track.example/p.gif\"><style>p{}</style>"), Tenant, Fetched)
+            .BodyHtml.Should().BeNull();
+    }
+
+    [Fact]
+    public void An_enormous_html_mail_is_shown_as_its_text()
+    {
+        string huge = string.Concat(Enumerable.Repeat("<p>Nyhetsbrev, stycke för stycke.</p>", 8_000));
+
+        MailMessageReader.Read(Message(text: "Nyhetsbrev", html: huge), Tenant, Fetched).BodyHtml.Should().BeNull();
+    }
 }

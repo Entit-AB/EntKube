@@ -4669,6 +4669,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("BodyHtml")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("TEXT");
 
@@ -8869,6 +8872,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("Description")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DescriptionHtml")
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("ExcludedFromSla")

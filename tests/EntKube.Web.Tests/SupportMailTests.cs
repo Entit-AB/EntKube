@@ -764,6 +764,72 @@ public class SupportMailTests : IDisposable
         ticket.CustomerId.Should().Be(theirCustomer);
     }
 
+    // ---- HTML mail (helpdesk phase 8) ---------------------------------------------------------
+
+    [Fact]
+    public async Task A_ticket_opened_from_an_html_mail_keeps_the_formatting_beside_the_text()
+    {
+        InboundMailMessage? message = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId, MessageId = Guid.NewGuid().ToString("N"), FromAddress = KnownSender, FromName = "Karin",
+            Subject = "Journalen", Body = "Ingen kommer in.", BodyHtml = "<p>Ingen kommer <strong>in</strong>.</p>", SentAt = Tue(10),
+        });
+        MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        Ticket? ticket = await tickets.GetAsync(tenantId, (await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11)))!.Id);
+
+        ticket!.Description.Should().Be("Ingen kommer in.");
+        ticket.DescriptionHtml.Should().Be("<p>Ingen kommer <strong>in</strong>.</p>");
+    }
+
+    [Fact]
+    public async Task A_mail_filed_on_a_ticket_keeps_its_text_as_before_and_its_formatting_for_display()
+    {
+        Ticket ticket = await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
+            TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId, MessageId = Guid.NewGuid().ToString("N"), FromAddress = KnownSender,
+            Subject = $"Re: [#{ticket.Number}] Journalen svarar inte", Body = "Fortfarande nere.",
+            BodyHtml = "<p>Fortfarande <em>nere</em>.</p>", SentAt = Tue(11),
+        });
+        MailSuggestion append = reply!.Suggestions.Single(s => s.Kind == MailSuggestionKind.AppendToTicket);
+
+        await mail.AcceptAsync(tenantId, append.Id, "nils", Tue(11));
+
+        db.ChangeTracker.Clear();
+        TicketEvent filed = db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Detail.StartsWith("From "));
+        filed.Detail.Should().Be($"From {KnownSender}: Fortfarande nere.");
+        filed.DetailHtml.Should().Be($"<p>From {KnownSender}:</p><p>Fortfarande <em>nere</em>.</p>");
+        filed.CustomerVisible.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_tickets_description_html_is_sanitised_when_the_ticket_is_opened()
+    {
+        Ticket ticket = await tickets.CreateAsync(tenantId, customerId, appId, "Fel", "text", TicketChannel.Email,
+            TicketPriority.P3, Tue(9), "Karin", KnownSender, descriptionHtml: "<p>ok</p><script>steal()</script>");
+
+        ticket.DescriptionHtml.Should().Be("<p>ok</p>");
+    }
+
+    /// <summary>The HTML is sanitised again when filed, whatever the stored message says.</summary>
+    [Fact]
+    public async Task Html_that_reached_the_database_unsanitised_is_sanitised_when_filed()
+    {
+        Ticket ticket = await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "x", TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        (await tickets.AddMailEntryAsync(tenantId, ticket.Id, "a<b>@x", "text", "<p>ok</p><script>steal()</script>", "nils", Tue(11)))
+            .Should().BeTrue();
+
+        db.ChangeTracker.Clear();
+        db.TicketEvents.Single(e => e.TicketId == ticket.Id && e.Detail == "From a<b>@x: text").DetailHtml
+            .Should().Be("<p>From a&lt;b&gt;@x:</p><p>ok</p>");
+    }
+
     /// <summary>The one thing still refused: a customer that is not there at all.</summary>
     [Fact]
     public async Task A_message_cannot_be_placed_with_a_customer_that_does_not_exist()

@@ -437,6 +437,9 @@ else
     // A ticket search, so it can be linked to and survives a reload: ?section=tickets&q=tag:vpn
     [SupplyParameterFromQuery(Name = "q")] private string? SearchParam { get; set; }
 
+    // A help answer to open in the knowledge base, as quick search links to it: ?section=knowledge-base&answer=…
+    [SupplyParameterFromQuery(Name = "answer")] private Guid? AnswerParam { get; set; }
+
     private sealed record SectionItem(string Key, string Label, string Icon);
     private sealed record TreeGroup(string Name, string Icon, SectionItem[] Items);
 
@@ -1092,7 +1095,7 @@ else
             case "support-personal": builder.OpenComponent<SupportPersonalTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "issue-trackers": builder.OpenComponent<IssueTrackersTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "knowledge-base": builder.OpenComponent<KnowledgeBaseTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "knowledge-base": builder.OpenComponent<KnowledgeBaseTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.AddComponentParameter(2, "OpenAnswerId", AnswerParam); builder.CloseComponent(); break;
             case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

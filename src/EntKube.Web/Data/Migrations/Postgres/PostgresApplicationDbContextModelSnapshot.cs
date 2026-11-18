@@ -4674,6 +4674,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("BodyHtml")
+                        .HasColumnType("text");
+
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("uuid");
 
@@ -8876,6 +8879,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("Description")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DescriptionHtml")
                         .HasColumnType("text");
 
                     b.Property<bool>("ExcludedFromSla")

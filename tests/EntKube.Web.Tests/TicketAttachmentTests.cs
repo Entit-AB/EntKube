@@ -235,6 +235,37 @@ public class TicketAttachmentTests : IDisposable
         new StreamReader(files[0].Open()).ReadToEnd().Should().Be("%PDF-1.7");
     }
 
+    /// <summary>
+    /// Phase 8: a screenshot pasted into the mail body is an inline part, not an attachment, and
+    /// used to be lost — the HTML that would show it is not allowed images.
+    /// </summary>
+    [Fact]
+    public void A_screenshot_pasted_into_the_mail_body_is_kept_as_a_file()
+    {
+        BodyBuilder body = new() { TextBody = "See the error.", HtmlBody = "<p>See the error.</p><img src=\"cid:shot1\">" };
+        MimeEntity named = body.LinkedResources.Add("error.png", [0x89, 0x50, 0x4E, 0x47], new ContentType("image", "png"));
+        named.ContentId = "shot1";
+        MimePart unnamedShot = new("image", "jpeg") { Content = new MimeContent(new MemoryStream([1, 2, 3])), ContentId = "shot2" };
+        body.LinkedResources.Add(unnamedShot);
+        body.Attachments.Add("report.pdf", Encoding.UTF8.GetBytes("%PDF-1.7"), new ContentType("application", "pdf"));
+
+        MimeMessage message = new() { Subject = "Error", Body = body.ToMessageBody() };
+
+        IReadOnlyList<IncomingAttachment> files = MailAttachments.From(message);
+
+        files.Select(f => f.FileName).Should().Equal("report.pdf", "error.png", "inline-image-1.jpg");
+        files[1].ContentType.Should().Be("image/png");
+        new BinaryReader(files[2].Open()).ReadBytes(3).Should().Equal(1, 2, 3);
+    }
+
+    [Fact]
+    public void The_mails_own_text_and_html_are_never_taken_for_files()
+    {
+        BodyBuilder body = new() { TextBody = "Plain.", HtmlBody = "<p>Rich.</p>" };
+
+        MailAttachments.From(new MimeMessage { Body = body.ToMessageBody() }).Should().BeEmpty();
+    }
+
     // ───────────────────────────── The customer portal (phase 7) ─────────────────────────────
 
     private async Task<Guid> MailFile(Guid ticketId, string name, bool deliveryReport = false)
