@@ -26,7 +26,8 @@ under itself or anything beneath it, and only an empty category can be deleted.
 | For | Every customer, or one customer only, for an answer about their own setup. |
 
 The body is cleaned when it's saved, exactly as a mail is (see [Replying by mail](replying.md)):
-formatting, lists, quotes, code and links stay; images, colours and scripts go. Attachments on
+formatting, headings, lists, quotes, code, links and plain tables stay; images, colours and scripts
+go. Attachments on
 answers aren't supported yet.
 
 ## Inserting an answer into a reply

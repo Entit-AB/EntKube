@@ -379,6 +379,23 @@ public class MailMessageReaderTests
         MailMessageReader.PlainTextFrom("<div><div><div><p>One</p></div></div></div><p>Two</p>")
             .Should().Be("One\n\nTwo");
 
+    /// <summary>Adjacent table cells used to glue into one word ("Hostdb1"), which search and triage then read.</summary>
+    [Fact]
+    public void Table_cells_are_separate_words_in_the_text() =>
+        MailMessageReader.PlainTextFrom("<table><caption>Servers</caption><tr><th>Host</th><th>Role</th></tr><tr><td>db1</td><td>primary</td></tr></table>")
+            .Split((char[])['\n', ' '], StringSplitOptions.RemoveEmptyEntries)
+            .Should().Equal("Servers", "Host", "Role", "db1", "primary");
+
+    /// <summary>A mail laid out in a table used to arrive with its words dropped by the sanitiser.</summary>
+    [Fact]
+    public void Inbound_html_mail_laid_out_in_a_table_keeps_its_text()
+    {
+        InboundMailMessage read = MailMessageReader.Read(Message(
+            text: "x", html: "<table><tr><td><p>Ordernummer</p></td><td><p>4711</p></td></tr></table>"), Tenant, Fetched);
+
+        read.BodyHtml.Should().Be("<table><tbody><tr><td><p>Ordernummer</p></td><td><p>4711</p></td></tr></tbody></table>");
+    }
+
     /// <summary>Unterminated markup should stop the reader, not run it off the end.</summary>
     [Fact]
     public void An_unterminated_tag_ends_the_reading() =>
