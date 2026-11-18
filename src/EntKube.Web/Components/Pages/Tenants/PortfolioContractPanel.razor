@@ -6,8 +6,11 @@
 @inject CurrentActor Actor
 
 @* ═══════════════════════════════════════════════════════════════════
-   Annex B and C for a customer's portfolio, plus the people the
-   agreement requires by name.
+   Annex A, B and C for a customer's portfolio, plus the people the
+   agreement requires by name. Annex A is signed per application but
+   lives here, on the customer, because the fee, the 21st-instance
+   count and the gaps are portfolio facts — the application page has no
+   Contract button.
 
    Two panes, the same shape as the knowledge panel. Four unrelated
    things stacked in one column meant scrolling past a fee breakdown to
@@ -73,6 +76,24 @@
                 </button>
 
                 <div class="pane-group">What was agreed</div>
+
+                <button type="button" class="pane-item @(view == View.AnnexA ? "selected" : "")" data-test="annex-a-nav"
+                        @onclick="() => Show(View.AnnexA)">
+                    <span class="ico bi bi-app-indicator"></span>
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
+                            Annex A — applications
+                            @if (annexA.Any(r => r.Status == AnnexAStatus.UnderManagement && r.InForce?.Window is null))
+                            {
+                                <span class="pane-dot critical" title="An application under management has no service level or support window"></span>
+                            }
+                        </span>
+                        <span class="pane-item-sub">
+                            @annexA.Count(r => r.Status == AnnexAStatus.UnderManagement) under management · @annexA.Count(r => r.Status == AnnexAStatus.NotUnderManagement) without Annex A
+                        </span>
+                    </span>
+                    <span class="pane-count">@annexA.Count</span>
+                </button>
 
                 <button type="button" class="pane-item @(view == View.AnnexB ? "selected" : "")"
                         @onclick="() => Show(View.AnnexB)">
@@ -174,8 +195,9 @@
                     {
                         <div class="alert alert-warning py-2 small">
                             <span class="bi bi-exclamation-triangle me-1"></span>
-                            <strong>Not being charged for.</strong> Classify these, or add the amount
-                            to the price list.
+                            <strong>Not being charged for.</strong>
+                            <button class="btn btn-link btn-sm p-0 align-baseline" @onclick="() => Show(View.AnnexA)">Classify these</button>,
+                            or <button class="btn btn-link btn-sm p-0 align-baseline" @onclick="() => Show(View.AnnexC)">add the amount to the price list</button>.
                             <ul class="mb-0 mt-1">
                                 @foreach (string gap in fee.Unpriced)
                                 {
@@ -190,6 +212,9 @@
                         <EmptyState Icon="bi-receipt"
                                     Title="Nothing to charge"
                                     Message="No application is under management on this date." />
+                        <div class="text-center">
+                            <button class="btn btn-sm btn-link" @onclick="() => Show(View.AnnexA)">Put an application under management</button>
+                        </div>
                     }
                     else
                     {
@@ -225,6 +250,87 @@
                         </div>
                     }
                 </div>
+            }
+            else if (view == View.AnnexA)
+            {
+                @if (selectedAnnexApp is { } open)
+                {
+                    <div class="pane-head">
+                        <div>
+                            <button class="btn btn-sm btn-link p-0" @onclick="() => selectedAnnexApp = null">
+                                <span class="bi bi-arrow-left me-1"></span>All applications
+                            </button>
+                            <div class="fw-semibold">@open.AppName</div>
+                        </div>
+                    </div>
+                    <div class="pane-body" data-test="annex-a-editor">
+                        <AppContractPanel @key="open.AppId" TenantId="TenantId"
+                                          App="@(new Data.App { Id = open.AppId, Name = open.AppName, CustomerId = Customer.Id })"
+                                          OnChanged="RefreshAnnexAAsync" />
+                    </div>
+                }
+                else
+                {
+                    <div class="pane-head">
+                        <div>
+                            <div class="fw-semibold">Annex A — one per application</div>
+                            <div class="text-muted small">
+                                The terms each application is managed on: its service level, support window and dates.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="pane-body" data-test="annex-a-list">
+                        @if (annexA.Count == 0)
+                        {
+                            <EmptyState Icon="bi-app-indicator" Title="No applications"
+                                        Message="This customer has no applications yet." />
+                        }
+                        else
+                        {
+                            <div class="table-responsive">
+                                <table class="table table-sm align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr><th>Application</th><th>Status</th><th>In force today</th><th>On-boarded</th><th></th></tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (AnnexARow row in annexA)
+                                        {
+                                            <tr>
+                                                <td class="fw-semibold small">@row.AppName</td>
+                                                <td><span class="badge @StatusClass(row.Status)">@StatusName(row.Status)</span></td>
+                                                <td class="small">
+                                                    @if (row.InForce is { } level)
+                                                    {
+                                                        @level.Level
+                                                        @if (level.Window is { } window)
+                                                        {
+                                                            <span class="text-muted"> · @window@(level.WindowInherited ? " inherited ↑" : "")</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="badge bg-warning text-dark ms-1">No support window</span>
+                                                        }
+                                                    }
+                                                    else if (row.Status != AnnexAStatus.NotUnderManagement)
+                                                    {
+                                                        <span class="badge bg-warning text-dark">Not classified</span>
+                                                    }
+                                                </td>
+                                                <td class="small text-muted">@(row.Contract?.OnboardedAt?.ToString("yyyy-MM-dd") ?? "—")</td>
+                                                <td class="text-end">
+                                                    <button class="btn btn-sm @(row.Status == AnnexAStatus.NotUnderManagement ? "btn-primary" : "btn-outline-secondary")"
+                                                            @onclick="() => selectedAnnexApp = row">
+                                                        @(row.Status == AnnexAStatus.NotUnderManagement ? "Record Annex A" : "Open")
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
+                }
             }
             else if (view == View.AnnexB)
             {
@@ -887,7 +993,12 @@
     /// </summary>
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
-    private enum View { Overview, AnnexB, AnnexC, Contacts }
+    private enum View { Overview, AnnexA, AnnexB, AnnexC, Contacts }
+
+    // Annex A per application (moved here from the application page).
+    private List<AnnexARow> annexA = [];
+    private AnnexARow? selectedAnnexApp;
+    private (Guid, Guid) loadedFor;
 
     private bool loading = true;
     private bool busy;
@@ -980,13 +1091,49 @@
         }
     }
 
-    protected override async Task OnParametersSetAsync() => await LoadAsync();
+    // Only when the customer changes: a reload hides the whole pane (it sits inside
+    // "if (!loading)"), which would tear down an Annex A being edited.
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == (TenantId, Customer.Id))
+        {
+            return;
+        }
+
+        loadedFor = (TenantId, Customer.Id);
+        await LoadAsync();
+    }
 
     private void Show(View next)
     {
         view = next;
         editingList = null;
+        selectedAnnexApp = null;
     }
+
+    /// <summary>After an Annex A change: the list and the fee, without tearing down the open editor.</summary>
+    private async Task RefreshAnnexAAsync()
+    {
+        DateTime at = DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc);
+        annexA = await Contracts.ListAnnexAAsync(TenantId, Customer.Id, DateTime.UtcNow);
+        fee = await Contracts.CalculateBaseFeeAsync(TenantId, Customer.Id, at);
+    }
+
+    private static string StatusName(AnnexAStatus status) => status switch
+    {
+        AnnexAStatus.UnderManagement => "Under management",
+        AnnexAStatus.NotYetStarted => "Not yet started",
+        AnnexAStatus.Ended => "Ended",
+        _ => "Not under management",
+    };
+
+    private static string StatusClass(AnnexAStatus status) => status switch
+    {
+        AnnexAStatus.UnderManagement => "bg-success",
+        AnnexAStatus.NotYetStarted => "bg-info text-dark",
+        AnnexAStatus.Ended => "bg-secondary",
+        _ => "bg-light text-dark border",
+    };
 
     private async Task LoadAsync()
     {
@@ -998,6 +1145,7 @@
             DateTime at = DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc);
 
             fee = await Contracts.CalculateBaseFeeAsync(TenantId, Customer.Id, at);
+            annexA = await Contracts.ListAnnexAAsync(TenantId, Customer.Id, DateTime.UtcNow);
             agreements = await Contracts.ListPortfolioAgreementsAsync(TenantId, Customer.Id);
             contacts = await Contracts.ListContactsAsync(TenantId, Customer.Id);
             domains = await Contracts.ListEmailDomainsAsync(TenantId, Customer.Id);

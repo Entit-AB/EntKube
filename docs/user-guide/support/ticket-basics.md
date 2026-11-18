@@ -38,7 +38,9 @@ Changing it restarts the targets from that moment.
 ## The clocks
 
 Each ticket shows up to four deadlines. All of them run only inside the application's support
-hours, so a report that arrives on a Saturday starts counting on Monday morning.
+hours, so a report that arrives on a Saturday starts counting on Monday morning. The support
+hours come from the application's Annex A, kept on its customer's **Contract** page under
+**Annex A — applications**.
 
 | Clock | What it measures |
 |---|---|
