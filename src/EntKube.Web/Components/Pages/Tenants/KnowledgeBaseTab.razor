@@ -65,33 +65,58 @@
         <div class="col-lg-9">
             @if (answer is null)
             {
-                <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
                     <strong class="small">@(categoryId is null ? "All answers" : categories.FirstOrDefault(c => c.Id == categoryId)?.Name)</strong>
+                    @* Phase 11: one knowledge base — help answers and every application's runbook. *@
+                    <select class="form-select form-select-sm w-auto" aria-label="Application" value="@appFilter" @onchange="e => appFilter = e.Value?.ToString() ?? string.Empty" data-test="kb-app-filter">
+                        <option value="">Everything</option>
+                        <option value="none">Help answers only</option>
+                        @foreach ((Guid id, string name) in appNames.OrderBy(a => a.Value))
+                        {
+                            <option value="@id">@name</option>
+                        }
+                    </select>
                     @if (mayEdit)
                     {
                         <button class="btn btn-sm btn-primary" @onclick="NewAnswer" disabled="@(categories.Count == 0)"><i class="bi bi-plus me-1"></i>New answer</button>
                     }
                 </div>
                 <table class="table table-sm small align-middle">
-                    <thead class="table-light"><tr><th>Title</th><th>Language</th><th>State</th><th>For</th><th>Updated</th></tr></thead>
+                    <thead class="table-light"><tr><th>Title</th><th>Application</th><th>State</th><th>For</th><th>Updated</th></tr></thead>
                     <tbody>
-                        @foreach (KbAnswer a in answers)
+                        @foreach (KbAnswer a in Shown())
                         {
                             <tr style="cursor: pointer" @onclick="() => OpenAnswerAsync(a)">
                                 <td>@a.Title</td>
-                                <td>@a.Language</td>
+                                <td>@(a.AppId is Guid appOf ? appNames.GetValueOrDefault(appOf, "an application") + (a.Section is { } kind ? " · " + EntKube.Web.Services.Knowledge.KnowledgeService.SectionName(kind) : "") : "—")</td>
                                 <td><span class="badge @StateClass(KnowledgeBaseService.StateOf(a, DateTime.UtcNow))">@KnowledgeBaseService.StateOf(a, DateTime.UtcNow)</span></td>
                                 <td>@(a.CustomerId is Guid c ? customers.FirstOrDefault(x => x.Id == c).Name : "everyone")</td>
                                 <td class="text-muted">@a.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd") @a.UpdatedBy</td>
                             </tr>
                         }
-                        @if (answers.Count == 0) { <tr><td colspan="5" class="text-muted">No answers here yet.</td></tr> }
+                        @if (!Shown().Any()) { <tr><td colspan="5" class="text-muted">No answers here yet.</td></tr> }
                     </tbody>
                 </table>
             }
             else
             {
                 <div class="border rounded p-3 small" data-test="answer-editor">
+                    @if (answer.AppId is Guid editingApp)
+                    {
+                        <div class="alert alert-dark py-2 small" data-test="kb-app-answer">
+                            <i class="bi bi-shield-lock me-1"></i>
+                            <strong>@appNames.GetValueOrDefault(editingApp, "An application")</strong>'s knowledge — agents only.
+                            Never shown in the portal, never offered by <code>??</code>.
+                        </div>
+                    }
+                    @if (move is { Verdict: not MoveVerdict.Exact } moved)
+                    {
+                        <div class="alert alert-warning py-2 small" data-test="kb-move-verdict">
+                            <i class="bi bi-arrow-left-right me-1"></i>
+                            Moved from the application's runbook (@moved.Verdict.ToString().ToLowerInvariant()). @moved.Notes
+                            The markdown it was written in is under <strong>History</strong>.
+                        </div>
+                    }
                     <div class="row g-2 mb-2">
                         <div class="col-md-6"><label class="form-label text-muted">Title</label><input class="form-control form-control-sm" @bind="answer.Title" /></div>
                         <div class="col-md-3">
@@ -111,20 +136,39 @@
                         <div class="col-md-3">
                             <label class="form-label text-muted">Who sees it</label>
                             <select class="form-select form-select-sm" @bind="answer.Visibility">
+                                @if (answer.AppId is not null)
+                                {
+                                    <option value="@KbVisibility.Operations">Operations — agents only</option>
+                                    <option value="@KbVisibility.Archived">Archived — nobody</option>
+                                }
+                                else
+                                {
                                 <option value="@KbVisibility.Draft">Draft — nobody yet</option>
                                 <option value="@KbVisibility.Internal">Internal — agents may insert it into replies to customers (??)</option>
                                 <option value="@KbVisibility.Operations">Operations — our own operating knowledge; never offered in replies, never shown to customers</option>
                                 <option value="@KbVisibility.Public">Public — customers too</option>
                                 <option value="@KbVisibility.Archived">Archived — nobody</option>
+                                }
                             </select>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label text-muted">Publish from (Swedish time)</label>
                             <input class="form-control form-control-sm" type="datetime-local" @bind="publishLocal" @bind:format="yyyy-MM-ddTHH:mm"
-                                   disabled="@(answer.Visibility != KbVisibility.Public)" />
+                                   disabled="@(answer.Visibility != KbVisibility.Public || answer.AppId is not null)" />
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label text-muted">For</label>
+                            <label class="form-label text-muted">@(answer.AppId is null ? "For" : "Section")</label>
+                            @if (answer.AppId is not null)
+                            {
+                                <select class="form-select form-select-sm" @bind="answer.Section" aria-label="Section">
+                                    @foreach (KnowledgeSectionKind kind in Enum.GetValues<KnowledgeSectionKind>())
+                                    {
+                                        <option value="@kind">@EntKube.Web.Services.Knowledge.KnowledgeService.SectionName(kind)</option>
+                                    }
+                                </select>
+                            }
+                            else
+                            {
                             <select class="form-select form-select-sm" @bind="customerChoice">
                                 <option value="">every customer</option>
                                 @foreach ((Guid customerOptionId, string name) in customers)
@@ -132,10 +176,62 @@
                                     <option value="@customerOptionId">@name only</option>
                                 }
                             </select>
+                            }
                         </div>
                         <div class="col-md-3"><label class="form-label text-muted">Keywords</label><input class="form-control form-control-sm" @bind="answer.Keywords" /></div>
                     </div>
-                    <div @ref="editor" style="min-height: 12rem" class="bg-white mb-2"></div>
+                    @* Keyed per opening: Quill puts its toolbar BESIDE the element, where Blazor cannot
+                       see it, so reopening (Restore does, in one handler) must replace the wrapper. *@
+                    <div @key="editorSession">
+                        <div @ref="editor" style="min-height: 12rem" class="bg-white mb-2"></div>
+                    </div>
+
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-8">
+                            <input class="form-control form-control-sm" placeholder="What changed and why (optional, kept in the history)" @bind="changeSummary" aria-label="Change summary" />
+                        </div>
+                        <div class="col-md-4 text-muted d-flex align-items-center gap-2">
+                            @if (answer.Id != Guid.Empty)
+                            {
+                                <span data-test="kb-review">Confirmed @(answer.ReviewedAt?.ToLocalTime().ToString("yyyy-MM-dd") ?? "never")@(answer.ReviewedBy is { } by ? $" by {by}" : "")</span>
+                                @if (MayEditThis)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-success" OnClick="StillTrueAsync">Still true</AsyncButton>
+                                }
+                            }
+                        </div>
+                    </div>
+
+                    @if (revisions.Count > 0)
+                    {
+                        <details class="mb-2" data-test="kb-history">
+                            <summary class="text-muted">History (@revisions.Count earlier version@(revisions.Count == 1 ? "" : "s"))</summary>
+                            <ul class="list-unstyled mt-2 mb-0">
+                                @foreach (KbAnswerRevision r in revisions)
+                                {
+                                    <li class="border-top py-2">
+                                        <div class="d-flex justify-content-between">
+                                            <span class="text-muted">@r.SavedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm") · @(r.SavedBy ?? "unknown")@(r.Summary is { } why ? $" — {why}" : "")</span>
+                                            @if (MayEditThis)
+                                            {
+                                                <AsyncButton CssClass="btn-sm btn-link p-0" OnClick="() => RestoreAsync(r)">Restore</AsyncButton>
+                                            }
+                                        </div>
+                                        <div class="kb-prose border rounded p-2 mt-1 bg-white">
+                                            @if (r.BodyFormat == KbBodyFormat.Markdown)
+                                            {
+                                                @EntKube.Web.Services.Knowledge.KnowledgeMarkdown.Render(r.Body)
+                                            }
+                                            else
+                                            {
+                                                @((MarkupString)RichText.Sanitize(r.Body))
+                                            }
+                                        </div>
+                                    </li>
+                                }
+                            </ul>
+                        </details>
+                    }
 
                     @* Phase 10: related answers, shown on both; customers see only those they could open. *@
                     <div class="mb-2" data-test="related-answers">
@@ -176,14 +272,14 @@
 
                     <div class="d-flex justify-content-between">
                         <span>
-                            @if (answer.Id != Guid.Empty && mayEdit)
+                            @if (answer.Id != Guid.Empty && MayEditThis)
                             {
                                 <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteAnswerAsync">Delete</button>
                             }
                         </span>
                         <span>
-                            <button class="btn btn-sm btn-link" @onclick="CloseAnswer">@(mayEdit ? "Cancel" : "Close")</button>
-                            @if (mayEdit)
+                            <button class="btn btn-sm btn-link" @onclick="CloseAnswer">@(MayEditThis ? "Cancel" : "Close")</button>
+                            @if (MayEditThis)
                             {
                                 <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAnswerAsync">Save</AsyncButton>
                             }
@@ -209,6 +305,26 @@
     // every write handler too, since those run on the server whatever the page shows.
     private bool mayEdit = true;
     private List<KbAnswer> allAnswers = [];
+
+    // Phase 11: applications' knowledge in the same list.
+    private Dictionary<Guid, string> appNames = [];
+    private string appFilter = "";
+    private List<KbAnswerRevision> revisions = [];
+    private KnowledgeSectionMove? move;
+    private string? changeSummary;
+
+    /// <summary>
+    /// The user's two rules (2026-11-18): help answers follow the knowledge-base editor permission;
+    /// an application's runbook stays editable by anyone who can open the application.
+    /// </summary>
+    private bool MayEditThis => mayEdit || answer?.AppId is not null;
+
+    private IEnumerable<KbAnswer> Shown() => appFilter switch
+    {
+        "" => answers,
+        "none" => answers.Where(a => a.AppId is null),
+        _ => Guid.TryParse(appFilter, out Guid only) ? answers.Where(a => a.AppId == only) : answers,
+    };
     private List<KbAnswer> related = [];
     private List<(Guid Id, int Number, string Title)> usedOn = [];
     private string? error;
@@ -235,6 +351,7 @@
             customers = await Templates.CustomersAsync(TenantId);
             answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
             allAnswers = await KnowledgeBase.AnswersAsync(TenantId, null);
+            appNames = await KnowledgeBase.AppNamesAsync(TenantId);
             mayEdit = await MayEditAsync();
 
             if (OpenAnswerId is Guid wanted && wanted != openedFromAddress)
@@ -266,16 +383,38 @@
 
         editorPending = false;
 
+        // Taken before the first await: clicks are handled while Quill loads, so the answer may
+        // have been closed, or another opened on a new element, by the time it is ready.
+        Guid session = editorSession;
+        ElementReference element = editor;
+        string body = RichText.Sanitize(answer.BodyHtml);
+
         try
         {
             module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-editor.js");
+
+            if (session != editorSession || answer is null)
+            {
+                return;
+            }
+
             self ??= DotNetObjectReference.Create(this);
-            await module.InvokeVoidAsync("create", editor, self, "Write the answer…");
-            await module.InvokeVoidAsync("setHtml", editor, RichText.Sanitize(answer.BodyHtml));
+            await module.InvokeVoidAsync("create", element, self, "Write the answer…", new { tables = true });
+
+            if (session != editorSession || answer is null)
+            {
+                await module.InvokeVoidAsync("dispose", element);
+                return;
+            }
+
+            await module.InvokeVoidAsync("setHtml", element, body);
         }
-        catch (JSException ex)
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or TaskCanceledException)
         {
-            Toasts.Error($"The editor could not start: {ex.Message}");
+            if (ex is JSException)
+            {
+                Toasts.Error($"The editor could not start: {ex.Message}");
+            }
         }
     }
 
@@ -320,7 +459,7 @@
 
     private bool Refused()
     {
-        if (mayEdit)
+        if (MayEditThis)
         {
             return false;
         }
@@ -391,6 +530,9 @@
         OpenAnswer(a);
         related = a.Id == Guid.Empty ? [] : await KnowledgeBase.RelatedAsync(TenantId, a.Id);
         usedOn = a.Id == Guid.Empty ? [] : await KnowledgeBase.TicketsUsingAsync(TenantId, a.Id);
+        revisions = a.Id == Guid.Empty ? [] : await KnowledgeBase.RevisionsAsync(TenantId, a.Id);
+        move = a.Id == Guid.Empty ? null : await KnowledgeBase.MoveOfAsync(TenantId, a.Id);
+        changeSummary = null;
     }
 
     private void OpenAnswer(KbAnswer a)
@@ -399,11 +541,15 @@
         {
             Id = a.Id, Title = a.Title, CategoryId = a.CategoryId, BodyHtml = a.BodyHtml, Language = a.Language,
             Visibility = a.Visibility, PublishAt = a.PublishAt, CustomerId = a.CustomerId, Keywords = a.Keywords,
+            AppId = a.AppId, Section = a.Section, ReviewedAt = a.ReviewedAt, ReviewedBy = a.ReviewedBy,
         };
         publishLocal = a.PublishAt is DateTime p ? BusinessCalendar.ToLocal(p) : null;
         customerChoice = a.CustomerId?.ToString() ?? "";
+        editorSession = Guid.NewGuid();
         editorPending = true;
     }
+
+    private Guid editorSession;
 
     private async Task CloseAnswer()
     {
@@ -427,7 +573,7 @@
 
         try
         {
-            KbAnswer saved = await KnowledgeBase.SaveAnswerAsync(TenantId, answer, await ActorService.NameAsync());
+            KbAnswer saved = await KnowledgeBase.SaveAnswerAsync(TenantId, answer, await ActorService.NameAsync(), default, changeSummary);
             await KnowledgeBase.SetRelatedAsync(TenantId, saved.Id, [.. related.Select(r => r.Id)]);
             Toasts.Success("Saved.");
             await CloseAnswer();
@@ -437,6 +583,29 @@
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
             Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task StillTrueAsync()
+    {
+        if (answer is null || Refused()) return;
+
+        await KnowledgeBase.MarkReviewedAsync(TenantId, answer.Id, await ActorService.NameAsync(), DateTime.UtcNow);
+        answer.ReviewedAt = DateTime.UtcNow;
+        answer.ReviewedBy = await ActorService.NameAsync();
+        Toasts.Success("Confirmed as still true.");
+    }
+
+    private async Task RestoreAsync(KbAnswerRevision r)
+    {
+        if (answer is null || Refused()) return;
+
+        if (await KnowledgeBase.RestoreAsync(TenantId, answer.Id, r.Id, await ActorService.NameAsync()) is { } restored)
+        {
+            Toasts.Success("Earlier version restored; what it said before is kept in the history.");
+            await CloseAnswer();
+            await OpenAnswerAsync(restored);
+            answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
         }
     }
 

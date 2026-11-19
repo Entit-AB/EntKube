@@ -4,13 +4,23 @@ using Microsoft.AspNetCore.Components;
 namespace EntKube.Web.Services.Knowledge;
 
 /// <summary>
-/// Renders a knowledge section's markdown for display.
+/// Renders the markdown an application's knowledge was written in before the knowledge merge
+/// (helpdesk phase 11): a section not moved yet, and the markdown versions in a moved
+/// section's history. New text is rich text and goes through <c>RichText</c> instead.
 ///
-/// <para><b>Raw HTML is disabled, deliberately.</b> This text is written by operators and
-/// will end up in front of customers — §19 hands the runbook over at off-boarding, and the
-/// portal is the obvious next place to show it. Markdig passes raw HTML straight through by
-/// default, which would make a knowledge section a script-injection point against everybody
-/// who reads it. <c>DisableHtml</c> escapes it instead, so a pasted tag shows as text.</para>
+/// <para><b>Raw HTML is disabled, deliberately.</b> This text was written by operators, often
+/// pasted from a document written somewhere else, and §19 hands the runbook over at
+/// off-boarding. Markdig passes raw HTML straight through by default, which would make a
+/// section a script-injection point against everybody who reads it. <c>DisableHtml</c>
+/// escapes it instead, so a pasted tag shows as text.</para>
+///
+/// <para><b>And the output is sanitised, because <c>DisableHtml</c> is not enough.</b> The
+/// advanced extensions include generic attributes, so <c>[x](https://a){onclick=…}</c> or
+/// <c># Title {onmouseover=…}</c> rendered a live event handler, and Markdig filters no link
+/// scheme, so <c>[x](javascript:…)</c> rendered a live link. The HTML Markdig produces goes
+/// through the same allow-list as mail and answers (<c>RichText.Sanitize</c>): its tags, only
+/// <c>href</c>, only http, https and mailto. Task-list checkboxes do not survive that; the
+/// item text does.</para>
 ///
 /// <para>Everything else is on: tables, task lists and fenced code, because a runbook is
 /// mostly commands and checklists and a renderer that cannot show them is not worth
@@ -27,7 +37,7 @@ public static class KnowledgeMarkdown
     public static MarkupString Render(string? markdown) =>
         string.IsNullOrWhiteSpace(markdown)
             ? new MarkupString("")
-            : new MarkupString(Markdown.ToHtml(markdown, Pipeline));
+            : new MarkupString(EntKube.Web.Services.Tickets.RichText.Sanitize(Markdown.ToHtml(markdown, Pipeline)));
 
     /// <summary>
     /// The first line or so, for a navigator entry — enough to tell two sections apart

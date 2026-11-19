@@ -99,6 +99,54 @@ public class QuickSearchTests : IDisposable
             .Should().Equal("Half written", "Remote access", "VPN setup");
     }
 
+    /// <summary>
+    /// An application's runbook section is found like any answer — the person searching is an
+    /// agent — and comes back with its application's name, so the queue can say whose it is.
+    /// </summary>
+    [Fact]
+    public async Task A_runbook_section_is_found_with_its_applications_name()
+    {
+        Guid journal = Guid.NewGuid();
+        db.Apps.Add(new App { Id = journal, CustomerId = vard, Name = "Journalen" });
+        db.SaveChanges();
+
+        KbAnswer runbook = await kb.SaveAnswerAsync(ours, new KbAnswer
+        {
+            Title = "Restarting the vpn gateway", BodyHtml = "<p>Scale to zero.</p>", AppId = journal,
+            Section = KnowledgeSectionKind.Runbook, Visibility = KbVisibility.Operations, Language = "sv",
+            CategoryId = await kb.EnsureAppCategoryAsync(ours),
+        }, "nils");
+
+        QuickResults found = await quick.SearchAsync(ours, "vpn gateway");
+
+        found.Answers.Select(a => a.Id).Should().Equal(runbook.Id);
+        found.AppNames.Should().Equal(new Dictionary<Guid, string> { [journal] = "Journalen" });
+        (await quick.SearchAsync(theirs, "vpn gateway")).Answers.Should().BeEmpty("it is another tenant's runbook");
+    }
+
+    /// <summary>
+    /// An application's name is only ever looked up among this tenant's applications. A row
+    /// naming another tenant's application cannot be made through the service; planted, it
+    /// still does not make quick search say that application's name.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_application_is_never_named()
+    {
+        Guid remissen = Guid.NewGuid();
+        db.Apps.Add(new App { Id = remissen, CustomerId = theirVard, Name = "Remissen" });
+        db.KbAnswers.Add(new KbAnswer
+        {
+            Id = Guid.NewGuid(), TenantId = ours, CategoryId = await kb.EnsureAppCategoryAsync(ours), Title = "Planted vpn runbook",
+            AppId = remissen, CustomerId = theirVard, Section = KnowledgeSectionKind.Runbook, Visibility = KbVisibility.Operations,
+        });
+        db.SaveChanges();
+
+        QuickResults found = await quick.SearchAsync(ours, "planted vpn");
+
+        found.Answers.Should().ContainSingle("the guard under test is the name, not the answer");
+        found.AppNames.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_ticket_query_finds_nothing_beyond_tickets()
     {

@@ -501,8 +501,37 @@ The merge ships in three releases (full plan from a judged design: `.git/kb-merg
   - Bundle v22 with revisions and the move ledger.
   - The converter, in dry run only: startup logs per tenant how sections would convert.
   - Ships with the sanitiser change that keeps tables (#478).
-- **B, the move:** the startup mover, claimed by a ledger, verified and falling back to the markdown
-  as preformatted text. The panel and the knowledge-base tab switch over.
+- **B, the move (this release):**
+  - The startup mover. Each section moves in its own transaction, claimed by a ledger row; the
+    answer keeps the section's id, dates, author and review stamp, its revisions come along as
+    markdown, and one more revision records how it converted. An installation that is still on
+    release A and edits a moved section is reconciled at the next start: the edit is appended to the
+    history, never applied over the answer, and the ledger says *diverged*. A section whose
+    application is no longer the tenant's is kept, archived, as a tenant-wide answer (*detached*).
+    The older build's version is kept whole — its title too, which Restore applies, and its section is
+    named — because it could rename a section without touching the body. A restore runs the mover
+    again and says separately how the move went: a move that falls short is not a failed restore.
+  - One section or tenant that cannot be moved or carried across is logged, counted as failed and
+    retried next start; it no longer stops every later tenant on every start.
+  - Titles are cut to 300 characters on a character boundary (a half surrogate pair is refused by
+    Npgsql, so that section would never have moved).
+  - The application's Knowledge button reads and writes the answers (rich text, History with
+    Restore, Still true, the move's verdict). A section not moved yet is shown read-only.
+  - The knowledge-base tab lists every application's part, with an Application filter and column;
+    an application's answer offers only Operations or Archived and a Section instead of *For*.
+  - The health meter reads the answers, and the old rows only where no ledger row exists. Every
+    section now has the same 90-day review interval.
+  - Quick search labels an application's answer *operations · application*.
+  - The old section editing in `KnowledgeService` is gone.
+  - **Found on the way: markdown was rendered unsanitised.** `DisableHtml` escaped raw tags, but
+    Markdig's generic attributes rendered `{onclick=…}` on links and headings as live handlers and it
+    filters no link scheme, so `javascript:` links were live too. This was true of the old runbook
+    panel on main; release B shows the markdown in more places (History). The rendered HTML now goes
+    through the same allow-list as mail and answers.
+  - **Deploy only after release A has run on every instance**: an instance on an older release
+    still writes the old tables, which is what the reconciliation is for, not a way to run.
+  - Still to check in a real browser: a table pasted into the editor survives a save and reload
+    (Quill's table module; bUnit cannot see it).
 - **C, at least a release later:** drop the old tables, only when every installation logs zero left
   to move.
 

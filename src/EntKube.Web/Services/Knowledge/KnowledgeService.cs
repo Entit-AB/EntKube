@@ -96,6 +96,21 @@ public class KnowledgeService(
     public static readonly KnowledgeSectionKind[] ExpectedSections =
         [KnowledgeSectionKind.Architecture, KnowledgeSectionKind.Runbook];
 
+    /// <summary>A section's name as both the application's panel and the knowledge base show it.</summary>
+    public static string SectionName(KnowledgeSectionKind kind) => kind switch
+    {
+        KnowledgeSectionKind.Architecture => "Architecture",
+        KnowledgeSectionKind.Runbook => "Runbook",
+        KnowledgeSectionKind.Decisions => "Decisions",
+        KnowledgeSectionKind.KnownDefects => "Known defects",
+        KnowledgeSectionKind.Access => "Access",
+        KnowledgeSectionKind.Recovery => "Backup and recovery",
+        _ => "Notes",
+    };
+
+    /// <summary>How long a section stays "current" after it was last confirmed (§10.2).</summary>
+    public const int ReviewIntervalDays = 90;
+
     /// <summary>
     /// Whether an application is this tenant's.
     ///
@@ -107,146 +122,27 @@ public class KnowledgeService(
         ApplicationDbContext db, Guid tenantId, Guid appId, CancellationToken ct) =>
         db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
 
-    public async Task<List<KnowledgeSection>> GetSectionsAsync(
+    /// <summary>
+    /// An application's old runbook sections that have not moved into the knowledge base yet — no
+    /// ledger row. Normally none: the mover runs at startup. Shown read-only, never edited here,
+    /// because an edit to the old row is exactly what the mover would then have to reconcile.
+    /// </summary>
+    public async Task<List<KnowledgeSection>> UnmovedSectionsAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.KnowledgeSections.AsNoTracking()
-            .Where(s => s.TenantId == tenantId && s.AppId == appId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId && !db.KnowledgeSectionMoves.Any(m => m.SectionId == s.Id))
             .OrderBy(s => s.Kind)
             .ThenBy(s => s.Title)
             .ToListAsync(ct);
     }
 
-    public async Task<KnowledgeSection?> GetSectionAsync(
-        Guid tenantId, Guid sectionId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        return await db.KnowledgeSections
-            .Include(s => s.Revisions.OrderByDescending(r => r.SavedAt))
-            .AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
-    }
-
-    /// <summary>
-    /// Saves a section, keeping what it said before.
-    ///
-    /// <para>The previous body becomes a revision rather than being overwritten. A
-    /// runbook that changed and cannot say when or why is not evidence of anything at
-    /// the next review — and §19 hands this material over at off-boarding, where its
-    /// history is part of what is handed over.</para>
-    /// </summary>
-    public async Task<KnowledgeSection> SaveSectionAsync(
-        Guid tenantId,
-        Guid appId,
-        Guid? sectionId,
-        KnowledgeSectionKind kind,
-        string title,
-        string body,
-        string? author,
-        string? changeSummary,
-        CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        // A section id belonging to another tenant finds nothing, so the save goes on to
-        // create one of our own — which is what already happened when the section had been
-        // deleted while the editor was open. What it must not do is reach their row: the body
-        // that was there would have been pushed into a revision and their runbook replaced,
-        // still under their application, by us.
-        KnowledgeSection? section = sectionId is Guid id
-            ? await db.KnowledgeSections
-                .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct)
-            : null;
-
-        if (section is null)
-        {
-            if (!await AppIsTenantsAsync(db, tenantId, appId, ct))
-            {
-                throw new InvalidOperationException(
-                    "Application not found, or it is not this tenant's.");
-            }
-
-            section = new KnowledgeSection
-            {
-                Id = Guid.NewGuid(),
-                TenantId = tenantId,
-                AppId = appId,
-                Kind = kind,
-                Title = title,
-                Body = body,
-                UpdatedBy = author,
-                ReviewedAt = DateTime.UtcNow,
-                ReviewedBy = author,
-            };
-
-            db.KnowledgeSections.Add(section);
-            await db.SaveChangesAsync(ct);
-
-            return section;
-        }
-
-        if (section.Body != body)
-        {
-            db.KnowledgeRevisions.Add(new KnowledgeRevision
-            {
-                Id = Guid.NewGuid(),
-                SectionId = section.Id,
-                Body = section.Body,
-                SavedAt = DateTime.UtcNow,
-                SavedBy = author,
-                Summary = changeSummary,
-            });
-        }
-
-        section.Kind = kind;
-        section.Title = title;
-        section.Body = body;
-        section.UpdatedAt = DateTime.UtcNow;
-        section.UpdatedBy = author;
-
-        await db.SaveChangesAsync(ct);
-        return section;
-    }
-
-    /// <summary>
-    /// Records that someone has confirmed a section is still true. Separate from editing it
-    /// on purpose: fixing a typo is not a review, and the fee is paid for the confirmation.
-    /// </summary>
-    public async Task MarkReviewedAsync(
-        Guid tenantId, Guid sectionId, string? reviewer, DateTime at,
-        CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        KnowledgeSection? section = await db.KnowledgeSections
-            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
-
-        if (section is not null)
-        {
-            section.ReviewedAt = at;
-            section.ReviewedBy = reviewer;
-            await db.SaveChangesAsync(ct);
-        }
-    }
-
-    public async Task DeleteSectionAsync(
-        Guid tenantId, Guid sectionId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        // FindAsync takes a key and cannot carry a predicate, which is how this came to have
-        // no tenant in it.
-        KnowledgeSection? section = await db.KnowledgeSections
-            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
-        if (section is not null)
-        {
-            db.KnowledgeSections.Remove(section);
-            await db.SaveChangesAsync(ct);
-        }
-    }
+    // The old section editing (Get/Save/MarkReviewed/DeleteSection) went with the knowledge merge:
+    // a section is now written, confirmed and deleted as a knowledge-base answer
+    // (KnowledgeBaseService), and the old rows are only read — by the mover, the meter and the
+    // read-only "not moved yet" list above — until release C drops them.
 
     public async Task<AppKnowledgeProfile?> GetProfileAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default)
@@ -464,9 +360,20 @@ public class KnowledgeService(
 
         List<KnowledgeGap> gaps = [];
 
-        List<KnowledgeSection> sections = await db.KnowledgeSections.AsNoTracking()
-            .Where(s => s.TenantId == tenantId && s.AppId == appId)
-            .ToListAsync(ct);
+        // Since the knowledge merge (phase 11) an application's sections are its knowledge-base
+        // answers — archived ones do not count. A section not moved yet still counts from the old
+        // store, so it is never reported as "not written" while it waits to move.
+        List<(KnowledgeSectionKind Kind, string Title, DateTime? ReviewedAt, DateTime CreatedAt, int Interval)> sections =
+        [
+            .. (await db.KbAnswers.AsNoTracking()
+                .Where(a => a.TenantId == tenantId && a.AppId == appId && a.Section != null && a.Visibility != KbVisibility.Archived)
+                .Select(a => new { Kind = a.Section!.Value, a.Title, a.ReviewedAt, a.CreatedAt })
+                .ToListAsync(ct)).Select(a => (a.Kind, a.Title, a.ReviewedAt, a.CreatedAt, ReviewIntervalDays)),
+            .. (await db.KnowledgeSections.AsNoTracking()
+                .Where(s => s.TenantId == tenantId && s.AppId == appId && !db.KnowledgeSectionMoves.Any(m => m.SectionId == s.Id))
+                .Select(s => new { s.Kind, s.Title, s.ReviewedAt, s.CreatedAt, s.ReviewIntervalDays })
+                .ToListAsync(ct)).Select(s => (s.Kind, s.Title, s.ReviewedAt, s.CreatedAt, s.ReviewIntervalDays)),
+        ];
 
         foreach (KnowledgeSectionKind expected in ExpectedSections)
         {
@@ -488,9 +395,9 @@ public class KnowledgeService(
             }
         }
 
-        foreach (KnowledgeSection section in sections)
+        foreach (var section in sections)
         {
-            DateTime due = (section.ReviewedAt ?? section.CreatedAt).AddDays(section.ReviewIntervalDays);
+            DateTime due = (section.ReviewedAt ?? section.CreatedAt).AddDays(section.Interval);
 
             if (due <= asOf)
             {

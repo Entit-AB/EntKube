@@ -133,12 +133,19 @@ else
                 @if (quick.Answers.Count > 0)
                 {
                     <div>
-                        <span class="text-muted me-1">Help answers:</span>
+                        <span class="text-muted me-1">Knowledge:</span>
                         @foreach (KbAnswer a in quick.Answers)
                         {
                             <a class="btn btn-sm btn-outline-secondary py-0 me-1 mb-1" href="@AnswerHref(a)">
                                 <i class="bi bi-book me-1"></i>@a.Title
-                                @if (a.Visibility != KbVisibility.Public) { <span class="text-muted">(@a.Visibility.ToString().ToLowerInvariant())</span> }
+                                @if (a.AppId is Guid app)
+                                {
+                                    <span class="text-muted" data-test="quick-runbook">(operations · @(quick.AppNames.GetValueOrDefault(app) ?? "an application"))</span>
+                                }
+                                else if (a.Visibility != KbVisibility.Public)
+                                {
+                                    <span class="text-muted">(@a.Visibility.ToString().ToLowerInvariant())</span>
+                                }
                             </a>
                         }
                     </div>
