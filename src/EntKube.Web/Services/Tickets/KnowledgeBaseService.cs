@@ -311,6 +311,13 @@ public partial class KnowledgeBaseService(IDbContextFactory<SupportDbContext> db
             .OrderBy(a => a.Section).ThenBy(a => a.Title).ToListAsync(ct);
     }
 
+    /// <summary>How an answer came into the knowledge base from a runbook section, if it did — for the banner.</summary>
+    public async Task<KnowledgeSectionMove?> MoveOfAsync(Guid tenantId, Guid answerId, CancellationToken ct = default)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.KnowledgeSectionMoves.AsNoTracking().FirstOrDefaultAsync(m => m.AnswerId == answerId && m.TenantId == tenantId, ct);
+    }
+
     /// <summary>The names of this tenant's applications that have knowledge, for labelling lists.</summary>
     public async Task<Dictionary<Guid, string>> AppNamesAsync(Guid tenantId, CancellationToken ct = default)
     {

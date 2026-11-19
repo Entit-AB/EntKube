@@ -4,8 +4,9 @@ The knowledge base holds help answers: published ones customers read in the port
 articles**, and internal ones you insert into replies. Open it under **Support › Ticket tools ›
 Knowledge base**.
 
-It's separate from an application's runbook (**Knowledge** on the application), which is our own
-operating knowledge and is never shown to customers.
+It also holds each application's runbook: what's written under **Knowledge** on an application
+is the same set of answers, listed here under that application and never shown to customers. See
+[An application's knowledge](#an-applications-knowledge).
 
 ## Categories
 
@@ -29,6 +30,40 @@ The body is cleaned when it's saved, exactly as a mail is (see [Replying by mail
 formatting, headings, lists, quotes, code, links and plain tables stay; images, colours and scripts
 go. Attachments on
 answers aren't supported yet.
+
+## History and review
+
+Every change to an answer keeps what it said before. Write a line in **What changed and why** to keep
+with it. Open **History** under the editor to read earlier versions; **Restore** makes one current
+again, and what the answer said until then is kept too.
+
+**Still true** records that you read the answer and it still holds. It doesn't change the text or the
+last-changed date. The answer shows when it was last confirmed and by whom.
+
+## An application's knowledge
+
+An application's runbook, architecture notes and other written sections are answers too. They're
+written on the application (**Knowledge**, under *Written down*) or here, and are the same rows in
+both places:
+
+- **Agents only.** They're **Operations** (or **Archived** once retired), never offered by `??`, never
+  in the portal, and can't be given on a ticket. The editor offers no other visibility for them.
+- **Listed under their application.** The **Application** filter above the list shows *Everything*,
+  *Help answers only*, or one application's part. The *Application* column says whose an answer is.
+- **A section, not a customer.** Instead of *For*, such an answer has a **Section** (Runbook,
+  Architecture, Decisions, Known defects, Access, Backup and recovery, Notes). Its customer is always
+  the application's.
+- **Reviewed every 90 days.** An application's section that nobody has confirmed with **Still true**
+  for 90 days counts against the application's knowledge checks.
+
+Sections written before this release were in markdown; EntKube moved them in at startup, keeping
+their history and review stamps. A moved section that didn't convert exactly says so in a yellow
+banner. The markdown it was written in is kept under **History**, as the entry saved by *EntKube
+(moved to the knowledge base)* at the move, above the section's own earlier versions. A section not moved yet shows on
+the application as *not moved to the knowledge base yet*, read-only, until EntKube's next start.
+
+In quick search (the ticket queue's search box), an application's section is marked
+*operations · application name*.
 
 ## Inserting an answer into a reply
 
@@ -63,6 +98,10 @@ By default every member of the tenant may edit the knowledge base. To restrict i
 such roles, and global administrators, can add, change or delete categories and answers. Everyone
 else sees *Only roles granted Support knowledge base: Edit change answers* and can read.
 Granting *View* alone doesn't restrict anything.
+
+An application's sections are the exception: anyone who can open the application can edit them, here
+or on the application, whatever the knowledge-base role says. A runbook is kept current by the people
+operating the application.
 
 ## Not supported
 

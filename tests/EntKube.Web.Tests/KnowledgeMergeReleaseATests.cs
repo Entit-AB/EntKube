@@ -467,7 +467,7 @@ public class KnowledgeMergeReleaseATests : IDisposable
         Section(theirs, theirApp, "Theirs.");
         int answersBefore = db.KbAnswers.Count();
 
-        List<KnowledgeMergeForecast> forecast = await new KnowledgeMerge(new TestDbContextFactory(connection)).ForecastAsync();
+        List<KnowledgeMergeForecast> forecast = await new KnowledgeMerge(new TestDbContextFactory(connection), Microsoft.Extensions.Logging.Abstractions.NullLogger<KnowledgeMerge>.Instance).ForecastAsync();
 
         forecast.Single(f => f.TenantId == ours).Should().BeEquivalentTo(new { Exact = 1, Mapped = 1, Fallback = 0, Detached = 1 });
         forecast.Single(f => f.TenantId == theirs).Exact.Should().Be(1);
@@ -483,7 +483,7 @@ public class KnowledgeMergeReleaseATests : IDisposable
         db.KnowledgeSectionMoves.Add(new KnowledgeSectionMove { SectionId = id, TenantId = ours, AppId = vardApp, AnswerId = id });
         db.SaveChanges();
 
-        (await new KnowledgeMerge(new TestDbContextFactory(connection)).ForecastAsync()).Should().BeEmpty();
+        (await new KnowledgeMerge(new TestDbContextFactory(connection), Microsoft.Extensions.Logging.Abstractions.NullLogger<KnowledgeMerge>.Instance).ForecastAsync()).Should().BeEmpty();
     }
 
     // ───────────────────────────── Deletion and the wipe ─────────────────────────────

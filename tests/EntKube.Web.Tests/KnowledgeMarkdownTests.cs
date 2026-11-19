@@ -50,6 +50,32 @@ public class KnowledgeMarkdownTests
         html.Should().Contain("&lt;img");
     }
 
+    /// <summary>
+    /// <b>DisableHtml was not the whole defence.</b> Markdig's generic attributes put a live
+    /// event handler on a link or a heading, and it filters no link scheme — both rendered as
+    /// markup a reader's browser would run. What is rendered goes through the allow-list.
+    /// </summary>
+    [Theory]
+    [InlineData("[runbook](https://example.org){onclick=\"alert(1)\"}", "onclick")]
+    [InlineData("# Restore {onmouseover=alert(1)}", "onmouseover")]
+    [InlineData("[click](javascript:alert(1))", "javascript:")]
+    [InlineData("<javascript:alert(1)>", "href=\"javascript")] // the text may stay; the link may not
+    public void Markdown_cannot_carry_a_handler_or_a_script_link(string markdown, string forbidden)
+    {
+        string html = KnowledgeMarkdown.Render(markdown).Value;
+
+        html.Should().NotContain(forbidden);
+    }
+
+    [Fact]
+    public void A_safe_link_still_renders_as_a_link()
+    {
+        string html = KnowledgeMarkdown.Render("[docs](https://example.org/runbook)").Value;
+
+        html.Should().Contain("<a href=\"https://example.org/runbook\"").And.Contain(">docs</a>");
+        html.Should().Contain("rel=\"noopener", "the allow-list also stops the opened page reaching back");
+    }
+
     [Fact]
     public void Nothing_renders_as_nothing() =>
         KnowledgeMarkdown.Render(null).Value.Should().BeEmpty();

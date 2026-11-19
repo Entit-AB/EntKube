@@ -50,6 +50,11 @@ public enum KnowledgeSectionKind
 ///
 /// <para>Kept as markdown with a revision history, because a runbook that changed and
 /// cannot say when or why is not evidence of anything at the next quarterly review.</para>
+///
+/// <para><b>Legacy since the knowledge merge</b> (helpdesk phase 11). Sections are now
+/// <see cref="KbAnswer"/>s with <see cref="KbAnswer.AppId"/> set; <c>KnowledgeMerge</c> moves
+/// these rows in at startup and nothing edits them any more. Read only by the mover, the
+/// health meter and the read-only "not moved yet" list, until release C drops the table.</para>
 /// </summary>
 public class KnowledgeSection
 {

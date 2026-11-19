@@ -950,4 +950,72 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         tab.WaitForAssertion(() => tab.Find("[data-test=kb-read-only]").TextContent.Should().Contain("Support knowledge base: Edit"));
         tab.FindAll("button").Should().NotContain(b => b.TextContent.Contains("New answer") || b.TextContent.Contains("Add category"));
     }
+
+    /// <summary>The knowledge base with an editor role nobody here holds — help answers become read-only.</summary>
+    private async Task<(KnowledgeBaseService Kb, KbAnswer Help, KbAnswer Runbook)> KnowledgeBaseWithAnEditorRoleAndARunbook()
+    {
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory general = await kb.SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        KbAnswer help = await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Reset your password", CategoryId = general.Id,
+            Visibility = KbVisibility.Public, Language = "sv", BodyHtml = "<p>x</p>" }, "karin");
+        KbAnswer runbook = await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "Restarting the journal", AppId = appId,
+            Section = KnowledgeSectionKind.Runbook, CategoryId = await kb.EnsureAppCategoryAsync(tenantId),
+            Visibility = KbVisibility.Operations, Language = "sv", BodyHtml = "<p>Scale to zero.</p>" }, "karin");
+
+        Guid editors = Guid.NewGuid(), agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = editors, TenantId = tenantId, Name = "KB editors",
+            PermissionsJson = $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)AccessLevel.Edit}}}" });
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+
+        return (kb, help, runbook);
+    }
+
+    private IRenderedComponent<KnowledgeBaseTab> RenderKnowledgeBaseOpenAt(Guid answerId)
+    {
+        JSInterop.Mode = JSRuntimeMode.Loose;
+        return Render<KnowledgeBaseTab>(p => p.Add(c => c.TenantId, tenantId).Add(c => c.OpenAnswerId, answerId));
+    }
+
+    /// <summary>
+    /// The two editing rules (docs/helpdesk.md, phase 11): help answers follow the
+    /// knowledge-base editor role; an application's runbook stays editable by whoever can
+    /// open the application — here as on the application's Knowledge button.
+    /// </summary>
+    [Fact]
+    public async Task A_runbook_stays_editable_where_help_answers_are_read_only()
+    {
+        (KnowledgeBaseService _, KbAnswer help, KbAnswer runbook) = await KnowledgeBaseWithAnEditorRoleAndARunbook();
+
+        IRenderedComponent<KnowledgeBaseTab> onRunbook = RenderKnowledgeBaseOpenAt(runbook.Id);
+        onRunbook.WaitForAssertion(() => onRunbook.Find("[data-test=kb-app-answer]").TextContent.Should().Contain("Journalportalen"));
+        onRunbook.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Still true");
+        onRunbook.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Cancel", "it opens for editing");
+
+        IRenderedComponent<KnowledgeBaseTab> onHelp = RenderKnowledgeBaseOpenAt(help.Id);
+        onHelp.WaitForAssertion(() => onHelp.FindAll("button").Should().Contain(b => b.TextContent.Trim() == "Close"));
+        onHelp.FindAll("button").Should().NotContain(b => b.TextContent.Trim() == "Still true");
+        onHelp.FindAll("[data-test=kb-app-answer]").Should().BeEmpty();
+    }
+
+    /// <summary>An application's answer can only be kept for agents or retired — the form offers nothing else.</summary>
+    [Fact]
+    public async Task A_runbook_offers_only_operations_or_archived_and_the_list_can_show_one_application()
+    {
+        (KnowledgeBaseService _, KbAnswer _, KbAnswer runbook) = await KnowledgeBaseWithAnEditorRoleAndARunbook();
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBaseOpenAt(runbook.Id);
+        tab.WaitForAssertion(() => tab.Find("[data-test=kb-app-answer]"));
+
+        AngleSharp.Dom.IElement visibility = tab.FindAll("select").Single(s => s.QuerySelectorAll("option").Any(o => o.TextContent.StartsWith("Operations")));
+        visibility.QuerySelectorAll("option").Select(o => o.GetAttribute("value"))
+            .Should().BeEquivalentTo([nameof(KbVisibility.Operations), nameof(KbVisibility.Archived)]);
+
+        IRenderedComponent<KnowledgeBaseTab> list = RenderKnowledgeBase();
+        list.WaitForAssertion(() => list.Find("[data-test=kb-app-filter]").QuerySelectorAll("option").Select(o => o.TextContent)
+            .Should().Contain("Journalportalen"));
+    }
 }

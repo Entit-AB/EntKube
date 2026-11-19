@@ -31,6 +31,9 @@ public class KbAnswerReadersRatchetTests
     [
         "Services/BackupService.cs:ExportAsync",
         "Services/BackupService.cs:ImportAsync",
+        "Services/Knowledge/KnowledgeMerge.cs:ConvergeOneAsync",
+        "Services/Knowledge/KnowledgeMerge.cs:MoveOneAsync",
+        "Services/Knowledge/KnowledgeService.cs:GetGapsAsync",
         "Services/TenantService.cs:DeleteAppKnowledgeAsync",
         "Services/TenantService.cs:DeleteTenantAsync",
         "Services/Tickets/KnowledgeBaseService.cs:AnswersAsync",

@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Knowledge;
 using EntKube.Web.Services.Support;
+using EntKube.Web.Services.Tickets;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -15,6 +16,10 @@ namespace EntKube.Web.Tests;
 /// defending are that an edit does not destroy what was there before, that a review is a
 /// distinct act from an edit, and that the gaps the agreement cares about are reported
 /// before somebody needs them at three in the morning.</para>
+///
+/// <para>Since the knowledge merge the written sections are the application's
+/// knowledge-base answers, so those are written through <see cref="KnowledgeBaseService"/>
+/// here; what is asked of them — history, review, gaps, tenancy — has not changed.</para>
 /// </summary>
 public class KnowledgeServiceTests : IDisposable
 {
@@ -23,6 +28,7 @@ public class KnowledgeServiceTests : IDisposable
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
     private readonly KnowledgeService knowledge;
+    private readonly KnowledgeBaseService kb;
 
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid customerId = Guid.NewGuid();
@@ -44,6 +50,7 @@ public class KnowledgeServiceTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         knowledge = new KnowledgeService(factory, new ContractService(factory));
+        kb = new KnowledgeBaseService(factory);
     }
 
     public void Dispose()
@@ -78,9 +85,22 @@ public class KnowledgeServiceTests : IDisposable
         db.SaveChanges();
     }
 
-    private Task<KnowledgeSection> Write(
+    /// <summary>Writes a section of this application: an agents-only answer of the knowledge base.</summary>
+    private async Task<KbAnswer> Write(
         KnowledgeSectionKind kind, string title, string body = "Text.") =>
-        knowledge.SaveSectionAsync(tenantId, appId, null, kind, title, body, "nils", null);
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer
+        {
+            Title = title, BodyHtml = $"<p>{body}</p>", AppId = appId, Section = kind,
+            Visibility = KbVisibility.Operations, Language = "sv", CategoryId = await kb.EnsureAppCategoryAsync(tenantId),
+        }, "nils");
+
+    /// <summary>The same section with a new text, as the editor would send it.</summary>
+    private static KbAnswer Edited(KbAnswer section, string body) => new()
+    {
+        Id = section.Id, Title = section.Title, AppId = section.AppId, Section = section.Section,
+        Visibility = section.Visibility, Language = section.Language, CategoryId = section.CategoryId,
+        BodyHtml = $"<p>{body}</p>",
+    };
 
     // ---- Sections and their history ----------------------------------------------------
 
@@ -92,32 +112,27 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Editing_a_section_keeps_the_previous_version()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "First.");
+        KbAnswer section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "First.");
 
-        await knowledge.SaveSectionAsync(
-            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Second.",
-            "nils", "Corrected the restore order.");
+        await kb.SaveAnswerAsync(tenantId, Edited(section, "Second."), "nils", default, "Corrected the restore order.");
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
+        KbAnswer? loaded = await kb.GetAsync(tenantId, section.Id);
+        List<KbAnswerRevision> revisions = await kb.RevisionsAsync(tenantId, section.Id);
 
-        loaded!.Body.Should().Be("Second.");
-        loaded.Revisions.Should().ContainSingle();
-        loaded.Revisions[0].Body.Should().Be("First.");
-        loaded.Revisions[0].Summary.Should().Be("Corrected the restore order.");
+        loaded!.BodyHtml.Should().Be("<p>Second.</p>");
+        revisions.Should().ContainSingle();
+        revisions[0].Body.Should().Be("<p>First.</p>");
+        revisions[0].Summary.Should().Be("Corrected the restore order.");
     }
 
     [Fact]
     public async Task Saving_the_same_text_does_not_add_a_revision()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "Same.");
+        KbAnswer section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "Same.");
 
-        await knowledge.SaveSectionAsync(
-            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Same.",
-            "nils", null);
+        await kb.SaveAnswerAsync(tenantId, Edited(section, "Same."), "nils");
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
-
-        loaded!.Revisions.Should().BeEmpty();
+        (await kb.RevisionsAsync(tenantId, section.Id)).Should().BeEmpty();
     }
 
     /// <summary>
@@ -127,15 +142,16 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_review_is_recorded_separately_from_an_edit()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Architecture, "Architecture");
+        KbAnswer section = await Write(KnowledgeSectionKind.Architecture, "Architecture");
 
-        await knowledge.MarkReviewedAsync(tenantId, section.Id, "anna", Now);
+        await kb.MarkReviewedAsync(tenantId, section.Id, "anna", Now);
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
+        KbAnswer? loaded = await kb.GetAsync(tenantId, section.Id);
 
         loaded!.ReviewedAt.Should().Be(Now);
         loaded.ReviewedBy.Should().Be("anna");
-        loaded.Revisions.Should().BeEmpty();
+        loaded.UpdatedAt.Should().Be(section.UpdatedAt, "a review changes no words");
+        (await kb.RevisionsAsync(tenantId, section.Id)).Should().BeEmpty();
     }
 
     // ---- The gaps the agreement cares about ---------------------------------------------
@@ -172,8 +188,8 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_section_nobody_has_reviewed_for_a_quarter_is_stale()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
-        await knowledge.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-120));
+        KbAnswer section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        await kb.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-120));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
@@ -183,8 +199,8 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_recently_reviewed_section_is_not_stale()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
-        await knowledge.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-10));
+        KbAnswer section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        await kb.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-10));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
@@ -449,10 +465,10 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Many_gaps_of_one_kind_are_one_failed_check()
     {
-        KnowledgeSection runbook = await Write(KnowledgeSectionKind.Runbook, "Runbook");
-        KnowledgeSection architecture = await Write(KnowledgeSectionKind.Architecture, "Architecture");
-        await knowledge.MarkReviewedAsync(tenantId, runbook.Id, "nils", Now.AddDays(-200));
-        await knowledge.MarkReviewedAsync(tenantId, architecture.Id, "nils", Now.AddDays(-200));
+        KbAnswer runbook = await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        KbAnswer architecture = await Write(KnowledgeSectionKind.Architecture, "Architecture");
+        await kb.MarkReviewedAsync(tenantId, runbook.Id, "nils", Now.AddDays(-200));
+        await kb.MarkReviewedAsync(tenantId, architecture.Id, "nils", Now.AddDays(-200));
 
         KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
@@ -526,14 +542,32 @@ public class KnowledgeServiceTests : IDisposable
         });
         db.Apps.Add(new App { Id = strangerApp, CustomerId = strangerCustomer, Name = "Journal" });
 
-        KnowledgeSection section = new()
+        // Their runbook, in the knowledge base as every moved section is — and a second one
+        // still waiting in the old store, so both places are tried.
+        KbCategory category = new() { Id = Guid.NewGuid(), TenantId = strangerTenant, Name = "Applications" };
+        KbAnswer section = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            CategoryId = category.Id,
+            AppId = strangerApp,
+            CustomerId = strangerCustomer,
+            Section = KnowledgeSectionKind.Runbook,
+            Visibility = KbVisibility.Operations,
+            Title = "Runbook",
+            BodyHtml = "<p>Restore from the 02:00 snapshot, then start the API.</p>",
+        };
+        KnowledgeSection waiting = new()
         {
             Id = Guid.NewGuid(),
             TenantId = strangerTenant,
             AppId = strangerApp,
-            Kind = KnowledgeSectionKind.Runbook,
-            Title = "Runbook",
-            Body = "Restore from the 02:00 snapshot, then start the API.",
+            Kind = KnowledgeSectionKind.Architecture,
+            Title = "Journal architecture",
+            Body = "Two API pods behind the gateway.",
+            // Long unreviewed: were the legacy half of the meter to leak across tenants, this
+            // would satisfy our Architecture check AND show up as a stale gap quoting its title.
+            CreatedAt = Now.AddDays(-200),
         };
 
         AppServiceDependency dependency = new()
@@ -554,7 +588,9 @@ public class KnowledgeServiceTests : IDisposable
             NoticeGivenAt = Now.AddMonths(-6),
         };
 
-        db.KnowledgeSections.Add(section);
+        db.KbCategories.Add(category);
+        db.KbAnswers.Add(section);
+        db.KnowledgeSections.Add(waiting);
         db.AppServiceDependencies.Add(dependency);
         db.EndOfLifeNotices.Add(notice);
         db.AppKnowledgeProfiles.Add(new AppKnowledgeProfile
@@ -579,16 +615,19 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Another_tenants_knowledge_is_not_readable()
     {
-        (Guid _, Guid strangerApp, Guid strangerSection, Guid _, Guid _) = Stranger();
+        (Guid strangerTenant, Guid strangerApp, Guid strangerSection, Guid _, Guid _) = Stranger();
 
         // The owner can see it, so the assertions below are about the tenant and not about
         // an empty database.
-        (await knowledge.GetSectionsAsync(tenantId, appId)).Should().BeEmpty();
+        (await kb.AnswersForAppAsync(tenantId, appId)).Should().BeEmpty();
         await Write(KnowledgeSectionKind.Runbook, "Ours");
-        (await knowledge.GetSectionsAsync(tenantId, appId)).Should().ContainSingle();
+        (await kb.AnswersForAppAsync(tenantId, appId)).Should().ContainSingle();
+        (await knowledge.UnmovedSectionsAsync(strangerTenant, strangerApp))
+            .Should().ContainSingle("their own view has the waiting section, so the empty answers below are about the tenant");
 
-        (await knowledge.GetSectionsAsync(tenantId, strangerApp)).Should().BeEmpty();
-        (await knowledge.GetSectionAsync(tenantId, strangerSection)).Should().BeNull();
+        (await kb.AnswersForAppAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await knowledge.UnmovedSectionsAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await kb.GetAsync(tenantId, strangerSection)).Should().BeNull();
         (await knowledge.GetDependenciesAsync(tenantId, strangerApp)).Should().BeEmpty();
         (await knowledge.GetEndOfLifeAsync(tenantId, strangerApp)).Should().BeEmpty();
         (await knowledge.GetProfileAsync(tenantId, strangerApp)).Should().BeNull();
@@ -600,12 +639,15 @@ public class KnowledgeServiceTests : IDisposable
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, strangerApp, Now);
 
         gaps.Should().Contain(g => g.Check == KnowledgeCheck.Runbook);
+        gaps.Should().Contain(g => g.Check == KnowledgeCheck.Architecture, "their waiting legacy section does not satisfy our check");
+        gaps.Should().NotContain(g => g.Check == KnowledgeCheck.Freshness, "nothing of ours is written, so nothing can be stale for us");
         gaps.Should().Contain(g => g.Check == KnowledgeCheck.Classification);
         gaps.Should().NotContain(g => g.Check == KnowledgeCheck.EndOfLife);
         gaps.Should().AllSatisfy(gap =>
         {
             gap.Title.Should().NotContain("PostgreSQL 11");
             gap.Title.Should().NotContain("Region Skåne IdP");
+            gap.Title.Should().NotContain("Journal architecture");
         });
     }
 
@@ -618,18 +660,22 @@ public class KnowledgeServiceTests : IDisposable
     public async Task Another_tenants_section_cannot_be_rewritten()
     {
         (Guid _, Guid _, Guid strangerSection, Guid _, Guid _) = Stranger();
+        Guid ourCategory = await kb.EnsureAppCategoryAsync(tenantId);
 
-        await knowledge.SaveSectionAsync(
-            tenantId, appId, strangerSection, KnowledgeSectionKind.Runbook, "Runbook",
-            "Delete the volume, then page nobody.", "nils", "Improved");
+        Func<Task> rewrite = () => kb.SaveAnswerAsync(tenantId, new KbAnswer
+        {
+            Id = strangerSection, Title = "Runbook", BodyHtml = "<p>Delete the volume, then page nobody.</p>",
+            AppId = appId, Section = KnowledgeSectionKind.Runbook, Visibility = KbVisibility.Operations,
+            Language = "sv", CategoryId = ourCategory,
+        }, "nils", default, "Improved");
 
-        KnowledgeSection theirs = await db.KnowledgeSections.AsNoTracking()
-            .Include(s => s.Revisions)
-            .FirstAsync(s => s.Id == strangerSection);
+        await rewrite.Should().ThrowAsync<InvalidOperationException>().WithMessage("This answer no longer exists*");
 
-        theirs.Body.Should().StartWith("Restore from the 02:00 snapshot");
-        theirs.Revisions.Should().BeEmpty();
+        KbAnswer theirs = await db.KbAnswers.AsNoTracking().FirstAsync(a => a.Id == strangerSection);
+
+        theirs.BodyHtml.Should().StartWith("<p>Restore from the 02:00 snapshot");
         theirs.UpdatedBy.Should().BeNull();
+        (await db.KbAnswerRevisions.AsNoTracking().AnyAsync(r => r.AnswerId == strangerSection)).Should().BeFalse();
     }
 
     [Fact]
@@ -637,11 +683,11 @@ public class KnowledgeServiceTests : IDisposable
     {
         (Guid _, Guid _, Guid strangerSection, Guid _, Guid _) = Stranger();
 
-        await knowledge.MarkReviewedAsync(tenantId, strangerSection, "nils", Now);
-        await knowledge.DeleteSectionAsync(tenantId, strangerSection);
+        (await kb.MarkReviewedAsync(tenantId, strangerSection, "nils", Now)).Should().BeFalse();
+        (await kb.DeleteAnswerAsync(tenantId, strangerSection)).Should().BeFalse();
 
-        KnowledgeSection theirs = await db.KnowledgeSections.AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == strangerSection)
+        KbAnswer theirs = await db.KbAnswers.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == strangerSection)
             ?? throw new InvalidOperationException("The section was deleted.");
 
         theirs.ReviewedBy.Should().NotBe("nils");
@@ -749,9 +795,13 @@ public class KnowledgeServiceTests : IDisposable
     {
         (Guid _, Guid strangerApp, Guid _, Guid _, Guid _) = Stranger();
 
-        Func<Task> section = () => knowledge.SaveSectionAsync(
-            tenantId, strangerApp, null, KnowledgeSectionKind.Runbook, "Ours", "Text.",
-            "nils", null);
+        Guid ourCategory = await kb.EnsureAppCategoryAsync(tenantId);
+
+        Func<Task> section = () => kb.SaveAnswerAsync(tenantId, new KbAnswer
+        {
+            Title = "Ours", BodyHtml = "<p>Text.</p>", AppId = strangerApp, Section = KnowledgeSectionKind.Runbook,
+            Visibility = KbVisibility.Operations, Language = "sv", CategoryId = ourCategory,
+        }, "nils");
 
         Func<Task> dependency = () => knowledge.SaveDependencyAsync(
             tenantId, new AppServiceDependency
@@ -773,7 +823,7 @@ public class KnowledgeServiceTests : IDisposable
         await notice.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("Application not found, or it is not this tenant's.");
 
-        (await knowledge.GetSectionsAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await db.KbAnswers.AsNoTracking().CountAsync(a => a.AppId == strangerApp)).Should().Be(1, "only their own runbook");
     }
     /// <summary>
     /// <b>The other direction: planting a row in somebody else's application.</b>

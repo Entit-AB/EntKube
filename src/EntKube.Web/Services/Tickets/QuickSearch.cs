@@ -8,9 +8,11 @@ namespace EntKube.Web.Services.Tickets;
 public sealed record CustomerHit(Guid Id, string Name, int OpenTickets);
 
 /// <summary>What quick search found besides tickets.</summary>
-public sealed record QuickResults(IReadOnlyList<CustomerHit> Customers, IReadOnlyList<KbAnswer> Answers)
+/// <param name="AppNames">The application each application answer (a runbook section) belongs to, by id.</param>
+public sealed record QuickResults(
+    IReadOnlyList<CustomerHit> Customers, IReadOnlyList<KbAnswer> Answers, IReadOnlyDictionary<Guid, string> AppNames)
 {
-    public static readonly QuickResults None = new([], []);
+    public static readonly QuickResults None = new([], [], new Dictionary<Guid, string>());
 
     public bool IsEmpty => Customers.Count == 0 && Answers.Count == 0;
 }
@@ -24,7 +26,8 @@ public sealed record QuickResults(IReadOnlyList<CustomerHit> Customers, IReadOnl
 ///
 /// <para>Answers are found as the knowledge base's own list finds them — drafts and internal ones
 /// included, archived ones not — because the person searching is an agent who could open the
-/// knowledge base and see them there.</para>
+/// knowledge base and see them there. That includes an application's runbook sections, which are
+/// labelled with their application.</para>
 /// </summary>
 public class SupportQuickSearch(IDbContextFactory<SupportDbContext> dbFactory)
 {
@@ -69,6 +72,13 @@ public class SupportQuickSearch(IDbContextFactory<SupportDbContext> dbFactory)
                 && t.Status != TicketStatus.Closed && t.Status != TicketStatus.Rejected && t.Status != TicketStatus.Merged)))
             .ToListAsync(ct);
 
-        return new QuickResults(found, await answers.OrderBy(a => a.Title).Take(Limit).ToListAsync(ct));
+        List<KbAnswer> hits = await answers.OrderBy(a => a.Title).Take(Limit).ToListAsync(ct);
+        List<Guid> appIds = [.. hits.Where(a => a.AppId is not null).Select(a => a.AppId!.Value).Distinct()];
+
+        Dictionary<Guid, string> appNames = appIds.Count == 0 ? [] : await db.Apps.AsNoTracking()
+            .Where(a => appIds.Contains(a.Id) && a.Customer.TenantId == tenantId)
+            .ToDictionaryAsync(a => a.Id, a => a.Name, ct);
+
+        return new QuickResults(found, hits, appNames);
     }
 }

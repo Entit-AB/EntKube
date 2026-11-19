@@ -213,15 +213,25 @@ produce one.
 [`KnowledgeService`](../src/EntKube.Web/Services/Knowledge/KnowledgeService.cs)
 holds what an on-call engineer needs that is not in a manifest: architecture
 notes, runbooks, data classification, backup responsibility, technical contacts,
-upstream dependencies, end-of-life notices. Sections are markdown with revision
-history.
+upstream dependencies, end-of-life notices.
 
-Rendering uses Markdig with **`DisableHtml()`**. This text is written by operators
-and shown to customers; Markdig passes raw HTML through by default, which would
-make a knowledge section a script-injection point against everyone who reads it.
-That matters more than it looks, because the intended way to fill a section is to
-paste a document written somewhere else — which is exactly where a stray tag comes
-from.
+**The written sections are knowledge-base answers** (helpdesk phase 11): agents-only
+`KbAnswer`s tied to the application (`AppId`, a `Section`, visibility Operations or
+Archived), edited in the same rich-text editor as help answers and listed in the
+knowledge base under the application. They keep a revision for every change and a
+review stamp ("Still true"), and are sanitised by the same allow-list as mail. The
+structured facts — classification, dependencies, end of life — stay in
+`KnowledgeService`. A CHECK constraint (`CK_KbAnswers_AppShape`) and `KbAudience`
+keep an application's answer out of the portal and out of `??`.
+
+The sections used to be markdown in their own tables. `KnowledgeMerge` moves them
+at startup, one ledger row per section (`KnowledgeSectionMoves`), converting with
+Markdig and falling back to the markdown as preformatted text when the converted
+text would lose anything. The markdown as it stood is kept as a revision dated at
+the move, above the section's own earlier versions. The old
+tables stay, read-only, until every installation reports nothing left to move.
+Markdig still renders with **`DisableHtml()`** for what is shown from them — a
+document pasted from somewhere else is exactly where a stray tag comes from.
 
 **Pasting a whole document has to work**, and for a while it did not. Blazor Server
 caps anything a browser sends over the circuit at 32 KB by default, and the editor
@@ -229,9 +239,9 @@ was bound on `oninput`, so the entire body went over the wire on every keystroke
 pasted architecture guide exceeded the cap, the hub refused the message, the text
 never reached the server, and the section saved as though nothing had been typed —
 with no error anywhere. The cap is now sized for a document
-(`Program.MaximumDocumentBytes`), and the body binds on change, so editing a large
-section does not re-send it per character. The cost is that the preview catches up
-when you click out of the box rather than as you type.
+(`Program.MaximumDocumentBytes`). The rich-text editor keeps the body in the
+browser and hands it over once, on save, so a large section is not re-sent per
+character either.
 
 ## The support mailbox
 

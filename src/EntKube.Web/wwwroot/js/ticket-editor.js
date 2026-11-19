@@ -38,7 +38,9 @@ function triggerBefore(quill, index, pattern = trigger) {
 }
 
 // options: { mentions: true } reports "@@name" to OnMentionTrigger; { changes: true } reports the
-// editor's HTML to OnEditorChanged, at most once a second while typing (the note's autosave).
+// editor's HTML to OnEditorChanged, at most once a second while typing (the note's autosave);
+// { tables: true } loads Quill's table module so a runbook's tables survive editing (knowledge
+// base only — the composers keep the default).
 export async function create(element, dotnet, placeholder, options) {
     options = options || {};
     await ensureQuill();
@@ -52,6 +54,8 @@ export async function create(element, dotnet, placeholder, options) {
                 ['blockquote', 'code-block', 'link'],
                 ['clean'],
             ],
+            // Only at construction does Quill build a module; the knowledge base asks for tables.
+            ...(options.tables ? { table: true } : {}),
         },
         placeholder: placeholder || 'Write to the customer… (:: for a text module, ?? for a help answer)',
     });

@@ -649,7 +649,7 @@ public class Program
             await EnsureNotificationProviderConfigsAsync(db, app.Logger);
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
             await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
-            await ForecastKnowledgeMergeAsync(scope.ServiceProvider, app.Logger);
+            await MoveKnowledgeIntoTheKnowledgeBaseAsync(scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -905,11 +905,14 @@ public class Program
             bool wipe = request.Form.TryGetValue("wipe", out Microsoft.Extensions.Primitives.StringValues wipeVal)
                 && wipeVal == "true";
 
+            // Resolved before anything runs, outside every catch: a broken registration fails loudly.
+            EntKube.Web.Services.Knowledge.KnowledgeMerge knowledgeMerge =
+                request.HttpContext.RequestServices.GetRequiredService<EntKube.Web.Services.Knowledge.KnowledgeMerge>();
+
             try
             {
                 await using Stream stream = bundle.OpenReadStream();
                 await backupService.ImportAsync(stream, wipe);
-                return Results.Redirect("/admin/backup?success=Restore+completed+successfully.");
             }
             catch (Exception ex)
             {
@@ -922,6 +925,30 @@ public class Program
                 }
                 return Results.Redirect($"/admin/backup?error={Uri.EscapeDataString(msg.ToString())}");
             }
+
+            // The restore is committed. A bundle from before the knowledge merge carries runbook
+            // sections and no move ledger: move them now rather than at the next restart — and say
+            // separately how that went, because a move that falls short is not a failed restore.
+            string moveNote = "";
+
+            try
+            {
+                List<EntKube.Web.Services.Knowledge.KnowledgeMerge.MoveReport> reports = await knowledgeMerge.MoveAsync();
+                int failed = reports.Sum(r => r.Failed);
+                int left = reports.Sum(r => Math.Max(r.LeftToMove, 0));
+
+                if (failed > 0 || left > 0)
+                {
+                    moveNote = $" {failed} runbook section(s) could not be moved into the knowledge base yet; EntKube retries at its next start.";
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                app.Logger.LogError(ex, "Moving runbook sections into the knowledge base after a restore did not complete.");
+                moveNote = " Moving runbook sections into the knowledge base did not complete; EntKube retries at its next start.";
+            }
+
+            return Results.Redirect("/admin/backup?success=" + Uri.EscapeDataString("Restore completed successfully." + moveNote));
         }).RequireAuthorization().DisableAntiforgery();
 
         // Git webhook endpoint — receives push events from GitHub, Azure DevOps, etc.
@@ -1511,27 +1538,29 @@ public class Program
     // vault as separate opaque keys (tls.crt + tls.key). Merge each such group into a single
     // readable Certificate secret so it shows expiry and syncs as kubernetes.io/tls.
     /// <summary>
-    /// Release A of the knowledge merge (docs/helpdesk.md, phase 11): a DRY RUN. Logs, per tenant,
-    /// how the runbook sections still to move would convert. Writes nothing; never fails startup.
-    /// The service is resolved outside the catch, so a broken registration fails loudly.
+    /// Release B of the knowledge merge (docs/helpdesk.md, phase 11): moves each application's
+    /// runbook sections into the knowledge base — once, claimed by the move ledger, safe on several
+    /// instances. Each section is its own transaction; a failure is logged and retried next start,
+    /// and never fails this one. The service is resolved outside the catch, so a broken registration
+    /// fails loudly. Release C drops the old tables only once every installation logs 0 left to move.
     /// </summary>
-    private static async Task ForecastKnowledgeMergeAsync(IServiceProvider services, ILogger logger)
+    private static async Task MoveKnowledgeIntoTheKnowledgeBaseAsync(IServiceProvider services, ILogger logger)
     {
         EntKube.Web.Services.Knowledge.KnowledgeMerge merge = services.GetRequiredService<EntKube.Web.Services.Knowledge.KnowledgeMerge>();
 
         try
         {
-            foreach (EntKube.Web.Services.Knowledge.KnowledgeMergeForecast f in await merge.ForecastAsync())
+            foreach (EntKube.Web.Services.Knowledge.KnowledgeMerge.MoveReport r in await merge.MoveAsync())
             {
-                logger.LogInformation(
-                    "Knowledge merge dry run, tenant {Tenant}: {Total} section(s) to move — {Exact} exact, {Mapped} with mappings, "
-                    + "{Fallback} would be kept as preformatted markdown, {Detached} belong to an application outside the tenant. Nothing was moved.",
-                    f.TenantSlug, f.Total, f.Exact, f.Mapped, f.Fallback, f.Detached);
+                logger.Log(r.Failed > 0 || r.LeftToMove > 0 ? Microsoft.Extensions.Logging.LogLevel.Warning : Microsoft.Extensions.Logging.LogLevel.Information,
+                    "Knowledge merge, tenant {Tenant}: {Moved} section(s) moved, {Already} moved by another instance, {Failed} failed, "
+                    + "{Diverged} changed on an older EntKube carried across as history; {Left} section(s) left to move.",
+                    r.TenantSlug, r.Moved, r.AlreadyMoved, r.Failed, r.Diverged, r.LeftToMove);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "The knowledge merge dry run failed; nothing was changed.");
+            logger.LogError(ex, "The knowledge merge did not complete; the sections not moved stay where they were and are retried next start.");
         }
     }
 

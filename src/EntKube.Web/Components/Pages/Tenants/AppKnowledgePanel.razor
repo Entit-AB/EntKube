@@ -1,9 +1,14 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Knowledge
+@using EntKube.Web.Services.Tickets
+@implements IAsyncDisposable
 @inject KnowledgeService Knowledge
+@inject KnowledgeBaseService KnowledgeBase
 @inject ToastService Toasts
 @inject CurrentActor ActorService
+@inject IJSRuntime JS
+@inject NavigationManager Nav
 
 @* ═══════════════════════════════════════════════════════════════════
    What we know about an application.
@@ -13,10 +18,16 @@
    current at a quarterly review. A single scrolling column put a
    classification form between somebody and the thing they opened the
    page for.
+
+   Since the knowledge merge (docs/helpdesk.md, phase 11) the written
+   sections ARE this application's knowledge-base answers — agents only,
+   never in the portal, never offered by ?? — the same rows the knowledge
+   base lists under the application. The facts (classification,
+   dependencies, end of life) stay here, as they were.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <ConfirmDialog Visible="@(pendingDeleteSectionId is not null)"
-               Message="Delete this section and its history? The earlier versions go with it."
+               Message="Delete this section and its history? The earlier versions go with it, and it leaves the knowledge base."
                ConfirmText="Delete"
                OnConfirm="DeleteSectionAsync"
                OnCancel="() => pendingDeleteSectionId = null" />
@@ -51,12 +62,12 @@
 
                 <div class="pane-group">Written down</div>
 
-                @foreach (KnowledgeSection article in sections)
+                @foreach (KbAnswer article in articles)
                 {
                     <button type="button"
                             class="pane-item @(view == View.Section && selectedSectionId == article.Id ? "selected" : "")"
                             @onclick="() => ShowSectionAsync(article)">
-                        <span class="ico bi @SectionIcon(article.Kind)"></span>
+                        <span class="ico bi @SectionIcon(article.Section ?? KnowledgeSectionKind.Other)"></span>
                         <span class="pane-item-body">
                             <span class="pane-item-title">
                                 @article.Title
@@ -66,6 +77,20 @@
                                 }
                             </span>
                             <span class="pane-item-sub">@Excerpt(article)</span>
+                        </span>
+                    </button>
+                }
+
+                @foreach (KnowledgeSection waiting in unmoved)
+                {
+                    <button type="button"
+                            class="pane-item @(view == View.Legacy && selectedSectionId == waiting.Id ? "selected" : "")"
+                            data-test="runbook-unmoved"
+                            @onclick="() => ShowLegacy(waiting)">
+                        <span class="ico bi bi-hourglass-split text-muted"></span>
+                        <span class="pane-item-body">
+                            <span class="pane-item-title">@waiting.Title</span>
+                            <span class="pane-item-sub">not moved to the knowledge base yet</span>
                         </span>
                     </button>
                 }
@@ -199,6 +224,19 @@
                     }
                 </div>
             }
+            else if (view == View.Legacy && unmoved.FirstOrDefault(u => u.Id == selectedSectionId) is { } legacy)
+            {
+                <div class="pane-head">
+                    <div>
+                        <div class="fw-semibold">@legacy.Title</div>
+                        <div class="text-muted" style="font-size: .78rem">
+                            From the old runbook store: it has not moved into the knowledge base yet,
+                            so it cannot be edited here. EntKube moves it at its next start.
+                        </div>
+                    </div>
+                </div>
+                <div class="pane-body"><div class="kb-prose">@KnowledgeMarkdown.Render(legacy.Body)</div></div>
+            }
             else if (view == View.Section)
             {
                 @if (editing is not null)
@@ -206,9 +244,9 @@
                     <div class="pane-head">
                         <div class="flex-grow-1">
                             <input class="form-control form-control-sm mb-2" @bind="editing.Title"
-                                   placeholder="Title" style="max-width: 24rem" />
-                            <select class="form-select form-select-sm" @bind="editing.Kind"
-                                    style="max-width: 16rem">
+                                   placeholder="Title" style="max-width: 24rem" aria-label="Title" />
+                            <select class="form-select form-select-sm" @bind="editing.Section"
+                                    style="max-width: 16rem" aria-label="Section">
                                 @foreach (KnowledgeSectionKind kind in Enum.GetValues<KnowledgeSectionKind>())
                                 {
                                     <option value="@kind">@KindName(kind)</option>
@@ -223,31 +261,13 @@
                         </div>
                     </div>
                     <div class="pane-body">
-                        <div class="kb-edit">
-                            <div>
-                                <label class="form-label small text-muted">
-                                    Markdown
-                                    <span class="text-muted">— paste a whole document if you have one</span>
-                                </label>
-                                @* Bound on change rather than on input. Every keystroke used to
-                                   send the entire document over the circuit, which for a pasted
-                                   architecture guide means re-sending hundreds of kilobytes per
-                                   character typed. The cost is that the preview catches up when
-                                   you click out of the box instead of as you type. *@
-                                <textarea class="form-control" @bind="editing.Body"></textarea>
-                                <input class="form-control form-control-sm mt-2" @bind="changeSummary"
-                                       placeholder="What changed — kept with the previous version" />
-                            </div>
-                            <div>
-                                <label class="form-label small text-muted">
-                                    How it will read
-                                    <span class="text-muted">— updates when you click out</span>
-                                </label>
-                                <div class="kb-preview kb-prose">
-                                    @KnowledgeMarkdown.Render(editing.Body)
-                                </div>
-                            </div>
+                        @* Keyed per editing session: Quill puts its toolbar BESIDE the element, where
+                           Blazor cannot see it, so only replacing the wrapper removes the old one. *@
+                        <div @key="editorSession">
+                            <div @ref="editorElement" class="bg-white" style="min-height: 16rem" data-test="runbook-editor"></div>
                         </div>
+                        <input class="form-control form-control-sm mt-2" @bind="changeSummary"
+                               placeholder="What changed — kept with the previous version" aria-label="Change summary" />
                     </div>
                 }
                 else if (Selected is null)
@@ -260,7 +280,7 @@
                         <div>
                             <div class="fw-semibold">@Selected.Title</div>
                             <div class="text-muted" style="font-size: .78rem">
-                                @KindName(Selected.Kind)
+                                @KindName(Selected.Section ?? KnowledgeSectionKind.Other)
                                 · updated @Selected.UpdatedAt.ToLocalTime().ToString("d MMM yyyy")
                                 @if (Selected.UpdatedBy is not null)
                                 {
@@ -272,11 +292,11 @@
                                         · confirmed @Selected.ReviewedAt.Value.ToLocalTime().ToString("d MMM yyyy")
                                     </span>
                                 }
-                                @if (Selected.Revisions.Count > 0)
+                                @if (revisions.Count > 0)
                                 {
                                     <span>
-                                        · @Selected.Revisions.Count earlier
-                                        version@(Selected.Revisions.Count == 1 ? "" : "s")
+                                        · @revisions.Count earlier
+                                        version@(revisions.Count == 1 ? "" : "s")
                                     </span>
                                 }
                             </div>
@@ -296,6 +316,19 @@
                         </div>
                     </div>
                     <div class="pane-body">
+                        <div class="text-muted small mb-2" data-test="runbook-audience">
+                            <i class="bi bi-shield-lock me-1"></i>Agents only: never in the portal, never offered by <code>??</code>.
+                            <a href="@KnowledgeBaseHref(Selected.Id)">Open in the knowledge base</a>
+                        </div>
+
+                        @if (move is { Verdict: not MoveVerdict.Exact } moved)
+                        {
+                            <div class="alert alert-warning py-2 small" data-test="runbook-move-verdict">
+                                Moved from the old runbook (@moved.Verdict.ToString().ToLowerInvariant()). @moved.Notes
+                                The markdown it was written in is kept under History.
+                            </div>
+                        }
+
                         @if (IsStale(Selected))
                         {
                             <div class="alert alert-warning py-2 small">
@@ -307,13 +340,41 @@
                             </div>
                         }
 
-                        @if (string.IsNullOrWhiteSpace(Selected.Body))
+                        @if (RichText.IsEmpty(Selected.BodyHtml))
                         {
                             <div class="text-muted small">Empty. Open it and write something.</div>
                         }
                         else
                         {
-                            <div class="kb-prose">@KnowledgeMarkdown.Render(Selected.Body)</div>
+                            <div class="kb-prose">@((MarkupString)RichText.Sanitize(Selected.BodyHtml))</div>
+                        }
+
+                        @if (revisions.Count > 0)
+                        {
+                            <details class="mt-3" data-test="runbook-history">
+                                <summary class="text-muted small">History</summary>
+                                @foreach (KbAnswerRevision r in revisions)
+                                {
+                                    <div class="border-top py-2 small">
+                                        <div class="d-flex justify-content-between">
+                                            <span class="text-muted">
+                                                @r.SavedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm") · @(r.SavedBy ?? "unknown")@(r.Summary is { } why ? $" — {why}" : "")
+                                            </span>
+                                            <AsyncButton CssClass="btn-sm btn-link p-0" OnClick="() => RestoreAsync(r)">Restore</AsyncButton>
+                                        </div>
+                                        <div class="kb-prose border rounded p-2 mt-1 bg-white">
+                                            @if (r.BodyFormat == KbBodyFormat.Markdown)
+                                            {
+                                                @KnowledgeMarkdown.Render(r.Body)
+                                            }
+                                            else
+                                            {
+                                                @((MarkupString)RichText.Sanitize(r.Body))
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                            </details>
                         }
                     </div>
                 }
@@ -662,7 +723,7 @@
 
     private string Actor => ActorName ?? resolvedActor ?? EntKube.Web.Services.CurrentActor.Unattributed;
 
-    private enum View { Overview, Section, Classification, Dependencies, EndOfLife }
+    private enum View { Overview, Section, Legacy, Classification, Dependencies, EndOfLife }
 
     private bool loading = true;
     private string? error;
@@ -670,31 +731,53 @@
     private View view = View.Overview;
     private Guid? selectedSectionId;
 
-    private List<KnowledgeSection> sections = [];
+    // The written sections: this application's knowledge-base answers (archived ones are retired),
+    // and any old runbook section still waiting to move.
+    private List<KbAnswer> articles = [];
+    private List<KnowledgeSection> unmoved = [];
+    private List<KbAnswerRevision> revisions = [];
+    private KnowledgeSectionMove? move;
+
+    private ElementReference editorElement;
+    private IJSObjectReference? editorModule;
+    private DotNetObjectReference<AppKnowledgePanel>? self;
+    private Guid editorSession;
+    private bool editorPending;
+    private (Guid Tenant, Guid App)? loadedFor;
     private List<AppServiceDependency> dependencies = [];
     private List<EndOfLifeNotice> notices = [];
     private KnowledgeHealth health = new([]);
     private AppKnowledgeProfile profile = new() { TenantId = Guid.Empty, AppId = Guid.Empty };
     private bool profileMissing;
 
-    private KnowledgeSection? editing;
+    private KbAnswer? editing;
     private string? changeSummary;
     private Guid? pendingDeleteSectionId;
     private AppServiceDependency? newDependency;
     private EndOfLifeNotice? newNotice;
 
-    private KnowledgeSection? Selected => sections.FirstOrDefault(s => s.Id == selectedSectionId);
+    private KbAnswer? Selected => articles.FirstOrDefault(s => s.Id == selectedSectionId);
 
     /// <summary>The sections §5.2 and §19 assume exist and that nobody has written.</summary>
     private IEnumerable<KnowledgeSectionKind> MissingExpected =>
-        KnowledgeService.ExpectedSections.Where(k => !sections.Any(s => s.Kind == k));
+        KnowledgeService.ExpectedSections.Where(k => !articles.Any(s => s.Section == k) && !unmoved.Any(u => u.Kind == k));
 
     private string MeterClass => health.Percent >= 90 ? "" : health.Percent >= 60 ? "partial" : "poor";
 
     protected override async Task OnInitializedAsync() =>
         resolvedActor = await ActorService.NameAsync();
 
-    protected override async Task OnParametersSetAsync() => await LoadAsync();
+    protected override async Task OnParametersSetAsync()
+    {
+        // The page re-renders this panel for reasons of its own. Reloading then would swap the
+        // panel for a spinner and take the editor — and what is typed in it — with it.
+        if (editing is not null && loadedFor == (TenantId, App.Id))
+        {
+            return;
+        }
+
+        await LoadAsync();
+    }
 
     private async Task LoadAsync()
     {
@@ -703,7 +786,8 @@
 
         try
         {
-            sections = await Knowledge.GetSectionsAsync(TenantId, App.Id);
+            articles = [.. (await KnowledgeBase.AnswersForAppAsync(TenantId, App.Id)).Where(a => a.Visibility != KbVisibility.Archived)];
+            unmoved = await Knowledge.UnmovedSectionsAsync(TenantId, App.Id);
             dependencies = await Knowledge.GetDependenciesAsync(TenantId, App.Id);
             notices = await Knowledge.GetEndOfLifeAsync(TenantId, App.Id);
             health = await Knowledge.GetHealthAsync(TenantId, App.Id, DateTime.UtcNow);
@@ -711,6 +795,7 @@
             AppKnowledgeProfile? stored = await Knowledge.GetProfileAsync(TenantId, App.Id);
             profileMissing = stored is null;
             profile = stored ?? new AppKnowledgeProfile { TenantId = TenantId, AppId = App.Id };
+            loadedFor = (TenantId, App.Id);
 
             // A section can go while it is open — deleted here, or by somebody else.
             if (view == View.Section && editing is null && Selected is null)
@@ -730,29 +815,40 @@
 
     private void Show(View next)
     {
+        LeaveEditor();
         view = next;
-        editing = null;
     }
 
-    private async Task ShowSectionAsync(KnowledgeSection article)
+    private void ShowLegacy(KnowledgeSection waiting)
     {
+        LeaveEditor();
+        selectedSectionId = waiting.Id;
+        view = View.Legacy;
+    }
+
+    private async Task ShowSectionAsync(KbAnswer article)
+    {
+        LeaveEditor();
         selectedSectionId = article.Id;
         view = View.Section;
-        editing = null;
-
-        // The list is loaded without revisions; the reading pane says how many there are.
-        KnowledgeSection? full = await Knowledge.GetSectionAsync(TenantId, article.Id);
-
-        if (full is not null)
-        {
-            int at = sections.FindIndex(s => s.Id == article.Id);
-
-            if (at >= 0)
-            {
-                sections[at] = full;
-            }
-        }
+        revisions = await KnowledgeBase.RevisionsAsync(TenantId, article.Id);
+        move = await KnowledgeBase.MoveOfAsync(TenantId, article.Id);
     }
+
+    /// <summary>
+    /// The same answer in the tenant's knowledge base, where it is listed under this application.
+    /// The explorer opens an app= before a section=, so everything that selects a pane is cleared.
+    /// </summary>
+    private string KnowledgeBaseHref(Guid answerId) => Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+    {
+        ["section"] = "knowledge-base",
+        ["answer"] = answerId,
+        ["app"] = null,
+        ["cluster"] = null,
+        ["customer"] = null,
+        ["env"] = null,
+        ["tab"] = null,
+    });
 
     /// <summary>Takes a gap on the overview to the thing that would close it.</summary>
     private async Task GoToGapAsync(KnowledgeGap gap)
@@ -768,11 +864,17 @@
                 break;
 
             case KnowledgeCheck.Freshness:
-                KnowledgeSection? stale = sections.FirstOrDefault(IsStale);
+                KbAnswer? stale = articles.FirstOrDefault(IsStale);
 
                 if (stale is not null)
                 {
                     await ShowSectionAsync(stale);
+                }
+                else if (unmoved.FirstOrDefault(u => (u.ReviewedAt ?? u.CreatedAt).AddDays(u.ReviewIntervalDays) <= DateTime.UtcNow) is { } waiting)
+                {
+                    // The meter counts a section still waiting to move too; at least show it. It
+                    // can be confirmed once it has moved, which EntKube retries at every start.
+                    ShowLegacy(waiting);
                 }
                 break;
 
@@ -790,49 +892,145 @@
         }
     }
 
-    private static bool IsStale(KnowledgeSection section) =>
-        (section.ReviewedAt ?? section.CreatedAt).AddDays(section.ReviewIntervalDays) <= DateTime.UtcNow;
+    // One interval for every section now, the same one the health meter uses.
+    private static bool IsStale(KbAnswer article) =>
+        (article.ReviewedAt ?? article.CreatedAt).AddDays(KnowledgeService.ReviewIntervalDays) <= DateTime.UtcNow;
 
-    private static string Excerpt(KnowledgeSection section) =>
-        string.IsNullOrWhiteSpace(section.Body) ? "empty" : KnowledgeMarkdown.Excerpt(section.Body, 40);
+    private static string Excerpt(KbAnswer article)
+    {
+        string text = article.BodyText.ReplaceLineEndings(" ").Trim();
+        return text.Length == 0 ? "empty" : text.Length <= 40 ? text : text[..40].TrimEnd() + "…";
+    }
 
     private void StartNewSection(KnowledgeSectionKind? kind)
     {
         KnowledgeSectionKind chosen = kind ?? KnowledgeSectionKind.Other;
 
+        LeaveEditor();
         view = View.Section;
         selectedSectionId = null;
         changeSummary = null;
 
-        editing = new KnowledgeSection
+        editing = new KbAnswer
         {
-            TenantId = TenantId,
-            AppId = App.Id,
-            Kind = chosen,
             Title = KindName(chosen),
-            Body = Template(chosen),
+            AppId = App.Id,
+            Section = chosen,
+            Visibility = KbVisibility.Operations,
+            Language = "sv",
+            BodyHtml = KnowledgeConversion.Convert(Template(chosen)).Html,
         };
+        OpenEditor();
     }
 
-    private void StartEdit(KnowledgeSection section) =>
-        editing = new KnowledgeSection
+    private void StartEdit(KbAnswer article)
+    {
+        LeaveEditor();
+
+        editing = new KbAnswer
         {
-            Id = section.Id,
-            TenantId = section.TenantId,
-            AppId = section.AppId,
-            Kind = section.Kind,
-            Title = section.Title,
-            Body = section.Body,
+            Id = article.Id,
+            Title = article.Title,
+            AppId = article.AppId,
+            Section = article.Section,
+            Visibility = article.Visibility,
+            Language = article.Language,
+            CategoryId = article.CategoryId,
+            Keywords = article.Keywords,
+            BodyHtml = article.BodyHtml,
         };
+        OpenEditor();
+    }
+
+    private void OpenEditor()
+    {
+        editorSession = Guid.NewGuid();
+        editorPending = true;
+    }
+
+    /// <summary>Drops the edit in progress, and lets the editor go while its element still exists.</summary>
+    private void LeaveEditor()
+    {
+        if (editing is not null)
+        {
+            editing = null;
+            changeSummary = null;
+            _ = DisposeEditorAsync();
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!editorPending || editing is null)
+        {
+            return;
+        }
+
+        editorPending = false;
+
+        // Taken before the first await. The circuit handles clicks while the editor loads, so by
+        // the time it is ready the edit may have been left (editing is null) or replaced by
+        // another session whose element editorElement now names.
+        Guid session = editorSession;
+        ElementReference element = editorElement;
+        string body = RichText.Sanitize(editing.BodyHtml);
+
+        try
+        {
+            editorModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/ticket-editor.js");
+
+            if (session != editorSession || editing is null)
+            {
+                return;
+            }
+
+            self ??= DotNetObjectReference.Create(this);
+            await editorModule.InvokeVoidAsync("create", element, self, "What should the next person know?", new { tables = true });
+
+            if (session != editorSession || editing is null)
+            {
+                // Left while Quill loaded: the dispose sent then found nothing to forget yet.
+                await editorModule.InvokeVoidAsync("dispose", element);
+                return;
+            }
+
+            await editorModule.InvokeVoidAsync("setHtml", element, body);
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or TaskCanceledException)
+        {
+            if (ex is JSException)
+            {
+                Toasts.Error($"The editor could not start: {ex.Message}");
+            }
+        }
+    }
+
+    // The editor reports these on every keystroke; a runbook offers neither text modules nor answers.
+    [JSInvokable] public Task OnTextModuleTrigger(string? query) => Task.CompletedTask;
+
+    [JSInvokable] public Task OnKnowledgeTrigger(string? query) => Task.CompletedTask;
 
     private void CancelEdit()
     {
-        editing = null;
-        changeSummary = null;
+        LeaveEditor();
 
         if (Selected is null)
         {
             view = View.Overview;
+        }
+    }
+
+    private async Task DisposeEditorAsync()
+    {
+        try
+        {
+            if (editorModule is not null)
+            {
+                await editorModule.InvokeVoidAsync("dispose", editorElement);
+            }
+        }
+        catch (Exception ex) when (ex is JSDisconnectedException or JSException or TaskCanceledException)
+        {
         }
     }
 
@@ -844,36 +1042,82 @@
             return;
         }
 
-        KnowledgeSection saved = await Knowledge.SaveSectionAsync(
-            TenantId, App.Id, editing.Id == Guid.Empty ? null : editing.Id,
-            editing.Kind, editing.Title, editing.Body, Actor, changeSummary);
+        if (editorModule is not null)
+        {
+            editing.BodyHtml = await editorModule.InvokeAsync<string>("html", editorElement);
+        }
 
-        editing = null;
-        changeSummary = null;
-        selectedSectionId = saved.Id;
-        view = View.Section;
+        try
+        {
+            if (editing.Id == Guid.Empty)
+            {
+                editing.CategoryId = await KnowledgeBase.EnsureAppCategoryAsync(TenantId);
+            }
 
-        Toasts.Success("Saved.");
+            KbAnswer saved = await KnowledgeBase.SaveAnswerAsync(TenantId, editing, Actor, default, changeSummary);
+
+            LeaveEditor();
+            Toasts.Success("Saved.");
+            await LoadAsync();
+            await ShowSectionAsync(saved);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // The edit stays open: what was typed is still in the editor.
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task MarkReviewedAsync(Guid answerId)
+    {
+        await KnowledgeBase.MarkReviewedAsync(TenantId, answerId, Actor, DateTime.UtcNow);
+        Toasts.Success("Confirmed as still true.");
         await LoadAsync();
     }
 
-    private async Task MarkReviewedAsync(Guid sectionId)
+    private async Task RestoreAsync(KbAnswerRevision revision)
     {
-        await Knowledge.MarkReviewedAsync(TenantId, sectionId, Actor, DateTime.UtcNow);
-        Toasts.Success("Confirmed as still true.");
-        await LoadAsync();
+        if (Selected is null)
+        {
+            return;
+        }
+
+        if (await KnowledgeBase.RestoreAsync(TenantId, Selected.Id, revision.Id, Actor) is { } restored)
+        {
+            Toasts.Success("Earlier version restored; what it said until now is kept in the history.");
+            await LoadAsync();
+            await ShowSectionAsync(restored);
+        }
     }
 
     private async Task DeleteSectionAsync()
     {
         if (pendingDeleteSectionId is Guid id)
         {
-            await Knowledge.DeleteSectionAsync(TenantId, id);
+            await KnowledgeBase.DeleteAnswerAsync(TenantId, id);
             pendingDeleteSectionId = null;
             selectedSectionId = null;
             view = View.Overview;
             await LoadAsync();
         }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await DisposeEditorAsync();
+
+        try
+        {
+            if (editorModule is not null)
+            {
+                await editorModule.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        self?.Dispose();
     }
 
     private async Task SaveProfileAsync()
@@ -989,16 +1233,7 @@
         _ => "bi-file-text",
     };
 
-    private static string KindName(KnowledgeSectionKind kind) => kind switch
-    {
-        KnowledgeSectionKind.Architecture => "Architecture",
-        KnowledgeSectionKind.Runbook => "Runbook",
-        KnowledgeSectionKind.Decisions => "Decisions",
-        KnowledgeSectionKind.KnownDefects => "Known defects",
-        KnowledgeSectionKind.Access => "Access",
-        KnowledgeSectionKind.Recovery => "Backup and recovery",
-        _ => "Notes",
-    };
+    private static string KindName(KnowledgeSectionKind kind) => KnowledgeService.SectionName(kind);
 
     /// <summary>
     /// A starting shape for a new section. An empty textarea is the reason documentation
