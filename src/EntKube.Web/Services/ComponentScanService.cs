@@ -1084,7 +1084,8 @@ public class ComponentScanService(
             return present;
         }
 
-        // Lists cluster-scoped instances of a custom resource and returns the name of the
+        // Lists cluster-scoped instances of a resource (custom, or built-in such as an APIService
+        // or CSIDriver: the generic list path serves both) and returns the name of the
         // first one that matches (or "" if unnamed). Used when CRD presence alone would
         // false-positive because the CRD is owned by a dependency — see DetectionResource.
         async Task<string?> FindMatchingInstanceAsync(DetectionResource dr)
@@ -1105,8 +1106,7 @@ public class ComponentScanService(
 
                 foreach (JsonElement item in items.EnumerateArray())
                 {
-                    if (dr.Matches is not null
-                        && !item.GetRawText().Contains(dr.Matches, StringComparison.OrdinalIgnoreCase))
+                    if (!dr.Accepts(item.GetRawText()))
                     {
                         continue;
                     }

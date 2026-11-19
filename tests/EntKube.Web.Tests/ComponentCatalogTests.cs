@@ -590,4 +590,96 @@ public class ComponentCatalogTests : IDisposable
             parse.Should().NotThrow($"'{entry.Key}' default values must be valid YAML");
         }
     }
+
+    // ── Detection: a component is found by what it OWNS, never by what it uses ──
+
+    [Fact]
+    public void NoTwoEntriesDetectByTheSameCrd()
+    {
+        // A CRD names its owner. When a second entry detects by it, the scan reports that entry
+        // installed wherever the owner is: Cinder CSI was detected by the snapshot CRDs, so every
+        // EKS, GKE and AKS cluster listed an OpenStack CSI driver it does not have.
+        List<string> claimedTwice = ComponentCatalog.Entries
+            .SelectMany(e => e.DetectionCrds.Select(crd => (crd, e.Key)))
+            .GroupBy(x => x.crd, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => $"{g.Key}: {string.Join(", ", g.Select(x => x.Key))}")
+            .ToList();
+
+        claimedTwice.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void CinderCsi_IsDetectedByItsOwnCsiDriver_NotByTheSnapshotCrds()
+    {
+        CatalogEntry cinder = ComponentCatalog.GetByKey("openstack-cinder-csi")!;
+
+        cinder.DetectionCrds.Should().NotContain(crd => crd.EndsWith(".snapshot.storage.k8s.io"));
+        cinder.DetectionResource.Should().NotBeNull();
+        cinder.DetectionResource!.Accepts(CsiDriver("cinder.csi.openstack.org")).Should().BeTrue();
+        cinder.DetectionResource.Accepts(CsiDriver("ebs.csi.aws.com")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void MetricsServer_IsDetectedByTheResourceMetricsApi_NotByKedasExternalMetricsApi()
+    {
+        // KEDA registers v1beta1.external.metrics.k8s.io. A match on the bare substring
+        // "metrics.k8s.io" would report metrics-server present on every cluster running KEDA,
+        // which is exactly where the HPAs that need it are.
+        DetectionResource dr = ComponentCatalog.GetByKey("metrics-server")!.DetectionResource!;
+
+        dr.Group.Should().Be("apiregistration.k8s.io");
+        dr.Accepts(ApiService("v1beta1.metrics.k8s.io", "metrics.k8s.io")).Should().BeTrue();
+        dr.Accepts(ApiService("v1beta1.external.metrics.k8s.io", "external.metrics.k8s.io")).Should().BeFalse();
+        dr.Accepts(ApiService("v1beta1.custom.metrics.k8s.io", "custom.metrics.k8s.io")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void MetricsServer_VerifiesKubeletCertificatesByDefault()
+    {
+        // Skipping verification is a per-cluster decision for kind and plain kubeadm, written out
+        // in the default values for an operator to uncomment. It must not be what everyone gets.
+        CatalogEntry entry = ComponentCatalog.GetByKey("metrics-server")!;
+        YamlStream stream = new();
+        stream.Load(new StringReader(entry.DefaultValues!));
+        YamlMappingNode root = (YamlMappingNode)stream.Documents[0].RootNode;
+
+        root.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value).Should().NotContain("args");
+    }
+
+    [Fact]
+    public void SnapshotController_KeepsItsCrdsWhenUninstalled()
+    {
+        // Deleting a CRD deletes every object of that kind. The chart's default would take every
+        // VolumeSnapshot on the cluster with the release.
+        CatalogEntry entry = ComponentCatalog.GetByKey("snapshot-controller")!;
+
+        ((YamlScalarNode)Navigate(entry.DefaultValues!, "keepCRDs")).Value.Should().Be("true");
+    }
+
+    [Fact]
+    public void Reloader_RestartsOnlyAnnotatedWorkloadsByDefault()
+    {
+        // Cluster-wide restarts reach every other component's pods; that has to be chosen.
+        CatalogEntry entry = ComponentCatalog.GetByKey("reloader")!;
+
+        ((YamlScalarNode)Navigate(entry.DefaultValues!, "reloader", "autoReloadAll")).Value.Should().Be("false");
+        entry.FormFields.Single(f => f.Key == "auto-reload-all").DefaultValue.Should().Be("false");
+    }
+
+    private static string CsiDriver(string name) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            apiVersion = "storage.k8s.io/v1", kind = "CSIDriver",
+            metadata = new { name },
+            spec = new { attachRequired = true }
+        });
+
+    private static string ApiService(string name, string group) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            apiVersion = "apiregistration.k8s.io/v1", kind = "APIService",
+            metadata = new { name },
+            spec = new { group, version = "v1beta1", service = new { name = "svc", @namespace = "kube-system" } }
+        });
 }
