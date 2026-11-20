@@ -666,6 +666,59 @@ public class ComponentCatalogTests : IDisposable
         entry.FormFields.Single(f => f.Key == "auto-reload-all").DefaultValue.Should().Be("false");
     }
 
+
+    // ── Node and workload maintenance: the defaults that keep them from hurting ──
+
+    [Fact]
+    public void Kured_reboots_only_inside_a_night_window_and_never_through_a_failed_drain()
+    {
+        CatalogEntry entry = ComponentCatalog.GetByKey("kured")!;
+        string Value(string key) => ((YamlScalarNode)Navigate(entry.DefaultValues!, "configuration", key)).Value!;
+
+        // Without a window kured reboots at any hour, office hours included.
+        Value("startTime").Should().NotBeNullOrEmpty();
+        Value("endTime").Should().NotBeNullOrEmpty();
+        Value("timeZone").Should().NotBeNullOrEmpty();
+        // A PDB that never allows eviction would hold the drain open for ever; giving up is fine,
+        // rebooting through it is not.
+        Value("drainTimeout").Should().NotBeNullOrEmpty().And.NotBe("0");
+        Value("forceReboot").Should().Be("false");
+        Value("concurrency").Should().Be("1");
+        // A node that dies holding the lock would otherwise stop every later reboot.
+        Value("lockTtl").Should().NotBe("0");
+    }
+
+    [Fact]
+    public void Descheduler_never_moves_pods_with_persistent_volumes()
+    {
+        CatalogEntry entry = ComponentCatalog.GetByKey("descheduler")!;
+
+        YamlSequenceNode plugins = (YamlSequenceNode)Navigate(
+            entry.DefaultValues!, "deschedulerPolicy", "profiles");
+        YamlMappingNode evictor = ((YamlSequenceNode)((YamlMappingNode)plugins[0])
+                .Children[new YamlScalarNode("pluginConfig")])
+            .OfType<YamlMappingNode>()
+            .Single(p => ((YamlScalarNode)p.Children[new YamlScalarNode("name")]).Value == "DefaultEvictor");
+
+        YamlSequenceNode protections = (YamlSequenceNode)((YamlMappingNode)((YamlMappingNode)evictor
+                .Children[new YamlScalarNode("args")]).Children[new YamlScalarNode("podProtections")])
+            .Children[new YamlScalarNode("extraEnabled")];
+
+        protections.OfType<YamlScalarNode>().Select(n => n.Value).Should().Contain("PodsWithPVC");
+    }
+
+    [Fact]
+    public void Tetragon_export_is_rate_limited_by_default()
+    {
+        // Every process start in every pod is an event. Unlimited, the stream can outgrow the
+        // telemetry store the in-cluster collector ships it to.
+        CatalogEntry entry = ComponentCatalog.GetByKey("tetragon")!;
+        string limit = ((YamlScalarNode)Navigate(entry.DefaultValues!, "tetragon", "exportRateLimit")).Value!;
+
+        int.Parse(limit).Should().BePositive();
+        entry.FormFields.Single(f => f.Key == "export-rate-limit").DefaultValue.Should().Be(limit);
+    }
+
     private static string CsiDriver(string name) =>
         System.Text.Json.JsonSerializer.Serialize(new
         {
