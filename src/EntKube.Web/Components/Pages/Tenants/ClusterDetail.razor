@@ -931,6 +931,13 @@ else if (section == "components")
                                         <strong>@(headerCatalog?.DisplayName ?? comp.Name)</strong>
                                         <div class="d-flex align-items-center gap-2 mt-0">
                                             @GetStatusBadge(comp.Status)
+                                            @if (IsClusterProvided(comp))
+                                            {
+                                                <span class="badge bg-light text-dark border"
+                                                      title="The cluster already ran this when EntKube looked (a provider add-on or another Helm release). EntKube tracks it but does not upgrade or uninstall it.">
+                                                    <i class="bi bi-cloud-check me-1"></i>Provided by cluster
+                                                </span>
+                                            }
                                             @if (missingGatewayCrds)
                                             {
                                                 <span class="badge bg-warning text-dark" title="Gateway API CRDs are not installed on this cluster">
@@ -999,7 +1006,7 @@ else if (section == "components")
                                             </small>
                                         }
                                     }
-                                    else if (comp.Status == ComponentStatus.Installed)
+                                    else if (comp.Status == ComponentStatus.Installed && !IsClusterProvided(comp))
                                     {
                                         @if (missingGatewayCrds)
                                         {
@@ -1056,7 +1063,11 @@ else if (section == "components")
                                     <div class="d-flex align-items-center gap-2">
                                         <i class="bi bi-exclamation-triangle text-warning"></i>
                                         <small>
-                                            @if (comp.Status == ComponentStatus.Installed)
+                                            @if (IsClusterProvided(comp))
+                                            {
+                                                <span>Stop tracking <strong>@(headerCatalog?.DisplayName ?? comp.Name)</strong>? It keeps running: the cluster provides it, not EntKube.</span>
+                                            }
+                                            else if (comp.Status == ComponentStatus.Installed)
                                             {
                                                 <span><strong>Uninstall</strong> @(headerCatalog?.DisplayName ?? comp.Name) from the cluster?</span>
                                             }
@@ -1067,7 +1078,7 @@ else if (section == "components")
                                         </small>
                                     </div>
                                     <div class="d-flex gap-1">
-                                        @if (comp.Status == ComponentStatus.Installed)
+                                        @if (comp.Status == ComponentStatus.Installed && !IsClusterProvided(comp))
                                         {
                                             <button class="btn btn-sm btn-warning" @onclick="() => UninstallComponent(comp.Id)">
                                                 <i class="bi bi-stop-fill me-1"></i>Yes, uninstall
@@ -3718,8 +3729,12 @@ else if (section == "components")
     /// The version comparison itself lives in <see cref="EntKube.Web.Services.Upgrades.SemVer.OffersUpgrade"/>,
     /// which refuses to call a catalog pin *older* than the installed chart an update.
     /// </summary>
+    private static bool IsClusterProvided(ClusterComponent comp) =>
+        comp.ComponentType == ClusterProvidedComponents.ComponentType;
+
     private static bool HasCatalogUpdate(ClusterComponent comp, CatalogEntry? entry) =>
         entry is not null
+        && !IsClusterProvided(comp)
         && comp.Status == ComponentStatus.Installed
         && EntKube.Web.Services.Upgrades.SemVer.OffersUpgrade(comp.HelmChartVersion, entry.HelmChartVersion);
 

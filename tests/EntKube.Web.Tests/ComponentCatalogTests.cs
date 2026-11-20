@@ -621,17 +621,16 @@ public class ComponentCatalogTests : IDisposable
     }
 
     [Fact]
-    public void MetricsServer_IsDetectedByTheResourceMetricsApi_NotByKedasExternalMetricsApi()
+    public void MetricsServer_IsFoundByTheExactResourceMetricsApi()
     {
-        // KEDA registers v1beta1.external.metrics.k8s.io. A match on the bare substring
-        // "metrics.k8s.io" would report metrics-server present on every cluster running KEDA,
-        // which is exactly where the HPAs that need it are.
-        DetectionResource dr = ComponentCatalog.GetByKey("metrics-server")!.DetectionResource!;
+        // Read by exact name. KEDA registers v1beta1.external.metrics.k8s.io, and a substring match on
+        // "metrics.k8s.io" would report metrics-server present on every cluster running KEDA, which is
+        // exactly where the HPAs that need it are.
+        CatalogEntry entry = ComponentCatalog.GetByKey("metrics-server")!;
 
-        dr.Group.Should().Be("apiregistration.k8s.io");
-        dr.Accepts(ApiService("v1beta1.metrics.k8s.io", "metrics.k8s.io")).Should().BeTrue();
-        dr.Accepts(ApiService("v1beta1.external.metrics.k8s.io", "external.metrics.k8s.io")).Should().BeFalse();
-        dr.Accepts(ApiService("v1beta1.custom.metrics.k8s.io", "custom.metrics.k8s.io")).Should().BeFalse();
+        entry.ProvidedByApiService.Should().Be("v1beta1.metrics.k8s.io");
+        entry.DetectionResource.Should().BeNull("the APIService lookup replaces substring detection");
+        entry.DetectionCrds.Should().BeEmpty();
     }
 
     [Fact]
@@ -673,13 +672,5 @@ public class ComponentCatalogTests : IDisposable
             apiVersion = "storage.k8s.io/v1", kind = "CSIDriver",
             metadata = new { name },
             spec = new { attachRequired = true }
-        });
-
-    private static string ApiService(string name, string group) =>
-        System.Text.Json.JsonSerializer.Serialize(new
-        {
-            apiVersion = "apiregistration.k8s.io/v1", kind = "APIService",
-            metadata = new { name },
-            spec = new { group, version = "v1beta1", service = new { name = "svc", @namespace = "kube-system" } }
         });
 }

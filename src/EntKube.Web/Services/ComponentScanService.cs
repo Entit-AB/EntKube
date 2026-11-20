@@ -1130,6 +1130,38 @@ public class ComponentScanService(
 
         foreach (CatalogEntry entry in ComponentCatalog.Entries)
         {
+            // A component the cluster may provide itself (metrics-server on managed Kubernetes) is found
+            // by the API it serves, in whatever namespace the server runs. One owned by a Helm release is
+            // left to the Helm scan, which already offers that release; listing it here as well would let
+            // one server be tracked twice under two names.
+            if (entry.ProvidedByApiService is { } apiService)
+            {
+                ExistingProvider? provider;
+
+                try
+                {
+                    provider = await ClusterProvidedComponents.LocateAsync(client, apiService, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    provider = null;
+                }
+
+                if (provider is { ServiceExists: true, HelmRelease: null })
+                {
+                    found.Add(new DiscoveredManifestComponent
+                    {
+                        CatalogKey = entry.Key,
+                        DisplayName = entry.DisplayName,
+                        Namespace = provider.Namespace ?? entry.DefaultNamespace,
+                        DetectedVia = $"apiservices/{apiService} → {provider.Where}",
+                        AlreadyTracked = trackedNames.Contains(entry.Key)
+                    });
+                }
+
+                continue;
+            }
+
             if (entry.DetectionCrds.Count == 0 && entry.DetectionResource is null)
             {
                 continue;
@@ -1199,11 +1231,22 @@ public class ComponentScanService(
         ClusterComponent? existing = await db.ClusterComponents
             .FirstOrDefaultAsync(c => c.ClusterId == cluster.Id && c.Name == discovered.CatalogKey, ct);
 
+        // A server the cluster provides is tracked, never managed: no release of EntKube's to act on.
+        bool providedByCluster = catalog?.ProvidedByApiService is not null;
+
         if (existing is not null)
         {
             existing.Status = ComponentStatus.Installed;
             existing.Namespace = discovered.Namespace;
             existing.InstalledAt ??= DateTime.UtcNow;
+
+            if (providedByCluster)
+            {
+                existing.ComponentType = ClusterProvidedComponents.ComponentType;
+                existing.ReleaseName = null;
+                existing.HelmChartVersion = null;
+                existing.LastError = null;
+            }
 
             // Backfill chart identity for components adopted before this was recorded.
             // The version is deliberately left alone — an out-of-band install's real chart
@@ -1220,12 +1263,14 @@ public class ComponentScanService(
             Id = Guid.NewGuid(),
             ClusterId = cluster.Id,
             Name = discovered.CatalogKey,
-            ComponentType = catalog?.ComponentType ?? "ManifestUrl",
+            ComponentType = providedByCluster
+                ? ClusterProvidedComponents.ComponentType
+                : catalog?.ComponentType ?? "ManifestUrl",
             Status = ComponentStatus.Installed,
             Namespace = discovered.Namespace,
             HelmRepoUrl = catalog?.HelmRepoUrl,
             HelmChartName = catalog?.HelmChartName,
-            ReleaseName = catalog?.DefaultReleaseName,
+            ReleaseName = providedByCluster ? null : catalog?.DefaultReleaseName,
             InstalledAt = DateTime.UtcNow,
             CreatedAt = DateTime.UtcNow
         };

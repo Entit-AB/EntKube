@@ -277,6 +277,16 @@ public class ComponentLifecycleService(
                 "Component has an operation in progress. Wait for it to complete.");
         }
 
+        // ComponentInstallOrchestrator settles these before getting here: it re-tracks them, or turns
+        // them back into a catalog install once the cluster stops providing them. Reaching this line
+        // with one means a path skipped that, and a helm install here would fight the cluster's server.
+        if (component.ComponentType == ClusterProvidedComponents.ComponentType)
+        {
+            throw new InvalidOperationException(
+                $"'{component.Name}' is provided by the cluster, not installed by EntKube, so it cannot be "
+                + "installed or upgraded from here.");
+        }
+
         // Validate minimum required fields.
         // ManifestUrl uses HelmRepoUrl as the URL; Manifest uses HelmValues as raw YAML.
         // Only HelmChart type requires a chart name.
@@ -1094,8 +1104,10 @@ public class ComponentLifecycleService(
         }
 
         // ManifestUrl CRD bundles are cluster-scoped infra — skip uninstall to avoid breaking dependents.
+        // A component the cluster provides was never EntKube's to remove: its ReleaseName, when set,
+        // names somebody else's Helm release.
 
-        if (component.ComponentType == "ManifestUrl")
+        if (component.ComponentType is "ManifestUrl" or ClusterProvidedComponents.ComponentType)
         {
             return new HelmCommand
             {

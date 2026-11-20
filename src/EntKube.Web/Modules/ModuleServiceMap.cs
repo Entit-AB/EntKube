@@ -87,6 +87,7 @@ public static partial class ModuleMap
         [typeof(CatalogComponentRegistrar)] = Module.Catalog,
         [typeof(CertificateDistributionReconcileService)] = Module.Catalog,
         [typeof(CertificateDistributionService)] = Module.Catalog,
+        [typeof(ClusterProvidedComponents)] = Module.Catalog,
         [typeof(ComponentInstallOrchestrator)] = Module.Catalog,
         [typeof(ComponentLifecycleService)] = Module.Catalog,
         [typeof(ComponentScanService)] = Module.Catalog,
