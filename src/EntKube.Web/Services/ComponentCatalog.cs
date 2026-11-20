@@ -2592,7 +2592,7 @@ public static class ComponentCatalog
         {
             Key = "seaweedfs",
             DisplayName = "SeaweedFS",
-            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, volume servers, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. Replaces MinIO, whose server image is no longer published.",
+            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. Only the S3 gateway serves data without a signed token: the filer and volume servers refuse unsigned requests. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
             Icon = "bi-bucket",
             Category = "Storage",
             HelmRepoUrl = "https://seaweedfs.github.io/seaweedfs/helm",
@@ -2602,37 +2602,49 @@ public static class ComponentCatalog
             DefaultReleaseName = "seaweedfs",
             FormFields =
             [
+                // The only size offered in the form. The chart's resize hook grows the volume
+                // server's existing PVCs on upgrade; the filer's and master's volumeClaimTemplates
+                // have no such hook and are immutable once installed, so they stay in the values.
+                // The number of volume servers is not offered either: the chart requires one node
+                // per server, and with no replication configured, removing a server strands the
+                // objects stored on it.
                 new ComponentFormField
                 {
                     Key = "volume-size", Label = "Volume Server Storage",
                     YamlPath = "volume.dataDirs.0.size", Type = FormFieldType.Text,
                     DefaultValue = "50Gi", Placeholder = "e.g. 50Gi, 500Gi",
-                    HelpText = "Persistent volume per volume server. This is where object data lives."
-                },
-                new ComponentFormField
-                {
-                    Key = "volume-replicas", Label = "Volume Servers",
-                    YamlPath = "volume.replicas", Type = FormFieldType.Text,
-                    DefaultValue = "1", Placeholder = "e.g. 1, 3",
-                    HelpText = "Number of volume servers. More servers add capacity; they do not copy data unless replication is configured in the values."
-                },
-                new ComponentFormField
-                {
-                    Key = "filer-size", Label = "Filer Metadata Storage",
-                    YamlPath = "filer.data.size", Type = FormFieldType.Text,
-                    DefaultValue = "5Gi", Placeholder = "e.g. 5Gi, 20Gi",
-                    HelpText = "Persistent volume for the filer's metadata store (bucket and object names)."
+                    HelpText = "Persistent volume for object data. Every bucket takes at least one 1 GB volume, so 50Gi holds about 50 buckets. It can be raised later if the StorageClass allows volume expansion; lowering it does not shrink an existing volume."
                 }
             ],
             DefaultValues = """
-                # SeaweedFS: one master, volume server(s), one filer and one S3 gateway.
+                # SeaweedFS: one master, one volume server, one filer and one S3 gateway.
                 #
                 # Every data and log directory is set explicitly. The chart's own default for
                 # each is hostPath on the node, so a pod rescheduled to another node would come
                 # up empty and two releases could share a directory.
+
+                # s3.enableAuth guards only the S3 gateway. Without these, any pod in the cluster
+                # can read, overwrite or delete every object through the filer's HTTP API on 8888
+                # or the volume servers' on 8080, bypassing the S3 keys. With them, both refuse
+                # requests that do not carry a token signed with keys only the SeaweedFS servers
+                # hold (generated into the <release>-security-config ConfigMap, kept on upgrade).
+                global:
+                  seaweedfs:
+                    securityConfig:
+                      jwtSigning:
+                        volumeWrite: true
+                        volumeRead: true
+                        filerWrite: true
+                        filerRead: true
+
                 master:
                   replicas: 1
                   defaultReplication: "000"
+                  # Every bucket is its own collection, and the first write to a collection
+                  # creates this many volumes (1 GB slots by default). The chart's 7 fills the
+                  # slots a 50Gi volume server has after about seven buckets.
+                  extraEnvironmentVars:
+                    WEED_MASTER_VOLUME_GROWTH_COPY_1: "1"
                   data:
                     type: persistentVolumeClaim
                     size: 2Gi
@@ -5887,12 +5899,28 @@ public static class ComponentCatalog
         // catalog's DefaultReleaseName or Key as a substring, or vice versa.
         // For example, release "cloudnative-pg-cnpg" matching entry with Key "cloudnative-pg".
 
+        //
+        // Except when the release's own chart is a sibling of the entry's chart: release
+        // "seaweedfs-csi-driver" of chart "seaweedfs-csi-driver" contains "seaweedfs", but it is
+        // the CSI driver, not a SeaweedFS cluster. Resolving it to the seaweedfs entry would record
+        // the wrong chart on import and offer an "upgrade" that replaces the driver with a cluster.
+
         return Entries.FirstOrDefault(e =>
-            (!string.IsNullOrEmpty(e.DefaultReleaseName)
-                && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
-                    || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
-            || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase));
+            !IsSiblingChart(chartName, e)
+            && ((!string.IsNullOrEmpty(e.DefaultReleaseName)
+                    && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
+                        || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
+                || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase)));
     }
+
+    /// <summary>
+    /// The release's chart is a different chart from the entry's family, named
+    /// <c>&lt;entry chart&gt;-something</c> (seaweedfs-csi-driver, seaweedfs-operator).
+    /// </summary>
+    private static bool IsSiblingChart(string? chartName, CatalogEntry entry) =>
+        !string.IsNullOrEmpty(chartName)
+        && !string.IsNullOrEmpty(entry.HelmChartName)
+        && chartName.StartsWith(entry.HelmChartName + "-", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Distinguishing qualifiers for catalog entries that share a Helm chart. The Istio

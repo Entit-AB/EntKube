@@ -251,26 +251,35 @@ public class ComponentCatalogTests : IDisposable
     // ── SeaweedFS: the defaults that make the chart safe to install ──
 
     [Fact]
-    public void SeaweedFS_keeps_every_data_and_log_directory_off_the_node()
+    public void SeaweedFS_keeps_its_data_on_persistent_volumes()
     {
         // The chart defaults every directory to hostPath: a pod rescheduled to another node comes up
-        // empty, and two releases on one node share a directory. Every directory the catalog can
-        // name is set, and none of them to hostPath.
+        // empty, and two releases on one node share a directory. An emptyDir is no better for data —
+        // it is wiped on every restart — so data must be a PersistentVolumeClaim.
         string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
         string Type(params string[] path) => ((YamlScalarNode)Navigate(values, path)).Value!;
 
-        List<string> types =
-        [
-            Type("master", "data", "type"), Type("master", "logs", "type"),
-            Type("filer", "data", "type"), Type("filer", "logs", "type"),
-            Type("volume", "logs", "type"), Type("s3", "logs", "type"),
-        ];
+        List<string> dataTypes = [Type("master", "data", "type"), Type("filer", "data", "type")];
         YamlSequenceNode dataDirs = (YamlSequenceNode)Navigate(values, "volume", "dataDirs");
         dataDirs.Children.Should().NotBeEmpty();
-        types.AddRange(dataDirs.Children.Cast<YamlMappingNode>()
+        dataTypes.AddRange(dataDirs.Children.Cast<YamlMappingNode>()
             .Select(d => ((YamlScalarNode)d.Children[new YamlScalarNode("type")]).Value!));
 
-        types.Should().OnlyContain(t => t == "persistentVolumeClaim" || t == "emptyDir");
+        dataTypes.Should().OnlyContain(t => t == "persistentVolumeClaim");
+    }
+
+    [Theory]
+    [InlineData("master")]
+    [InlineData("volume")]
+    [InlineData("filer")]
+    [InlineData("s3")]
+    public void SeaweedFS_keeps_its_logs_off_the_node(string server)
+    {
+        // Logs may be lost on restart, but they must not land in a hostPath on the node either.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, server, "logs", "type")).Value
+            .Should().BeOneOf("emptyDir", "persistentVolumeClaim");
     }
 
     [Theory]
@@ -315,6 +324,66 @@ public class ComponentCatalogTests : IDisposable
         YamlMappingNode first = (YamlMappingNode)((YamlSequenceNode)Navigate(merged, "volume", "dataDirs")).Children[0];
         ((YamlScalarNode)first.Children[new YamlScalarNode("size")]).Value.Should().Be("200Gi");
         ((YamlScalarNode)first.Children[new YamlScalarNode("type")]).Value.Should().Be("persistentVolumeClaim");
+
+        // And it must read back. The edit form fills each field from the installed values; a path
+        // that cannot be read shows the default, and saving writes that default over 200Gi.
+        YamlFormMerger.ExtractValue(merged, field.YamlPath).Should().Be("200Gi");
+        YamlFormMerger.ExtractValue(entry.DefaultValues!, field.YamlPath).Should().Be(field.DefaultValue);
+    }
+
+    [Fact]
+    public void SeaweedFS_filer_and_volume_servers_refuse_unsigned_requests()
+    {
+        // s3.enableAuth guards only the gateway. Without signing, any pod can read or delete every
+        // object through the filer (8888) or a volume server (8080) without the S3 keys.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        foreach (string key in new[] { "volumeWrite", "volumeRead", "filerWrite", "filerRead" })
+        {
+            ((YamlScalarNode)Navigate(values, "global", "seaweedfs", "securityConfig", "jwtSigning", key))
+                .Value.Should().Be("true", $"jwtSigning.{key} closes a path around the S3 gateway");
+        }
+    }
+
+    [Fact]
+    public void SeaweedFS_grows_one_volume_per_new_bucket()
+    {
+        // Each bucket is a collection; the chart's default grows 7 volumes on a collection's first
+        // write, which exhausts a 50Gi volume server after about seven buckets.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, "master", "extraEnvironmentVars", "WEED_MASTER_VOLUME_GROWTH_COPY_1"))
+            .Value.Should().Be("1");
+    }
+
+    [Fact]
+    public void SeaweedFS_form_offers_nothing_that_breaks_an_installed_release()
+    {
+        // The filer's and master's volumeClaimTemplates are immutable (the chart's resize hook covers
+        // only volume servers), and each extra volume server needs a node of its own.
+        ComponentCatalog.GetByKey("seaweedfs")!.FormFields.Select(f => f.YamlPath)
+            .Should().NotContain(["filer.data.size", "master.data.size", "volume.replicas", "master.replicas", "filer.replicas"]);
+    }
+
+    [Theory]
+    [InlineData("seaweedfs-csi-driver", "seaweedfs-csi-driver")]
+    [InlineData("seaweedfs-operator", "seaweedfs-operator")]
+    public void A_sibling_chart_of_seaweedfs_does_not_resolve_to_the_seaweedfs_entry(string release, string chart)
+    {
+        // The release name contains "seaweedfs", but the chart says it is the CSI driver or the
+        // operator. Resolving it to the seaweedfs entry would record the wrong chart on import and
+        // offer an "upgrade" that replaces it with a whole SeaweedFS cluster.
+        ComponentCatalog.FindByRelease(release, chart)?.Key.Should().NotBe("seaweedfs");
+    }
+
+    [Theory]
+    [InlineData("seaweedfs", "seaweedfs")]
+    [InlineData("objects", "seaweedfs")]
+    [InlineData("seaweedfs-prod", null)]
+    [InlineData("seaweedfs-prod", "seaweedfs")]
+    public void A_seaweedfs_release_still_resolves_to_the_seaweedfs_entry(string release, string? chart)
+    {
+        ComponentCatalog.FindByRelease(release, chart)!.Key.Should().Be("seaweedfs");
     }
 
     [Fact]
