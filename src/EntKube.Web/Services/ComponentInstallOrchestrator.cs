@@ -39,6 +39,7 @@ public class ComponentInstallOrchestrator(
     Dr.VeleroService veleroService,
     StalwartService stalwartService,
     HeadscaleService headscaleService,
+    ClusterProvidedComponents providedComponents,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
 {
     /// <summary>
@@ -78,6 +79,14 @@ public class ComponentInstallOrchestrator(
         if (await harborService.DescribeRedisConflictAsync(tenantId, componentId, ct) is string redisConflict)
         {
             return new HelmExecutionResult { Success = false, Output = redisConflict };
+        }
+
+        // Managed clusters usually already run a metrics-server, in a namespace of their own choosing and
+        // not as a Helm release. Only one server can back the API, so a second install fails on the
+        // existing APIService; track what is there instead. Before anything is marked Installing.
+        if (await providedComponents.TrackIfProvidedAsync(tenantId, componentId, options.IsUpgrade, ct) is { } provided)
+        {
+            return provided;
         }
 
         if (options.IsUpgrade)

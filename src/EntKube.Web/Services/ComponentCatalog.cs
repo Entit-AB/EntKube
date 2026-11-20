@@ -86,6 +86,18 @@ public class CatalogEntry
     /// means this issuer was applied. See <see cref="DetectionResource"/>.
     /// </summary>
     public DetectionResource? DetectionResource { get; init; }
+    /// <summary>
+    /// The aggregated API (an APIService name, e.g. <c>v1beta1.metrics.k8s.io</c>) this component
+    /// exists to serve, for components a cluster very often already has.
+    ///
+    /// <para>Managed Kubernetes ships some of these as add-ons: AKS, GKE, EKS, k3s, RKE2 and Gardener
+    /// all run a metrics-server, in whichever namespace they chose, and usually not as a Helm release.
+    /// Only one thing can serve an API, so installing the chart there fails on the existing APIService.
+    /// The APIService is cluster-scoped and names the Service behind it, so it locates the existing
+    /// server in any namespace. When it exists, an install tracks that server instead of installing
+    /// a second one; see <see cref="ClusterProvidedComponents"/>.</para>
+    /// </summary>
+    public string? ProvidedByApiService { get; init; }
 
     /// <summary>
     /// Registry host serving this component's container image, when it is one EntKube publishes to a
@@ -4553,7 +4565,7 @@ public static class ComponentCatalog
         {
             Key = "metrics-server",
             DisplayName = "Metrics Server",
-            Description = "Serves the Kubernetes resource metrics API (metrics.k8s.io): live CPU and memory for every pod and node. CPU/memory HorizontalPodAutoscalers and kubectl top do nothing without it. AKS, GKE and k3s already run one; the cluster scan finds it there so it can be tracked instead of installed twice.",
+            Description = "Serves the Kubernetes resource metrics API (metrics.k8s.io): live CPU and memory for every pod and node. CPU/memory HorizontalPodAutoscalers and kubectl top do nothing without it. Most managed clusters (AKS, GKE, EKS, k3s, RKE2, Gardener) already run one. When the cluster already serves the metrics API, from any namespace, Install tracks that server instead of installing a second.",
             Icon = "bi-speedometer2",
             Category = "Autoscaling",
             HelmRepoUrl = "https://kubernetes-sigs.github.io/metrics-server/",
@@ -4561,11 +4573,8 @@ public static class ComponentCatalog
             HelmChartVersion = "3.14.0",
             DefaultNamespace = "kube-system",
             DefaultReleaseName = "metrics-server",
-            // There is no CRD to detect by. Whatever serves the metrics API (a cloud add-on, k3s's
-            // bundled server, prometheus-adapter) owns this APIService, and this chart's install would
-            // fail on it. The quotes keep KEDA's v1beta1.external.metrics.k8s.io from matching.
-            DetectionResource = new DetectionResource(
-                "apiregistration.k8s.io", "v1", "apiservices", "\"v1beta1.metrics.k8s.io\""),
+            // Read by exact name, so KEDA's v1beta1.external.metrics.k8s.io can never be mistaken for it.
+            ProvidedByApiService = "v1beta1.metrics.k8s.io",
             FormFields =
             [
                 new ComponentFormField
