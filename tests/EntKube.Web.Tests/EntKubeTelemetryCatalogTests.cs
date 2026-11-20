@@ -592,12 +592,18 @@ public class EntKubeTelemetryCatalogTests
 /// </summary>
 public class RetiredCatalogEntryTests
 {
+    // The telemetry pair: telemetry is held by the management plane again.
+    // MinIO and its operator: MinIO stopped publishing its server image. On 2026-11-20 quay.io answered
+    // "no such manifest" for the tag the minio chart pins and docker.io/minio/minio no longer existed,
+    // so a fresh install could not start a pod. SeaweedFS replaces them in the catalog.
     private static readonly string[] Retired =
-        [EntKubeTelemetryService.IndexerKey, EntKubeTelemetryService.QuerierKey];
+        [EntKubeTelemetryService.IndexerKey, EntKubeTelemetryService.QuerierKey, "minio", "minio-operator"];
 
     [Theory]
     [InlineData(EntKubeTelemetryService.IndexerKey)]
     [InlineData(EntKubeTelemetryService.QuerierKey)]
+    [InlineData("minio")]
+    [InlineData("minio-operator")]
     public void A_retired_entry_is_not_offered_in_any_category(string key)
     {
         ComponentCatalog.GetByCategory()
@@ -608,6 +614,8 @@ public class RetiredCatalogEntryTests
     [Theory]
     [InlineData(EntKubeTelemetryService.IndexerKey)]
     [InlineData(EntKubeTelemetryService.QuerierKey)]
+    [InlineData("minio")]
+    [InlineData("minio-operator")]
     public void A_retired_entry_still_resolves_for_a_component_that_has_one(string key)
     {
         CatalogEntry entry = ComponentCatalog.GetByKey(key)!;
@@ -631,6 +639,8 @@ public class RetiredCatalogEntryTests
     [Theory]
     [InlineData(EntKubeTelemetryService.IndexerKey)]
     [InlineData(EntKubeTelemetryService.QuerierKey)]
+    [InlineData("minio")]
+    [InlineData("minio-operator")]
     public void A_retired_entry_says_so_where_an_operator_would_read_it(string key)
     {
         // The description is the only text that reaches a tab still showing an installed one.
