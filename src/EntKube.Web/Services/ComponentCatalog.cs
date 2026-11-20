@@ -200,7 +200,16 @@ public sealed record ServicesSection(string Key, string Label, bool RequiresAppl
 /// <param name="Version">API version, e.g. "v1".</param>
 /// <param name="Plural">Resource plural, e.g. "clusterissuers".</param>
 /// <param name="Matches">Optional case-insensitive substring an instance's JSON must contain to count.</param>
-public sealed record DetectionResource(string Group, string Version, string Plural, string? Matches = null);
+public sealed record DetectionResource(string Group, string Version, string Plural, string? Matches = null)
+{
+    /// <summary>
+    /// Whether one listed instance, as its JSON, counts as this component being installed. The
+    /// resource need not be a custom one: built-in cluster-scoped kinds (an APIService, a CSIDriver)
+    /// list the same way.
+    /// </summary>
+    public bool Accepts(string instanceJson) =>
+        Matches is null || instanceJson.Contains(Matches, StringComparison.OrdinalIgnoreCase);
+}
 
 /// <summary>
 /// A JSON Patch (RFC 6902) for one object of a ManifestUrl release manifest, applied by kustomize as
@@ -2688,6 +2697,65 @@ public static class ComponentCatalog
                 """
         },
 
+        new CatalogEntry
+        {
+            Key = "snapshot-controller",
+            DisplayName = "CSI Snapshot Controller",
+            Description = "Installs the VolumeSnapshot, VolumeSnapshotClass and VolumeSnapshotContent CRDs and the controller that acts on them, so a CSI driver can snapshot PersistentVolumes. KubeVirt VM snapshots and Velero's CSI snapshot backups both need it. Managed clusters (EKS, GKE, AKS) usually ship one already. Snapshots also need a CSI driver that supports them and a VolumeSnapshotClass for that driver.",
+            Icon = "bi-camera",
+            Category = "Storage",
+            // kubernetes-csi publishes external-snapshotter as raw manifests only; this is the
+            // community chart packaging the same upstream controller image and CRDs.
+            HelmRepoUrl = "https://piraeus.io/helm-charts/",
+            HelmChartName = "snapshot-controller",
+            HelmChartVersion = "5.4.0",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "snapshot-controller",
+            // These CRDs belong to this component and to nothing else in the catalog. A CSI driver
+            // that merely USES them (Cinder) must not detect by them, or every cluster with snapshots
+            // reports that driver as installed. NoTwoEntriesDetectByTheSameCrd holds that line.
+            DetectionCrds = ["volumesnapshotclasses.snapshot.storage.k8s.io"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "install-crds", Label = "Install CRDs",
+                    YamlPath = "installCRDs", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Turn off when the snapshot CRDs already exist on the cluster but no controller runs: Helm will not take over CRDs it did not create, and the install fails on them."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "controller.resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "64Mi", Placeholder = "e.g. 64Mi, 128Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "controller.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
+                }
+            ],
+            DefaultValues = """
+                installCRDs: true
+
+                # Keep the CRDs when this release is uninstalled. Deleting a CRD deletes every object
+                # of that kind, so the chart's default (false) would take every VolumeSnapshot on the
+                # cluster with it, and with them the snapshots of a Delete-policy class.
+                keepCRDs: true
+
+                controller:
+                  replicaCount: 1
+                  resources:
+                    requests:
+                      cpu: 10m
+                      memory: 64Mi
+                    limits:
+                      memory: 256Mi
+                """
+        },
+
         // ── Databases ──
 
         new CatalogEntry
@@ -4417,7 +4485,120 @@ public static class ComponentCatalog
                 """
         },
 
+        // ── Workloads ──
+
+        new CatalogEntry
+        {
+            Key = "reloader",
+            DisplayName = "Reloader",
+            Description = "Rolls a Deployment, StatefulSet or DaemonSet when a Secret or ConfigMap it uses changes. Kubernetes does not do this on its own: a pod that reads a secret as an environment variable keeps the old value until it restarts, so a password rotated in the vault and synced to the cluster is not in use until the app is restarted. Workloads opt in with the annotation reloader.stakater.com/auto: \"true\", or every workload at once with the cluster-wide toggle.",
+            Icon = "bi-arrow-repeat",
+            Category = "Workloads",
+            HelmRepoUrl = "https://stakater.github.io/stakater-charts",
+            HelmChartName = "reloader",
+            HelmChartVersion = "2.2.19",
+            DefaultNamespace = "reloader",
+            DefaultReleaseName = "reloader",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "auto-reload-all", Label = "Restart every workload on change",
+                    YamlPath = "reloader.autoReloadAll", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Off: only workloads annotated reloader.stakater.com/auto: \"true\" are restarted. On: every workload on the cluster restarts when a Secret or ConfigMap it references changes, including other components' pods."
+                },
+                new ComponentFormField
+                {
+                    Key = "reload-strategy", Label = "Restart Method",
+                    YamlPath = "reloader.reloadStrategy", Type = FormFieldType.Select,
+                    Options = ["annotations", "env-vars"],
+                    DefaultValue = "annotations",
+                    HelpText = "annotations: stamps the pod template's annotations to trigger the rollout. env-vars: adds a variable holding the secret's hash to each container instead."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "reloader.deployment.resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "128Mi", Placeholder = "e.g. 128Mi, 256Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "reloader.deployment.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "512Mi", Placeholder = "e.g. 512Mi, 1Gi"
+                }
+            ],
+            DefaultValues = """
+                reloader:
+                  # Only workloads annotated reloader.stakater.com/auto: "true" are restarted.
+                  autoReloadAll: false
+                  # Trigger rollouts through a pod-template annotation rather than an injected
+                  # environment variable, so containers' environments stay as the app defined them.
+                  reloadStrategy: annotations
+                  readOnlyRootFileSystem: true
+                  deployment:
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 128Mi
+                      limits:
+                        memory: 512Mi
+                """
+        },
+
         // ── Autoscaling ──
+
+        new CatalogEntry
+        {
+            Key = "metrics-server",
+            DisplayName = "Metrics Server",
+            Description = "Serves the Kubernetes resource metrics API (metrics.k8s.io): live CPU and memory for every pod and node. CPU/memory HorizontalPodAutoscalers and kubectl top do nothing without it. AKS, GKE and k3s already run one; the cluster scan finds it there so it can be tracked instead of installed twice.",
+            Icon = "bi-speedometer2",
+            Category = "Autoscaling",
+            HelmRepoUrl = "https://kubernetes-sigs.github.io/metrics-server/",
+            HelmChartName = "metrics-server",
+            HelmChartVersion = "3.14.0",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "metrics-server",
+            // There is no CRD to detect by. Whatever serves the metrics API (a cloud add-on, k3s's
+            // bundled server, prometheus-adapter) owns this APIService, and this chart's install would
+            // fail on it. The quotes keep KEDA's v1beta1.external.metrics.k8s.io from matching.
+            DetectionResource = new DetectionResource(
+                "apiregistration.k8s.io", "v1", "apiservices", "\"v1beta1.metrics.k8s.io\""),
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "200Mi", Placeholder = "e.g. 200Mi, 300Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "500Mi", Placeholder = "e.g. 500Mi, 1Gi",
+                    HelpText = "Memory grows with the number of nodes and pods; raise it on large clusters."
+                }
+            ],
+            DefaultValues = """
+                # kind and plain kubeadm clusters serve kubelet metrics with a self-signed certificate,
+                # which metrics-server rejects: the pod never turns Ready and the install times out.
+                # On those clusters only, uncomment the two lines below. The flag skips verifying the
+                # kubelet's certificate; the connection is still encrypted. The lasting fix is
+                # serverTLSBootstrap: true in the kubelet configuration, which gets CA-signed certificates.
+                # args:
+                #   - --kubelet-insecure-tls
+
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 200Mi
+                  limits:
+                    memory: 500Mi
+                """
+        },
 
         new CatalogEntry
         {
@@ -5354,7 +5535,11 @@ public static class ComponentCatalog
             DefaultReleaseName = "cinder-csi",
             InstallTimeout = "15m0s",
             Dependencies = ["openstack-ccm"],
-            DetectionCrds = ["volumesnapshotclasses.snapshot.storage.k8s.io"],
+            // Detected by the CSIDriver object the chart creates. It used to be detected by the
+            // volumesnapshotclasses CRD, which belongs to the snapshot controller (and ships with EKS,
+            // GKE and AKS), so any cluster with snapshot support reported Cinder CSI as installed.
+            DetectionResource = new DetectionResource(
+                "storage.k8s.io", "v1", "csidrivers", "\"cinder.csi.openstack.org\""),
             DefaultValues = """
                 secret:
                   enabled: true
