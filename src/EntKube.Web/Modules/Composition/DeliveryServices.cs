@@ -39,6 +39,7 @@ internal static class DeliveryServices
         services.AddScoped<DeploymentService>();
         services.AddScoped<DeploymentImportService>();
         services.AddScoped<KyvernoPolicyService>();
+        services.AddScoped<KyvernoPolicyReportService>();
         services.AddScoped<KedaScalerService>();
         services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
         services.AddSingletonWork<EntKube.Web.Services.Rollouts.RolloutWatcherService>();

@@ -506,7 +506,7 @@ public class KyvernoPolicyService(
     /// app footprint in an environment — the same targets policies are applied to.
     /// Uses the governance-locked AppEnvironment namespace when present.
     /// </summary>
-    private static async Task<List<(KubernetesCluster Cluster, string Namespace)>> ResolveTargetsAsync(
+    internal static async Task<List<(KubernetesCluster Cluster, string Namespace)>> ResolveTargetsAsync(
         EntKube.Web.Data.Modules.DeliveryDbContext db, Guid tenantId, Guid environmentId, CancellationToken ct)
     {
         // Collect all app IDs for this tenant (App → Customer → Tenant).

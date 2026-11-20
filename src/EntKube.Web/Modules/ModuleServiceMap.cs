@@ -144,6 +144,7 @@ public static partial class ModuleMap
         [typeof(GitWebhookService)] = Module.Delivery,
         [typeof(KedaScalerService)] = Module.Delivery,
         [typeof(KyvernoPolicyService)] = Module.Delivery,
+        [typeof(KyvernoPolicyReportService)] = Module.Delivery,
         [typeof(PortalServiceScopeService)] = Module.Delivery,
         [typeof(EntKube.Web.Services.Rollouts.RolloutService)] = Module.Delivery,
         [typeof(EntKube.Web.Services.Rollouts.RolloutWatcherService)] = Module.Delivery,

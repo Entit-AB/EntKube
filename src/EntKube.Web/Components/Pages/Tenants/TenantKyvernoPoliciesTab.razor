@@ -513,6 +513,10 @@
     </div>
 </div>
 
+@* Rendered whether or not EntKube tracks a kyverno component: a Kyverno installed some other way
+   still writes reports, and on a cluster without one the panel says so rather than showing nothing. *@
+<KyvernoPolicyResults TenantId="TenantId" EnvironmentId="EnvironmentId" />
+
 @code {
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
     [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
