@@ -2592,7 +2592,7 @@ public static class ComponentCatalog
         {
             Key = "seaweedfs",
             DisplayName = "SeaweedFS",
-            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. Only the S3 gateway serves data without a signed token: the filer and volume servers refuse unsigned requests. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
+            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. NetworkPolicies admit only the S3 port from outside the release; the master, filer and volume servers (HTTP and gRPC) are reachable only by the release's own pods, which needs a CNI that enforces NetworkPolicy. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
             Icon = "bi-bucket",
             Category = "Storage",
             HelmRepoUrl = "https://seaweedfs.github.io/seaweedfs/helm",
@@ -2623,11 +2623,24 @@ public static class ComponentCatalog
                 # each is hostPath on the node, so a pod rescheduled to another node would come
                 # up empty and two releases could share a directory.
 
-                # s3.enableAuth guards only the S3 gateway. Without these, any pod in the cluster
-                # can read, overwrite or delete every object through the filer's HTTP API on 8888
-                # or the volume servers' on 8080, bypassing the S3 keys. With them, both refuse
-                # requests that do not carry a token signed with keys only the SeaweedFS servers
-                # hold (generated into the <release>-security-config ConfigMap, kept on upgrade).
+                # s3.enableAuth guards only the S3 gateway. Every other server is wide open to any
+                # pod that can reach it: the master's HTTP API deletes a whole bucket with
+                # /col/delete and hands out volume tokens from /dir/lookup, and the filer's and
+                # volume servers' gRPC ports read and delete objects with no authentication at all.
+                # So the release's NetworkPolicies admit the S3 port (8333) from anywhere and
+                # everything else only from the release's own pods. On a CNI that does not enforce
+                # NetworkPolicy (flannel, for one) this protection is absent.
+                networkPolicy:
+                  enabled: true
+                  extraIngress:
+                    - ports:
+                        - protocol: TCP
+                          port: 8333
+
+                # Defence in depth inside the release: the filer's and volume servers' HTTP APIs
+                # refuse requests without a token signed with keys only the SeaweedFS servers hold
+                # (generated into the <release>-security-config ConfigMap, kept on upgrade). This
+                # does not cover the master or any gRPC port, which is why the policy above exists.
                 global:
                   seaweedfs:
                     securityConfig:

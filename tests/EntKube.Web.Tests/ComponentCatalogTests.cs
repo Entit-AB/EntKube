@@ -346,6 +346,24 @@ public class ComponentCatalogTests : IDisposable
     }
 
     [Fact]
+    public void SeaweedFS_admits_only_the_S3_port_from_outside_the_release()
+    {
+        // The master deletes whole buckets over unauthenticated HTTP (/col/delete) and the filer and
+        // volume gRPC ports read and delete objects with no token. Only the NetworkPolicy keeps other
+        // pods away from them: on, and with exactly one extra rule, for 8333 and nothing else.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, "networkPolicy", "enabled")).Value.Should().Be("true");
+
+        YamlSequenceNode extra = (YamlSequenceNode)Navigate(values, "networkPolicy", "extraIngress");
+        YamlMappingNode rule = (YamlMappingNode)extra.Children.Should().ContainSingle().Subject;
+        YamlSequenceNode ports = (YamlSequenceNode)rule.Children[new YamlScalarNode("ports")];
+        ports.Children.Cast<YamlMappingNode>()
+            .Select(p => ((YamlScalarNode)p.Children[new YamlScalarNode("port")]).Value)
+            .Should().Equal("8333");
+    }
+
+    [Fact]
     public void SeaweedFS_grows_one_volume_per_new_bucket()
     {
         // Each bucket is a collection; the chart's default grows 7 volumes on a collection's first

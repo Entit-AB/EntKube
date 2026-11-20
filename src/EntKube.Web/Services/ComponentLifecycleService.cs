@@ -816,7 +816,7 @@ public class ComponentLifecycleService(
         // install works without an operator hand-building a Secret per cluster. An imagePullSecrets value
         // they set themselves wins: naming an existing Secret is a legitimate choice.
         if (valuesCatalog?.ImageRegistryHost is not null
-            && string.IsNullOrWhiteSpace(YamlFormMerger.ExtractValue(valuesYaml ?? "", "imagePullSecrets.0.name")))
+            && !NamesOperatorChosenPullSecret(valuesYaml))
         {
             string? pullSecret = await EnsureImagePullSecretAsync(
                 tenantId, component, valuesCatalog, ct);
@@ -824,7 +824,7 @@ public class ComponentLifecycleService(
             if (pullSecret is not null)
             {
                 valuesYaml = YamlFormMerger.MergeFormValues(valuesYaml ?? "",
-                    new Dictionary<string, string> { ["imagePullSecrets.0.name"] = pullSecret });
+                    new Dictionary<string, string> { [PullSecretPath] = pullSecret });
             }
         }
 
@@ -2327,6 +2327,23 @@ public class ComponentLifecycleService(
     /// name that drifts out of step with the <c>imagePullSecrets</c> value written alongside it.
     /// </summary>
     public const string ManagedPullSecretName = "entkube-registry";
+
+    /// <summary>The values path EntKube writes its managed pull secret into.</summary>
+    public const string PullSecretPath = "imagePullSecrets.0.name";
+
+    /// <summary>
+    /// True when the values name a pull secret the operator chose. EntKube's own
+    /// <see cref="ManagedPullSecretName"/> is not a choice: it reaches stored values when a release
+    /// EntKube installed is imported back (the release's values carry it), and treating it as the
+    /// operator's would stop EntKube refreshing that Secret, so a rotated credential never reaches the
+    /// cluster and a deleted one is never recreated.
+    /// </summary>
+    public static bool NamesOperatorChosenPullSecret(string? valuesYaml)
+    {
+        string? name = YamlFormMerger.ExtractValue(valuesYaml ?? "", PullSecretPath);
+        return !string.IsNullOrWhiteSpace(name)
+            && !string.Equals(name, ManagedPullSecretName, StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// Ensures the cluster can pull an EntKube-published image, by creating a <c>dockerconfigjson</c>
