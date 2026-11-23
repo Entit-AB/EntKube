@@ -445,7 +445,10 @@ public class RedisService(
             StorageSize = storageSize,
             StorageClass = storageClass,
             PersistenceEnabled = persistenceEnabled,
-            Status = RedisClusterStatus.Creating
+            Status = RedisClusterStatus.Creating,
+            // Born with per-app users when the version can carry them: no app ever receives the
+            // admin password, and there is no restart later to switch over.
+            PerAppUsersSince = RedisAcl.SupportsPerAppUsers(redisVersion) ? DateTime.UtcNow : null
         };
 
         db.RedisClusters.Add(cluster);
@@ -476,6 +479,11 @@ public class RedisService(
             // Create the auth Secret the operator reads at startup.
             string authSecretManifest = BuildAuthSecretManifest(name, ns, password);
             await target.ApplyManifestAsync(authSecretManifest, ct);
+
+            // The (empty) users file the pods include. It must exist before the pods do: the
+            // include names a ConfigMap, and a pod whose volume source is missing never starts.
+            if (cluster.PerAppUsers)
+                await target.ApplyManifestAsync(RedisAcl.BuildUsersConfigMap(name, ns, []), ct);
 
             // Apply the RedisCluster CRD.
             string clusterManifest = BuildClusterManifest(cluster);
@@ -575,7 +583,7 @@ public class RedisService(
     /// <param name="tenantId">
     /// Whose deployment. A binding row names the Kubernetes Secret the credentials land in and
     /// the backing cluster, so listing them for an arbitrary deployment id describes another
-    /// tenant's wiring. <c>PortalSecretsDetail</c> — a customer-facing panel — calls this by id.
+    /// tenant's wiring. The app environment page calls this by id.
     /// </param>
     public async Task<List<CacheBinding>> GetCacheBindingsForDeploymentAsync(
         Guid tenantId, Guid appDeploymentId, CancellationToken ct = default)
@@ -588,127 +596,821 @@ public class RedisService(
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Binds a Redis to an app deployment and writes the credentials into its Secret.
+    ///
+    /// <para><b>What is checked before anything is written.</b>
+    /// <list type="bullet">
+    ///   <item>The Redis and the deployment must both be this tenant's — the ids arrive from a form,
+    ///     and a foreign id used to produce a row that could never sync.</item>
+    ///   <item>The app's environment allow-list (Governance) must admit the Redis when it has entries.</item>
+    ///   <item>No other cache binding may write into the same Secret. A Secret belongs to a namespace,
+    ///     not a deployment, so two deployments in one namespace count: both would own the same REDIS_*
+    ///     keys, the last sync would win, and deleting either would remove the other's credentials.</item>
+    ///   <item>No other app on this Redis may already use the key prefix. Two users confined to the
+    ///     same prefix share every key and channel under it, while the page shows each as confined.</item>
+    /// </list></para>
+    ///
+    /// <para>A binding whose first sync fails is removed again rather than left behind as a row
+    /// that looks bound and is not.</para>
+    /// </summary>
+    /// <param name="keyPrefix">
+    /// The prefix the app's Redis user is confined to, without the colon; null for all keys. Only
+    /// enforced on a cluster with per-app users, but delivered as REDIS_KEY_PREFIX either way, so
+    /// an app can start using it before its cluster switches over.
+    /// </param>
     public async Task<CacheBinding> CreateCacheBindingAsync(
         Guid tenantId, Guid clusterId, Guid appDeploymentId,
-        string k8sSecretName, CancellationToken ct = default)
+        string k8sSecretName, string? keyPrefix = null, CancellationToken ct = default)
     {
+        string? prefix = RedisAcl.NormalizePrefix(keyPrefix);
+        if (RedisAcl.DescribeInvalidPrefix(prefix) is string badPrefix)
+            throw new InvalidOperationException(badPrefix);
+
+        string secretName = (k8sSecretName ?? "").Trim();
+        if (secretName.Length == 0)
+            throw new InvalidOperationException("Name the Kubernetes Secret the credentials are written into.");
+
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        RedisCluster cluster = await db.RedisClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Redis cluster not found.");
+
+        EntKube.Contracts.Delivery.DeploymentSummary deployment =
+            await delivery.GetDeploymentAsync(tenantId, appDeploymentId, ct)
+            ?? throw new InvalidOperationException("Deployment not found.");
+
+        IReadOnlyList<Guid> allowed = await delivery.GetAllowedCacheClusterIdsAsync(
+            tenantId, deployment.AppId, deployment.EnvironmentId, ct);
+        if (allowed.Count > 0 && !allowed.Contains(cluster.Id))
+        {
+            throw new InvalidOperationException(
+                $"{deployment.AppName} may not use the Redis '{cluster.Name}' in {deployment.EnvironmentName}: "
+                + "the environment's allow-list on the Governance tab names other caches. Add this one there first.");
+        }
+
+        if (await db.CacheBindings.AnyAsync(b => b.TenantId == tenantId
+                && b.AppDeployment.ClusterId == deployment.ClusterId
+                && b.AppDeployment.Namespace == deployment.Namespace
+                && b.KubernetesSecretName == secretName, ct))
+        {
+            throw new InvalidOperationException(
+                $"Another Redis binding already writes into the Secret '{secretName}' in {deployment.Namespace}. "
+                + "Both would write the same REDIS_* keys, so the last sync would win and deleting either "
+                + "would remove the other's credentials. Use a different Secret name.");
+        }
+
+        if (prefix is not null && await db.CacheBindings
+                .Where(b => b.TenantId == tenantId && b.RedisClusterId == cluster.Id
+                    && b.KeyPrefix == prefix && b.AppDeploymentId != appDeploymentId)
+                .Select(b => b.AppDeployment.Name)
+                .FirstOrDefaultAsync(ct) is string sharer)
+        {
+            throw new InvalidOperationException(
+                $"The deployment '{sharer}' already uses the key prefix '{prefix}' on this Redis. Two apps with "
+                + "one prefix can read and overwrite each other's keys and channels. Choose another prefix.");
+        }
 
         CacheBinding binding = new()
         {
             Id = Guid.NewGuid(),
             TenantId = tenantId,
-            RedisClusterId = clusterId,
+            RedisClusterId = cluster.Id,
             AppDeploymentId = appDeploymentId,
-            KubernetesSecretName = k8sSecretName,
+            KubernetesSecretName = secretName,
+            KeyPrefix = prefix,
             SyncEnabled = true
         };
 
         db.CacheBindings.Add(binding);
         await db.SaveChangesAsync(ct);
 
-        await SyncCacheBindingAsync(tenantId, binding.Id, ct);
+        // One action, one acknowledgment: the users file, the live users and the Secret are one
+        // decision. The sync below opens its own operation, which nests into this one.
+        using IDisposable? operation = gate?.BeginOperation("bind a Redis to an app");
+
+        try
+        {
+            // The password exists before the binding's first reconcile, so it is never generated
+            // by some other reconcile that happened to see the row first.
+            if (cluster.PerAppUsers)
+                await EnsureUserPasswordAsync(tenantId, cluster.Id, binding.Id, ct);
+
+            await SyncCacheBindingAsync(tenantId, binding.Id, ct);
+        }
+        catch
+        {
+            // Not left behind: a row that never synced looks bound to everyone reading the page.
+            // Its user, if one reached some nodes, is revoked by the next reconcile of this
+            // cluster, which no longer finds the binding.
+            using DataServicesDbContext cleanup = dbFactory.CreateDbContext();
+            await cleanup.CacheBindings
+                .Where(b => b.Id == binding.Id && b.TenantId == tenantId)
+                .ExecuteDeleteAsync(CancellationToken.None);
+            await vaultService.DeleteRedisClusterSecretAsync(
+                tenantId, cluster.Id, RedisAcl.PasswordSecretName(binding.Id), CancellationToken.None);
+            throw;
+        }
 
         return binding;
     }
 
-    public async Task DeleteCacheBindingAsync(
+    /// <summary>
+    /// Unbinds a Redis from an app: revokes the app's Redis user, removes the credentials from its
+    /// Secret, and deletes the binding.
+    ///
+    /// <para><b>Revocation comes first and is not best-effort.</b> If the app's user cannot be removed
+    /// from the Redis, the binding is kept and the error surfaces: deleting the row anyway would show
+    /// an app as unbound while its credentials still work. Removing the keys from the app's Secret
+    /// is different — once the user is gone those values open nothing — so a failure there is
+    /// returned as a warning rather than undoing the unbind.</para>
+    ///
+    /// <para><b>The admin password is the exception.</b> An app that was ever handed it — bound before
+    /// its Redis switched to per-app users, or never moved off it since — still knows it after its own
+    /// user is gone, and only changing that password takes it back. The warning says so; it is decided
+    /// from the binding's history, not from the cluster's current mode.</para>
+    /// </summary>
+    /// <returns>A warning for the operator, or null when everything was cleaned up.</returns>
+    public async Task<string?> DeleteCacheBindingAsync(
         Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CacheBinding binding = await db.CacheBindings
-            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .Include(b => b.RedisCluster)
+            .Include(b => b.AppDeployment)
             .FirstOrDefaultAsync(b => b.Id == bindingId && b.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Cache binding not found.");
+
+        // One action, one acknowledgment: the revocation and the key removal are one decision.
+        using IDisposable? operation = gate?.BeginOperation("remove a Redis binding");
+
+        List<string> warnings = [];
+
+        if (binding.RedisCluster.PerAppUsers)
+        {
+            // Throws when the user could not be revoked everywhere; the row stays.
+            await ReconcileUsersAsync(tenantId, binding.RedisClusterId, excludeBindingId: binding.Id, ct);
+        }
+
+        if (RedisAcl.EverHeldAdminPassword(binding, binding.RedisCluster))
+        {
+            warnings.Add(binding.RedisCluster.PerAppUsers
+                ? $"This app was once given the Redis '{binding.RedisCluster.Name}' admin password, which stays valid: "
+                  + "revoking its own user does not take that back. Change the admin password to do so."
+                : $"This app held the Redis '{binding.RedisCluster.Name}' admin password, which stays valid: switch "
+                  + "the Redis to per-app users so access can be taken back app by app.");
+        }
 
         try
         {
-            Clusters.IClusterClient? appCluster =
-                await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct);
+            Clusters.IClusterClient appCluster =
+                await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct)
+                ?? throw new InvalidOperationException("the app's cluster has no stored kubeconfig");
 
-            if (appCluster is not null)
-            {
-                // The keys, not the Secret. Deleting the object would take the app's own secrets
-                // with it whenever the binding shares their Secret, which is the supported way
-                // to set this up.
-                await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
-                    appCluster,
-                    binding.KubernetesSecretName,
-                    binding.AppDeployment.Namespace,
-                    EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Cache,
-                    summary: $"Remove Redis credentials from '{binding.KubernetesSecretName}'"
-                           + $" in {binding.AppDeployment.Namespace}",
-                    ct: ct);
-            }
+            // The keys, not the Secret. Deleting the object would take the app's own secrets
+            // with it whenever the binding shares their Secret, which is the supported way
+            // to set this up.
+            await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                appCluster,
+                binding.KubernetesSecretName,
+                binding.AppDeployment.Namespace,
+                EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Cache,
+                summary: $"Remove Redis credentials from '{binding.KubernetesSecretName}'"
+                       + $" in {binding.AppDeployment.Namespace}",
+                ct: ct);
         }
-        catch { }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            warnings.Add(
+                $"The REDIS_* keys could not be removed from the Secret '{binding.KubernetesSecretName}' in "
+                + $"{binding.AppDeployment.Namespace} ({ex.Message}); remove them by hand.");
+        }
 
         db.CacheBindings.Remove(binding);
         await db.SaveChangesAsync(ct);
+
+        return warnings.Count == 0 ? null : string.Join(" ", warnings);
     }
 
-    public async Task SyncCacheBindingAsync(
-        Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    /// <summary>
+    /// Changes the key prefix a binding's Redis user is confined to (null for all keys), then syncs
+    /// so the user's rules and the app's REDIS_KEY_PREFIX change together.
+    ///
+    /// <para>⚠️ Tightening takes effect on the app's open connections at once: from its next command
+    /// it can no longer touch keys outside the prefix. The app has to be using the prefix first.</para>
+    ///
+    /// <para><b>The saved prefix is the desired state.</b> It is stored with
+    /// <see cref="CacheBinding.SyncPending"/> set, and only a successful sync clears that. When the
+    /// sync fails, Redis may already enforce the new prefix on some nodes while the app's Secret still
+    /// says the old one; the background reconcile retries the sync until both agree, and the page shows
+    /// the binding as pending until then.</para>
+    /// </summary>
+    public async Task SetCacheBindingKeyPrefixAsync(
+        Guid tenantId, Guid bindingId, string? keyPrefix, CancellationToken ct = default)
     {
+        string? prefix = RedisAcl.NormalizePrefix(keyPrefix);
+        if (RedisAcl.DescribeInvalidPrefix(prefix) is string badPrefix)
+            throw new InvalidOperationException(badPrefix);
+
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CacheBinding binding = await db.CacheBindings
-            .Include(b => b.RedisCluster).ThenInclude(c => c.KubernetesCluster)
-            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
             .FirstOrDefaultAsync(b => b.Id == bindingId && b.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Cache binding not found.");
 
-        (string? password, string? host, string? port) =
+        if (binding.KeyPrefix == prefix) return;
+
+        if (prefix is not null && await db.CacheBindings
+                .Where(b => b.TenantId == tenantId && b.RedisClusterId == binding.RedisClusterId
+                    && b.KeyPrefix == prefix && b.AppDeploymentId != binding.AppDeploymentId)
+                .Select(b => b.AppDeployment.Name)
+                .FirstOrDefaultAsync(ct) is string sharer)
+        {
+            throw new InvalidOperationException(
+                $"The deployment '{sharer}' already uses the key prefix '{prefix}' on this Redis. Two apps with "
+                + "one prefix can read and overwrite each other's keys and channels. Choose another prefix.");
+        }
+
+        binding.KeyPrefix = prefix;
+        binding.SyncPending = true;
+        await db.SaveChangesAsync(ct);
+
+        using IDisposable? operation = gate?.BeginOperation("change the keys an app may use in Redis");
+        try
+        {
+            await SyncCacheBindingAsync(tenantId, bindingId, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new InvalidOperationException(
+                $"The new key prefix is saved, but the app could not be synced yet: {ex.Message} EntKube retries "
+                + "within 15 minutes; until then Redis may already enforce the new prefix while the app's Secret "
+                + "still has the old one.", ex);
+        }
+    }
+
+    /// <summary>
+    /// Writes a binding's credentials into the app's Secret: REDIS_HOST, REDIS_PORT, REDIS_USERNAME,
+    /// REDIS_PASSWORD, REDIS_URL and REDIS_KEY_PREFIX.
+    ///
+    /// <para>On a cluster with per-app users, the users on the Redis are reconciled first — the file
+    /// every node loads and the live users on every running node — so the app never receives a
+    /// password Redis does not yet accept. Without per-app users it receives the cluster's admin
+    /// password as <c>default</c>, as every binding did before.</para>
+    ///
+    /// <para><b>What is written back, and when it counts from.</b> Only the binding's own sync columns,
+    /// never the entity graph this method loaded: a graph saved back would carry a stale key prefix,
+    /// or a stale <c>PerAppUsersSince</c>, over a change made while the sync ran. And the sync is
+    /// stamped with the moment it <em>read</em> the cluster, not when it finished, so a sync that read
+    /// a cluster just before it switched — and so wrote the admin password — still counts as behind
+    /// the switch.</para>
+    /// </summary>
+    public async Task SyncCacheBindingAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    {
+        DateTime readAt = DateTime.UtcNow;
+
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        CacheBinding binding = await db.CacheBindings.AsNoTracking()
+            .Include(b => b.RedisCluster)
+            .Include(b => b.AppDeployment)
+            .FirstOrDefaultAsync(b => b.Id == bindingId && b.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Cache binding not found.");
+
+        (string? adminPassword, string? host, string? port) =
             await GetCredentialsAsync(tenantId, binding.RedisClusterId, ct);
 
-        if (password is null || host is null || port is null)
+        if (adminPassword is null || host is null || port is null)
             throw new InvalidOperationException("Redis cluster credentials not found in vault.");
-
-        string redisUrl = $"redis://:{password}@{host}:{port}";
 
         Clusters.IClusterClient appCluster =
             await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct)
             ?? throw new InvalidOperationException(
                 "The app's cluster has no stored kubeconfig, so the credential secret cannot be synced.");
 
-        // One action, one acknowledgment: creating the namespace and writing the credentials into
-        // it are halves of the same sync.
+        // One action, one acknowledgment: the users, the namespace and the credentials are halves
+        // of the same sync.
         using IDisposable? operation = gate?.BeginOperation("sync Redis credentials into an app namespace");
+
+        string username = "default";
+        string password = adminPassword;
+        string? keyPrefix = binding.KeyPrefix;
+
+        if (binding.RedisCluster.PerAppUsers)
+        {
+            IReadOnlyDictionary<Guid, RedisAppUser> users =
+                await ReconcileUsersAsync(tenantId, binding.RedisClusterId, excludeBindingId: null, ct);
+
+            RedisAppUser own = users.TryGetValue(binding.Id, out RedisAppUser? u)
+                ? u
+                : throw new InvalidOperationException("The binding's Redis user was not created.");
+
+            username = RedisAcl.UsernameFor(binding.Id);
+            password = own.Password;
+            // From the same read the user's rules were built from, so the prefix the app is told and
+            // the prefix Redis enforces cannot come from two different moments.
+            keyPrefix = own.KeyPrefix;
+        }
 
         await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
-        // ⚠️ Four named keys, not a whole Secret. Pointing a binding at the app's own Secret is
+        // ⚠️ Named keys, not a whole Secret. Pointing a binding at the app's own Secret is
         // intended — an app wants one envFrom, not one per service it uses — so this Secret can
         // have other writers, the app's vault secrets among them. Applying a complete manifest
         // here looked additive and was not: apply's three-way merge deletes the keys named in
         // the object's last-applied annotation and missing from the new config, and that
         // annotation belongs to the object rather than to whoever wrote it. The vault had just
-        // written it, so this apply deleted the app's own keys and left only these four.
+        // written it, so this apply deleted the app's own keys and left only these.
         await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
             appCluster,
             binding.KubernetesSecretName,
             binding.AppDeployment.Namespace,
             EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Cache,
-            new Dictionary<string, string?>
-            {
-                ["REDIS_HOST"] = host,
-                ["REDIS_PORT"] = port,
-                ["REDIS_PASSWORD"] = password,
-                ["REDIS_URL"] = redisUrl,
-            },
+            CredentialKeys(host, port, username, password, keyPrefix),
             summary: $"Sync Redis credentials into '{binding.KubernetesSecretName}'"
                    + $" in {binding.AppDeployment.Namespace}",
             ct: ct);
 
-        binding.LastSyncedAt = DateTime.UtcNow;
-        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
-        db2.CacheBindings.Update(binding);
-        await db2.SaveChangesAsync(ct);
+        // The Secret is written; recording it must not fail on a cancellation that came too late to
+        // matter. The pending flag is cleared only if the prefix is still the one just written — a
+        // change saved meanwhile stays pending for the next sync.
+        string? writtenPrefix = keyPrefix;
+        await db.CacheBindings
+            .Where(b => b.Id == binding.Id && b.TenantId == tenantId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(b => b.LastSyncedAt, readAt)
+                .SetProperty(b => b.SyncPending, b => b.SyncPending && b.KeyPrefix != writtenPrefix),
+                CancellationToken.None);
     }
 
-    private static string B64(string value) =>
-        Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+    /// <summary>
+    /// The keys a binding writes. Always the same six, so a binding that moves from the admin password
+    /// to its own user — or back — never leaves a stale key behind. The password is base64url and
+    /// the username hex, so neither needs escaping in the URL.
+    /// </summary>
+    public static Dictionary<string, string?> CredentialKeys(
+        string host, string port, string username, string password, string? keyPrefix) => new()
+    {
+        ["REDIS_HOST"] = host,
+        ["REDIS_PORT"] = port,
+        ["REDIS_USERNAME"] = username,
+        ["REDIS_PASSWORD"] = password,
+        ["REDIS_URL"] = $"redis://{username}:{password}@{host}:{port}",
+        ["REDIS_KEY_PREFIX"] = RedisAcl.KeyPrefixValue(keyPrefix),
+    };
+
+    // ── Per-app Redis users ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// The shell command run in a Redis container to reach its own node. The admin password comes
+    /// from the container's own REDIS_PASSWORD (the operator sets it from the cluster's auth Secret)
+    /// into redis-cli's REDISCLI_AUTH, inside the pod: it is on neither kubectl's argument list nor
+    /// redis-cli's. The commands themselves arrive on stdin and carry only password hashes.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RedisCliOnPod =
+        ["sh", "-c", "REDISCLI_AUTH=\"$REDIS_PASSWORD\" exec redis-cli -h 127.0.0.1 -p 6379"];
+
+    /// <summary>How long one reconcile may hold a Redis's users before another instance may take over.</summary>
+    private static readonly TimeSpan UsersLeaseLength = TimeSpan.FromMinutes(2);
+
+    /// <summary>How long a reconcile waits for another one on the same Redis before giving up.</summary>
+    private static readonly TimeSpan UsersLeaseWait = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Makes the Redis's users match its bindings: one user per binding, nothing else of EntKube's.
+    /// Writes the users file every node loads at start, then applies the same set to every running
+    /// node and revokes users whose binding is gone, and finally drops vault passwords nothing uses.
+    ///
+    /// <para><b>The set is every binding of this Redis</b> (minus <paramref name="excludeBindingId"/>,
+    /// the one being deleted). It is never filtered further: whatever is missing from it is revoked,
+    /// so a partial set would cut off apps that are still bound.</para>
+    ///
+    /// <para><b>One reconcile per Redis at a time, across instances.</b> The set is read and applied
+    /// while holding <see cref="RedisCluster.UsersLeaseUntil"/>, so a reconcile that read the bindings
+    /// earlier can never revoke a user another one just created. Before the lease is taken the file is
+    /// applied once from a first read: that is where an operator is asked to acknowledge the change,
+    /// so nobody holds the lease while a dialog waits for a human.</para>
+    ///
+    /// <para>A node that is not running Redis is skipped — it reads the file when it starts. A running
+    /// node that refuses the change fails the reconcile, because an app synced against it would be
+    /// handed a password that node does not accept.</para>
+    /// </summary>
+    /// <returns>The users now in force, by binding id.</returns>
+    public async Task<IReadOnlyDictionary<Guid, RedisAppUser>> ReconcileUsersAsync(
+        Guid tenantId, Guid redisClusterId, Guid? excludeBindingId, CancellationToken ct = default)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        RedisCluster cluster = await db.RedisClusters.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == redisClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Redis cluster not found.");
+
+        if (!cluster.PerAppUsers)
+            throw new InvalidOperationException(
+                $"The Redis '{cluster.Name}' has not been switched to per-app users.");
+
+        Clusters.IClusterClient target = await clusters.ForAsync(tenantId, cluster.KubernetesClusterId, ct)
+            ?? throw new InvalidOperationException(
+                "The Redis's cluster has no stored kubeconfig, so its users cannot be changed.");
+
+        using IDisposable? operation = gate?.BeginOperation("update the Redis users of the apps bound to it");
+
+        // Asked here, outside the lease: the acknowledgment (when there is anyone to ask) happens on
+        // this first apply, and the applies under the lease belong to the same operation.
+        await target.ApplyManifestAsync(RedisAcl.BuildUsersConfigMap(
+            cluster.Name, cluster.Namespace, (await WantedUsersAsync(tenantId, cluster.Id, excludeBindingId, ct)).Values), ct);
+
+        DateTime lease = await ClaimUsersLeaseAsync(tenantId, cluster, ct);
+        try
+        {
+            Dictionary<Guid, RedisAppUser> users = await WantedUsersAsync(tenantId, cluster.Id, excludeBindingId, ct);
+
+            // The file first: a node that restarts from here on comes back with this set, whatever
+            // happens to the live apply below.
+            await target.ApplyManifestAsync(RedisAcl.BuildUsersConfigMap(cluster.Name, cluster.Namespace, users.Values), ct);
+
+            lease = await ExtendUsersLeaseAsync(tenantId, cluster, lease, ct);
+            await ApplyUsersToRunningNodesAsync(target, cluster, [.. users.Values], ct);
+
+            // Only after every node has let go of them, and only for bindings that are gone NOW: a
+            // binding created while this ran has its row and password, and keeps both.
+            HashSet<Guid> stillBound = [.. await db.CacheBindings.AsNoTracking()
+                .Where(b => b.RedisClusterId == cluster.Id && b.TenantId == tenantId && b.Id != excludeBindingId)
+                .Select(b => b.Id)
+                .ToListAsync(ct)];
+            foreach (VaultSecret row in await vaultService.GetRedisClusterSecretsAsync(tenantId, cluster.Id, ct))
+            {
+                if (RedisAcl.TryParsePasswordSecretName(row.Name, out Guid owner) && !stillBound.Contains(owner))
+                    await vaultService.DeleteRedisClusterSecretAsync(tenantId, cluster.Id, row.Name, ct);
+            }
+
+            return users;
+        }
+        finally
+        {
+            await ReleaseUsersLeaseAsync(tenantId, cluster.Id, lease);
+        }
+    }
+
+    /// <summary>Every binding of the Redis but one, with its password (generated on first use).</summary>
+    private async Task<Dictionary<Guid, RedisAppUser>> WantedUsersAsync(
+        Guid tenantId, Guid redisClusterId, Guid? excludeBindingId, CancellationToken ct)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        var bindings = await db.CacheBindings.AsNoTracking()
+            .Where(b => b.RedisClusterId == redisClusterId && b.TenantId == tenantId && b.Id != excludeBindingId)
+            .Select(b => new { b.Id, b.KeyPrefix })
+            .ToListAsync(ct);
+
+        Dictionary<Guid, RedisAppUser> users = [];
+        foreach (var b in bindings)
+            users[b.Id] = new RedisAppUser(b.Id, await EnsureUserPasswordAsync(tenantId, redisClusterId, b.Id, ct), b.KeyPrefix);
+        return users;
+    }
+
+    /// <summary>
+    /// Claims the Redis's users lease with a conditional update — only when it is free or expired —
+    /// and waits for it while another reconcile holds it.
+    /// </summary>
+    private async Task<DateTime> ClaimUsersLeaseAsync(Guid tenantId, RedisCluster cluster, CancellationToken ct)
+    {
+        System.Diagnostics.Stopwatch waited = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            DateTime now = DateTime.UtcNow;
+            DateTime until = now + UsersLeaseLength;
+
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
+            int claimed = await db.RedisClusters
+                .Where(c => c.Id == cluster.Id && c.TenantId == tenantId
+                    && (c.UsersLeaseUntil == null || c.UsersLeaseUntil < now))
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.UsersLeaseUntil, until), ct);
+            if (claimed == 1) return until;
+
+            if (waited.Elapsed > UsersLeaseWait)
+            {
+                throw new InvalidOperationException(
+                    $"Another change to the Redis '{cluster.Name}' users is still running. Try again in a minute.");
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+        }
+    }
+
+    /// <summary>Extends a held lease; refuses to go on when it was lost (expired and taken by another).</summary>
+    private async Task<DateTime> ExtendUsersLeaseAsync(Guid tenantId, RedisCluster cluster, DateTime held, CancellationToken ct)
+    {
+        DateTime until = DateTime.UtcNow + UsersLeaseLength;
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+        int kept = await db.RedisClusters
+            .Where(c => c.Id == cluster.Id && c.TenantId == tenantId && c.UsersLeaseUntil == held)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.UsersLeaseUntil, until), ct);
+        if (kept != 1)
+        {
+            throw new InvalidOperationException(
+                $"Changing the Redis '{cluster.Name}' users took too long and another change took over; sync again.");
+        }
+        return until;
+    }
+
+    /// <summary>Releases the lease if it is still the one this reconcile holds.</summary>
+    private async Task ReleaseUsersLeaseAsync(Guid tenantId, Guid redisClusterId, DateTime held)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+        await db.RedisClusters
+            .Where(c => c.Id == redisClusterId && c.TenantId == tenantId && c.UsersLeaseUntil == held)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.UsersLeaseUntil, (DateTime?)null), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Sends the users to every leader and follower whose Redis is running: each node is asked which
+    /// users it has, then told to set every wanted one and delete every EntKube user no longer wanted.
+    ///
+    /// <para>redis-cli exits 0 when a command it read from stdin fails, and when it never reached Redis
+    /// it prints nothing a refusal check would catch. So the listing must positively contain the
+    /// <c>default</c> user — every Redis has it — before an empty or partial answer is believed.</para>
+    /// </summary>
+    private async Task ApplyUsersToRunningNodesAsync(
+        Clusters.IClusterClient target, RedisCluster cluster, IReadOnlyCollection<RedisAppUser> users,
+        CancellationToken ct)
+    {
+        List<string> failures = [];
+
+        foreach ((string pod, string container) in await ListRunningNodesAsync(target, cluster, ct))
+        {
+            try
+            {
+                string listed = await target.RunCommandOnPodWithStdinAsync(
+                    pod, cluster.Namespace, RedisCliOnPod, "ACL USERS\n",
+                    EntKube.Web.Services.ClusterChanges.ChangeIntent.Read, ct, container);
+                if (RedisAcl.FindError(listed) is string listError)
+                {
+                    failures.Add($"{pod}: {listError}");
+                    continue;
+                }
+
+                IReadOnlyList<string> existing = RedisAcl.ParseUsers(listed);
+                if (!existing.Contains("default"))
+                {
+                    failures.Add($"{pod}: no answer from Redis ({listed.Trim()})");
+                    continue;
+                }
+
+                string script = RedisAcl.BuildApplyScript(existing, users);
+                if (script.Length == 0) continue;
+
+                string applied = await target.RunCommandOnPodWithStdinAsync(
+                    pod, cluster.Namespace, RedisCliOnPod, script,
+                    EntKube.Web.Services.ClusterChanges.ChangeIntent.Change, ct, container);
+                if (RedisAcl.FindError(applied) is string applyError)
+                    failures.Add($"{pod}: {applyError}");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures.Add($"{pod}: {ex.Message}");
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"The Redis users could not be applied on {failures.Count} node(s) of '{cluster.Name}': "
+                + string.Join("; ", failures)
+                + ". The users file is in place, so these nodes pick the users up when they restart; "
+                + "sync again once the Redis is healthy.");
+        }
+    }
+
+    /// <summary>
+    /// The leader and follower pods whose Redis container is running, with that container's name. The
+    /// operator names the container after its StatefulSet (<c>&lt;name&gt;-leader</c> / <c>-follower</c>)
+    /// and labels the pods the same way; the exporter sidecar is the other container in the pod.
+    /// </summary>
+    private static async Task<List<(string Pod, string Container)>> ListRunningNodesAsync(
+        Clusters.IClusterClient target, RedisCluster cluster, CancellationToken ct)
+    {
+        List<(string, string)> nodes = [];
+        foreach (string role in new[] { "leader", "follower" })
+        {
+            string app = $"{cluster.Name}-{role}";
+            string json = await target.GetJsonAsync("pods", cluster.Namespace, $"app={app}", ct);
+            nodes.AddRange(RunningPodNames(json, app).Select(p => (p, app)));
+        }
+        return nodes;
+    }
+
+    /// <summary>
+    /// The pods in a pod list whose <paramref name="container"/> is in the running state and that are
+    /// not being deleted. Decided from the Redis container itself, not the pod phase: a pod stays
+    /// <c>Running</c> while its Redis crash-loops, and treating that as a node to apply to would fail
+    /// every sync on the cluster — while a node that is merely not ready yet does accept ACL commands
+    /// and must get them.
+    /// </summary>
+    public static IEnumerable<string> RunningPodNames(string? podListJson, string container)
+    {
+        if (string.IsNullOrWhiteSpace(podListJson)) return [];
+
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(podListJson);
+        if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items)) return [];
+
+        List<string> names = [];
+        foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+        {
+            System.Text.Json.JsonElement meta = item.GetProperty("metadata");
+            if (meta.TryGetProperty("deletionTimestamp", out _)) continue;
+
+            bool running = item.TryGetProperty("status", out System.Text.Json.JsonElement status)
+                && status.TryGetProperty("containerStatuses", out System.Text.Json.JsonElement statuses)
+                && statuses.EnumerateArray().Any(s =>
+                    s.TryGetProperty("name", out System.Text.Json.JsonElement n) && n.GetString() == container
+                    && s.TryGetProperty("state", out System.Text.Json.JsonElement state)
+                    && state.TryGetProperty("running", out _));
+            if (running && meta.GetProperty("name").GetString() is string name)
+                names.Add(name);
+        }
+        return names;
+    }
+
+    /// <summary>A binding's password, generated and vaulted on first use.</summary>
+    private async Task<string> EnsureUserPasswordAsync(
+        Guid tenantId, Guid redisClusterId, Guid bindingId, CancellationToken ct)
+    {
+        string name = RedisAcl.PasswordSecretName(bindingId);
+        string? existing = await vaultService.GetRedisClusterSecretValueAsync(tenantId, redisClusterId, name, ct);
+        if (!string.IsNullOrEmpty(existing)) return existing;
+
+        string password = GeneratePassword();
+        await vaultService.SetRedisClusterSecretAsync(tenantId, redisClusterId, name, password, ct);
+        return password;
+    }
+
+    /// <summary>
+    /// Switches a Redis created before per-app users existed over to them.
+    ///
+    /// <para><b>What happens, in order.</b> The switch is recorded first, so no sync that starts from
+    /// here on hands out the admin password. Then every binding gets a password, the users file is
+    /// written, and the RedisCluster is re-applied with the file included, which restarts its pods one
+    /// at a time (the operator rolls the StatefulSets). Finally each binding is synced, which applies
+    /// the users to the running nodes and moves the app's Secret to its own user. If the file or the
+    /// template cannot be applied, the switch is undone and nothing else has changed.</para>
+    ///
+    /// <para><b>Apps keep working throughout</b>, because the admin password does not change —
+    /// including any whose sync fails here because a node was restarting at that moment. Those stay on
+    /// the admin password, are listed in the result, and are moved by the background reconcile.</para>
+    ///
+    /// <para>⚠️ Apps bound before the switch were given the admin password and still know it; only
+    /// changing it takes that back. Bindings with a key prefix are confined to it from their first
+    /// sync after the switch.</para>
+    /// </summary>
+    /// <returns>How many bindings moved, and the errors of those that did not.</returns>
+    public async Task<(int Moved, IReadOnlyList<string> Failures)> EnablePerAppUsersAsync(
+        Guid tenantId, Guid redisClusterId, CancellationToken ct = default)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        RedisCluster cluster = await db.RedisClusters
+            .FirstOrDefaultAsync(c => c.Id == redisClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Redis cluster not found.");
+
+        if (!RedisAcl.SupportsPerAppUsers(cluster.RedisVersion))
+        {
+            throw new InvalidOperationException(
+                $"Per-app users need Redis 7 or later, and '{cluster.Name}' runs {cluster.RedisVersion}.");
+        }
+
+        using IDisposable? operation = gate?.BeginOperation(
+            "switch a Redis to per-app users (its pods restart one at a time)");
+
+        if (!cluster.PerAppUsers)
+        {
+            Clusters.IClusterClient target = await clusters.ForAsync(tenantId, cluster.KubernetesClusterId, ct)
+                ?? throw new InvalidOperationException(
+                    "The Redis's cluster has no stored kubeconfig, so it cannot be switched.");
+
+            cluster.PerAppUsersSince = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+
+            try
+            {
+                // The file before the pod template that includes it: a pod restarted by the roll must
+                // find it, or it would not start.
+                await target.ApplyManifestAsync(RedisAcl.BuildUsersConfigMap(
+                    cluster.Name, cluster.Namespace, (await WantedUsersAsync(tenantId, cluster.Id, null, ct)).Values), ct);
+                await target.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
+            }
+            catch
+            {
+                await db.RedisClusters
+                    .Where(c => c.Id == cluster.Id && c.TenantId == tenantId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(c => c.PerAppUsersSince, (DateTime?)null), CancellationToken.None);
+                throw;
+            }
+        }
+
+        List<Guid> bindingIds = await db.CacheBindings
+            .Where(b => b.RedisClusterId == cluster.Id && b.TenantId == tenantId)
+            .Select(b => b.Id)
+            .ToListAsync(ct);
+
+        int moved = 0;
+        List<string> failures = [];
+        foreach (Guid id in bindingIds)
+        {
+            try
+            {
+                await SyncCacheBindingAsync(tenantId, id, ct);
+                moved++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures.Add(ex.Message);
+            }
+        }
+
+        return (moved, failures);
+    }
+
+    /// <summary>
+    /// The background half of per-app users, for one tenant: reconciles the users of each of its
+    /// Redis clusters that have them, and syncs bindings whose Secret is behind — still on the admin
+    /// password, or with a key-prefix change whose sync failed.
+    ///
+    /// <para><b>Why this runs on a timer.</b> Deleting a deployment, an app or a tenant removes its
+    /// bindings by database cascade without touching any cluster, so the Redis user would otherwise
+    /// keep working until something else reconciled that Redis. And a switch-over or prefix change
+    /// whose syncs failed while pods restarted finishes here instead of waiting for someone to press
+    /// Sync.</para>
+    /// </summary>
+    /// <returns>What failed, one line per Redis or binding; empty when everything converged.</returns>
+    public async Task<IReadOnlyList<string>> ReconcileTenantUsersAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        List<RedisCluster> switched = await db.RedisClusters.AsNoTracking()
+            .Where(c => c.TenantId == tenantId && c.PerAppUsersSince != null
+                && c.Status != RedisClusterStatus.Deleting)
+            .ToListAsync(ct);
+
+        List<string> failures = [];
+        foreach (RedisCluster cluster in switched)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            // One Redis that cannot be reached must not keep the others from being cleaned up.
+            try
+            {
+                await ReconcileUsersAsync(tenantId, cluster.Id, excludeBindingId: null, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failures.Add($"{cluster.Name}: {ex.Message}");
+                continue;
+            }
+
+            List<Guid> behind = await db.CacheBindings.AsNoTracking()
+                .Where(b => b.RedisClusterId == cluster.Id && b.TenantId == tenantId && b.SyncEnabled
+                    && (b.SyncPending || b.LastSyncedAt == null || b.LastSyncedAt < cluster.PerAppUsersSince))
+                .Select(b => b.Id)
+                .ToListAsync(ct);
+
+            foreach (Guid id in behind)
+            {
+                try
+                {
+                    await SyncCacheBindingAsync(tenantId, id, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    failures.Add($"{cluster.Name}, binding {id}: {ex.Message}");
+                }
+            }
+        }
+
+        return failures;
+    }
+
+    /// <summary>Every tenant in turn — the tenant is an input to each query, never read off a row.</summary>
+    public async Task ReconcileAllUsersAsync(ILogger logger, CancellationToken ct = default)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
+        {
+            if (ct.IsCancellationRequested) break;
+            try
+            {
+                foreach (string failure in await ReconcileTenantUsersAsync(tenantId, ct))
+                    logger.LogWarning("Redis users for tenant {TenantId} did not converge: {Failure}", tenantId, failure);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Reconciling Redis users for tenant {TenantId} failed", tenantId);
+            }
+        }
+    }
 
     // ── Live detail ───────────────────────────────────────────────────────────
 
@@ -891,7 +1593,7 @@ public class RedisService(
             """;
     }
 
-    private static string BuildClusterManifest(RedisCluster cluster)
+    public static string BuildClusterManifest(RedisCluster cluster)
     {
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: redis.redis.opstreelabs.in/v1beta2");
@@ -921,6 +1623,7 @@ public class RedisService(
         // anti-affinity by default). Preferred, so it won't block scheduling when
         // nodes < pods. The OT operator labels pods app=<name>-leader / -follower.
         sb.AppendLine("  redisLeader:");
+        AppendUsersInclude(sb, cluster);
         sb.AppendLine("    affinity:");
         sb.AppendLine("      podAntiAffinity:");
         sb.AppendLine("        preferredDuringSchedulingIgnoredDuringExecution:");
@@ -931,6 +1634,7 @@ public class RedisService(
         sb.AppendLine("                matchLabels:");
         sb.AppendLine($"                  app: {cluster.Name}-leader");
         sb.AppendLine("  redisFollower:");
+        AppendUsersInclude(sb, cluster);
         sb.AppendLine("    affinity:");
         sb.AppendLine("      podAntiAffinity:");
         sb.AppendLine("        preferredDuringSchedulingIgnoredDuringExecution:");
@@ -978,6 +1682,20 @@ public class RedisService(
         sb.AppendLine("    image: quay.io/opstree/redis-exporter:v1.44.0");
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Points a role's redis.conf at the per-app users file. The operator mounts the named ConfigMap
+    /// beside redis.conf and includes it last, so its <c>user</c> lines add users while the
+    /// <c>default</c> user stays on <c>requirepass</c> — see <see cref="RedisAcl"/> for why EntKube does
+    /// not use the operator's full ACL-file route instead. Both roles need it: a follower is promoted
+    /// to leader on failover and must already know every app.
+    /// </summary>
+    private static void AppendUsersInclude(StringBuilder sb, RedisCluster cluster)
+    {
+        if (!cluster.PerAppUsers) return;
+        sb.AppendLine("    redisConfig:");
+        sb.AppendLine($"      additionalRedisConfig: {RedisAcl.UsersConfigMapName(cluster.Name)}");
     }
 
     // "v7.0.15" -> "v7", "v7" -> "v7"

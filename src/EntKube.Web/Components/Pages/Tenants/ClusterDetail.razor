@@ -537,7 +537,7 @@ else if (section == "components")
                                                 <option value="">-- Select a Redis --</option>
                                                 @foreach (RedisEndpointOption redis in redisEndpoints)
                                                 {
-                                                    <option value="@redis.Endpoint">@redis.Label — @redis.Endpoint</option>
+                                                    <option value="@redis.Endpoint" disabled="@redis.ClusterMode">@redis.Label — @redis.Endpoint@(redis.ClusterMode ? " (sharded cluster: cannot be used here)" : "")</option>
                                                 }
                                             </select>
                                         }
@@ -1340,7 +1340,7 @@ else if (section == "components")
                                                                 <option value="">-- Select a Redis --</option>
                                                                 @foreach (RedisEndpointOption redis in redisEndpoints)
                                                                 {
-                                                                    <option value="@redis.Endpoint">@redis.Label — @redis.Endpoint</option>
+                                                                    <option value="@redis.Endpoint" disabled="@redis.ClusterMode">@redis.Label — @redis.Endpoint@(redis.ClusterMode ? " (sharded cluster: cannot be used here)" : "")</option>
                                                                 }
                                                             </select>
                                                         }
@@ -3142,38 +3142,16 @@ else if (section == "components")
             await AutoDetectAndFillHostEdit(releaseName);
     }
 
-    // Choosing a Redis fills the endpoint AND, when EntKube manages that Redis, its password — the
-    // credential is already in the tenant vault, and making an operator copy it out by hand is how a
-    // component ends up pointed at a Redis it cannot authenticate to. An unmanaged Redis leaves the
-    // password field alone: EntKube does not know it, and blanking a value the operator typed would be
-    // worse than leaving it.
-    private async Task OnRegRedisSelected(string fieldKey, ChangeEventArgs e)
-    {
-        string endpoint = e.Value?.ToString() ?? "";
-        regFormFieldValues[fieldKey] = endpoint;
+    // Choosing a Redis fills the endpoint and nothing else. It used to copy a managed Redis's vaulted
+    // password into the form too — but that password is the cluster's `default` user, the admin
+    // credential, and every Redis EntKube manages is a sharded cluster that the only component with
+    // this picker (Harbor) refuses. So the copy could never help and always put the admin password
+    // into the browser. Those clusters are now shown disabled in the list instead.
+    private void OnRegRedisSelected(string fieldKey, ChangeEventArgs e)
+        => regFormFieldValues[fieldKey] = e.Value?.ToString() ?? "";
 
-        if (await ResolveRedisPasswordAsync(endpoint) is string password)
-            regFormFieldValues["redis-password"] = password;
-    }
-
-    private async Task OnEditRedisSelected(string fieldKey, ChangeEventArgs e)
-    {
-        string endpoint = e.Value?.ToString() ?? "";
-        editFormFieldValues[fieldKey] = endpoint;
-
-        if (await ResolveRedisPasswordAsync(endpoint) is string password)
-            editFormFieldValues["redis-password"] = password;
-    }
-
-    private async Task<string?> ResolveRedisPasswordAsync(string endpoint)
-    {
-        RedisEndpointOption? chosen = redisEndpoints?
-            .FirstOrDefault(r => r.Endpoint == endpoint && r.Managed && r.RedisClusterId.HasValue);
-        if (chosen is null) return null;
-
-        (string? password, _, _) = await RedisService.GetCredentialsAsync(TenantId, chosen.RedisClusterId!.Value);
-        return string.IsNullOrEmpty(password) ? null : password;
-    }
+    private void OnEditRedisSelected(string fieldKey, ChangeEventArgs e)
+        => editFormFieldValues[fieldKey] = e.Value?.ToString() ?? "";
 
     private async Task AutoDetectAndFillHostReg(string gatewayReleaseName)
     {

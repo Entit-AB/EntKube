@@ -52,6 +52,39 @@ public class RedisCluster
 
     public string? LastError { get; set; }
 
+    /// <summary>
+    /// When every app bound to this Redis started getting its own ACL user instead of the cluster's
+    /// <c>default</c> password; null while apps still share it.
+    ///
+    /// <para>⚠️ The <c>default</c> user is the admin: it can read and delete every app's keys,
+    /// <c>FLUSHALL</c> the whole cache and <c>CONFIG SET</c> or <c>CLUSTER RESET</c> the cluster. It
+    /// stays what the operator, the health probes, replication and the exporter authenticate as, and
+    /// is no longer handed to apps once this is on.</para>
+    ///
+    /// <para>Null for clusters created before per-app users existed: switching one over adds the
+    /// users file to the pod template, which restarts the Redis pods, so it is an explicit action
+    /// rather than something a sync does on the side. Every cluster created since starts with it set.</para>
+    ///
+    /// <para>A timestamp rather than a flag because the switch is not instant for the apps: a binding
+    /// last synced before this moment still holds the admin password in its Secret, and the Cache tab
+    /// says so until it is synced again.</para>
+    /// </summary>
+    public DateTime? PerAppUsersSince { get; set; }
+
+    /// <summary>True when apps get their own users; see <see cref="PerAppUsersSince"/>. Not stored.</summary>
+    public bool PerAppUsers => PerAppUsersSince is not null;
+
+    /// <summary>
+    /// Until when one EntKube instance holds the right to change this Redis's per-app users. Claimed
+    /// by a conditional update (only when null or past), so of several instances reconciling the same
+    /// Redis exactly one proceeds; the others wait. It expires rather than being trusted to be
+    /// released, so an instance that dies mid-reconcile holds nothing for long.
+    ///
+    /// <para>Without it, two instances could each read the bindings, and the one that read first
+    /// would revoke a user the other had just created, and drop that binding's password.</para>
+    /// </summary>
+    public DateTime? UsersLeaseUntil { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

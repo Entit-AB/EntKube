@@ -1689,6 +1689,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("KeyPrefix")
+                        .HasMaxLength(48)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("KubernetesSecretName")
                         .IsRequired()
                         .HasMaxLength(253)
@@ -1701,6 +1705,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("SyncEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("SyncPending")
                         .HasColumnType("INTEGER");
 
                     b.Property<Guid>("TenantId")
@@ -7403,6 +7410,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(63)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("PerAppUsersSince")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("PersistenceEnabled")
                         .HasColumnType("INTEGER");
 
@@ -7424,6 +7434,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("UsersLeaseUntil")
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");

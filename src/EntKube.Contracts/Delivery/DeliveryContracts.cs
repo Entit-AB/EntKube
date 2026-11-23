@@ -255,6 +255,17 @@ public interface IDeliveryApi
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default);
 
     /// <summary>
+    /// The Redis clusters one app may be bound to in one environment: the governance allow-list.
+    ///
+    /// <para>⚠️ <b>Empty means "no restriction", not "nothing allowed"</b> — an environment without
+    /// entries has never been restricted (<c>AppAllowedCache</c>'s own rule). It is also empty when
+    /// the app is not this tenant's, so a caller must establish ownership first, which binding
+    /// creation does by reading the deployment through <see cref="GetDeploymentAsync"/>.</para>
+    /// </summary>
+    Task<IReadOnlyList<Guid>> GetAllowedCacheClusterIdsAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default);
+
+    /// <summary>
     /// The tenant's most recent watched releases, newest first.
     ///
     /// <para>A rollout reaches its tenant through deployment → app → customer, which is why the

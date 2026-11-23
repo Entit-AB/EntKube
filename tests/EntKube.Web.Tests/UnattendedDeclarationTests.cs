@@ -49,6 +49,7 @@ public class UnattendedDeclarationTests
         "KeycloakBackupSchedulerService:keycloak-backup-scheduler",
         "MessagingStatusPollingService:messaging-status-polling",
         "ObservedSecretRefreshService:observed-secret-refresh",
+        "RedisUserReconcileService:redis-per-app-users",
         "ResourceUsageCollectorService:resource-usage-collector",
         "RolloutWatcherService:rollout-watcher",
         "SearchStatusPollingService:search-status-polling",

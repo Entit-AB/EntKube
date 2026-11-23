@@ -53,7 +53,7 @@ public class ExecChangeIntentTests
     /// <summary>
     /// ⚠️ <b>Every site claiming <see cref="ChangeIntent.Read"/>, which is the list to actually
     /// read.</b> A wrong <c>Read</c> is the one way this design fails: it produces an unasked,
-    /// unrecorded change while appearing to have been checked. Thirteen is short enough for a human
+    /// unrecorded change while appearing to have been checked. Fourteen is short enough for a human
     /// to audit, which is the whole reason the declaration is explicit rather than inferred.
     ///
     /// <para>What each one is, verified by reading the statement at the call site:</para>
@@ -69,6 +69,10 @@ public class ExecChangeIntentTests
     ///     construction.</item>
     ///   <item><c>StalwartService</c>, <c>StalwartDnsService</c>, <c>ElasticsearchService</c> ×1
     ///     each — an <c>ldapsearch</c>, and two <c>curl</c> calls with no <c>-X</c>, so GETs.</item>
+    ///   <item><c>RedisService</c> ×1 — the literal stdin <c>"ACL USERS\n"</c> to a node's own
+    ///     redis-cli, before per-app users are applied: it lists usernames and changes nothing. The
+    ///     command that follows it, the <c>ACL SETUSER</c>/<c>DELUSER</c> script, claims
+    ///     <c>Change</c>.</item>
     /// </list>
     ///
     /// <para><b>The probe is the open question, not an oversight.</b>
@@ -78,7 +82,7 @@ public class ExecChangeIntentTests
     /// this file cannot make; what it does is keep the list short enough that the question can be
     /// asked of every member of it.</para>
     /// </summary>
-    private const int BaselineReadClaims = 13;
+    private const int BaselineReadClaims = 14;
 
     [Fact]
     public void Every_listed_verb_still_exists_on_the_factory()

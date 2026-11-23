@@ -3749,6 +3749,27 @@ public class VaultService(
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Removes one of a Redis cluster's secrets — a per-app user's password once its binding is gone.
+    /// Absent is not an error: the caller is converging on "this value no longer exists".
+    /// </summary>
+    public async Task DeleteRedisClusterSecretAsync(
+        Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.RedisClusterId == clusterId
+                && s.Name == name, ct);
+
+        if (secret is not null)
+        {
+            db.Set<VaultSecret>().Remove(secret);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
     // ── Kafka cluster secrets ────────────────────────────────────────────────────
 
     public async Task<VaultSecret> SetKafkaClusterSecretAsync(

@@ -52,6 +52,7 @@ internal static class DataServicesServices
         services.AddScoped<OpenLdapService>();
         services.AddSingletonWork<MessagingStatusPollingService>();
         services.AddSingletonWork<SearchStatusPollingService>();
+        services.AddSingletonWork<RedisUserReconcileService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.DataServices.IDataServicesApi,

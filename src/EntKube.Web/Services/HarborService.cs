@@ -689,11 +689,9 @@ public class HarborService(
     /// for itself. An empty endpoint puts it back on its own Redis, so clearing the field is an
     /// instruction rather than a no-op.
     ///
-    /// <para>The password is resolved here rather than taken on trust from the form. When the address is a
-    /// Redis EntKube manages, its vaulted password is authoritative — which also means a rotation is
-    /// picked up on the next apply, because this runs before every install. For anything else the
-    /// operator's typed password is kept, and a blank one is a Redis with no authentication rather than an
-    /// error.</para>
+    /// <para>The password is the operator's typed one, and a blank one keeps whatever is stored. No Redis
+    /// EntKube manages can reach this point — they are all sharded clusters, refused below — so there is
+    /// no vaulted password to prefer.</para>
     ///
     /// <para>A sharded Redis Cluster is refused. Harbor addresses Redis as a single server or a sentinel
     /// set and uses four separate databases (0, 1, 2 and 5) — a cluster has only database 0, so
@@ -749,14 +747,15 @@ public class HarborService(
         // behind redis.external.password, which InjectSecretsIntoValuesAsync merges in at install time so
         // it is never written into the stored Helm YAML in the clear.
         //
-        // Only written when there is something to write. For a Redis EntKube manages the vault is
-        // authoritative and overwrites whatever the form held — that is what makes a rotated password
-        // arrive on the next apply. For any other Redis, an empty box means "leave the stored password
+        // Only written when there is something to write: an empty box means "leave the stored password
         // alone", because the form never echoes a password back and blanking on every save would
         // otherwise erase it the first time the operator changed anything else.
-        string? password = managed is { RedisClusterId: Guid managedId }
-            ? (await redisService.GetCredentialsAsync(tenantId, managedId, ct)).password
-            : redisPassword;
+        //
+        // ⚠️ Always the operator's typed password, never a managed Redis's vaulted one. Every Redis
+        // EntKube manages is a sharded cluster and was refused above, so a branch that read the
+        // managed password here could never run — and the value it would have read is the cluster's
+        // `default` user, the admin credential, which no component should be handed.
+        string? password = redisPassword;
 
         if (!string.IsNullOrEmpty(password))
         {

@@ -62,6 +62,19 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             .Select(ToDeployment).ToList();
     }
 
+    public async Task<IReadOnlyList<Guid>> GetAllowedCacheClusterIdsAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
+    {
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.AppAllowedCaches.AsNoTracking()
+            .Where(a => a.AppId == appId
+                && a.EnvironmentId == environmentId
+                && a.App.Customer.TenantId == tenantId)
+            .Select(a => a.RedisClusterId)
+            .ToListAsync(ct);
+    }
+
     public async Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
