@@ -4071,6 +4071,12 @@ public static class ComponentCatalog
             ComponentType = "HelmChart",
             HelmRepoUrl = "https://ot-container-kit.github.io/helm-charts/",
             HelmChartName = "redis-operator",
+            // Pinned because per-app Redis users depend on how this operator builds the pods: the
+            // include it mounts for extra redis.conf lines, the container it names, and the labels
+            // EntKube finds leaders and followers by. Unpinned, every install got whatever chart was
+            // newest that day, so the same RedisCluster could behave differently on two clusters.
+            // 0.27.0 is the version the per-app-user mechanism was verified against on kind.
+            HelmChartVersion = "0.27.0",
             DefaultNamespace = "redis-operator",
             DefaultReleaseName = "redis-operator",
             FormFields = [],

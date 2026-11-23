@@ -1891,9 +1891,22 @@
                                     <InputText class="form-control form-control-sm" @bind-Value="attachCacheModel.SecretName" placeholder="redis-cache" />
                                     <ValidationMessage For="() => attachCacheModel.SecretName" class="text-danger small" />
                                 </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">Key prefix</label>
+                                    <InputText class="form-control form-control-sm" @bind-Value="attachCacheModel.KeyPrefix"
+                                               disabled="@attachCacheModel.AllKeys" placeholder="@SuggestedCachePrefix()" />
+                                    <div class="form-check small mt-1">
+                                        <InputCheckbox class="form-check-input" id="cache-allkeys" @bind-Value="attachCacheModel.AllKeys" />
+                                        <label class="form-check-label" for="cache-allkeys">All keys (no prefix)</label>
+                                    </div>
+                                    <div class="form-text small">
+                                        The app's Redis user may only touch keys starting with the prefix and a colon; the app receives it as
+                                        <code>REDIS_KEY_PREFIX</code>.
+                                    </div>
+                                </div>
                             </div>
                             <div class="d-flex gap-1">
-                                <button type="submit" class="btn btn-sm btn-warning">Attach &amp; Sync</button>
+                                <button type="submit" class="btn btn-sm btn-warning" disabled="@attachingCache">Attach &amp; Sync</button>
                                 <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => showCacheAttachForm = false">Cancel</button>
                             </div>
                         </EditForm>
@@ -1930,6 +1943,7 @@
                                     <tr>
                                         <th>Redis Cluster</th>
                                         <th>K8s Secret</th>
+                                        <th>Redis user / keys</th>
                                         <th>Last Synced</th>
                                         <th class="text-end">Actions</th>
                                     </tr>
@@ -1949,6 +1963,15 @@
                                             <td>
                                                 <code class="small">@binding.KubernetesSecretName</code>
                                                 <br /><small class="text-muted">@deployment.Namespace</small>
+                                            </td>
+                                            <td>
+                                                @if (!binding.RedisCluster.PerAppUsers || RedisAcl.StillOnAdminPassword(binding, binding.RedisCluster))
+                                                { <span class="badge bg-warning text-dark small" title="The Secret holds the Redis admin password">admin password</span> }
+                                                else
+                                                { <code class="small">@RedisAcl.UsernameFor(binding.Id)</code> }
+                                                <br /><small class="text-muted">@(binding.KeyPrefix is null ? "all keys" : binding.KeyPrefix + ":*")</small>
+                                                @if (binding.SyncPending)
+                                                { <span class="badge bg-info text-dark small ms-1" title="The key prefix changed and the Secret has not been updated yet">sync pending</span> }
                                             </td>
                                             <td>
                                                 @if (binding.LastSyncedAt is not null)
@@ -3320,15 +3343,21 @@
 
     private async Task AddCacheBindingAppLevel()
     {
+        if (attachingCache) return;
+        attachingCache = true;
         cacheBindingError = null;
         try
         {
-            await RedisService.CreateCacheBindingAsync(TenantId, attachCacheModel.ClusterId!.Value, attachCacheModel.DeploymentId!.Value, attachCacheModel.SecretName.Trim());
+            string? prefix = attachCacheModel.AllKeys
+                ? null
+                : RedisAcl.NormalizePrefix(attachCacheModel.KeyPrefix) ?? SuggestedCachePrefix();
+            await RedisService.CreateCacheBindingAsync(TenantId, attachCacheModel.ClusterId!.Value, attachCacheModel.DeploymentId!.Value, attachCacheModel.SecretName.Trim(), prefix);
             showCacheAttachForm = false; attachCacheModel = new();
             await LoadAppCacheBindings();
             Toasts.Success("Redis cache attached.");
         }
         catch (Exception ex) { cacheBindingError = $"Failed to attach Redis: {ex.Message}"; }
+        finally { attachingCache = false; }
     }
 
     private async Task RemoveCacheBindingAppLevel(Guid id)
@@ -3336,8 +3365,9 @@
         confirmRemoveCacheBindingId = null; cacheBindingError = null;
         try
         {
-            await RedisService.DeleteCacheBindingAsync(TenantId, id);
+            string? warning = await RedisService.DeleteCacheBindingAsync(TenantId, id);
             await LoadAppCacheBindings();
+            if (warning is not null) Toasts.Warning(warning, "Redis detached");
         }
         catch (Exception ex) { cacheBindingError = $"Failed to detach: {ex.Message}"; }
     }
@@ -3745,7 +3775,21 @@
 
         [Required(ErrorMessage = "Enter a secret name.")]
         public string SecretName { get; set; } = "redis-cache";
+
+        /// <summary>Empty takes the suggestion derived from the deployment's name.</summary>
+        public string? KeyPrefix { get; set; }
+
+        public bool AllKeys { get; set; }
     }
+
+    // App and deployment together: deployment names repeat across apps, and two apps with one prefix
+    // would share keys. The service refuses a prefix already used on the Redis either way.
+    private string SuggestedCachePrefix() =>
+        deployments?.FirstOrDefault(d => d.Id == attachCacheModel.DeploymentId) is { } dep
+            ? RedisAcl.SuggestPrefix($"{App.Name}-{dep.Name}")
+            : "my-app";
+
+    private bool attachingCache;
 
     private sealed class AttachStorageModel
     {

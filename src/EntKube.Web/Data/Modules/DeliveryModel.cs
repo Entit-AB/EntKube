@@ -338,6 +338,7 @@ internal static class DeliveryModel
         {
             entity.HasKey(b => b.Id);
             entity.Property(b => b.KubernetesSecretName).HasMaxLength(253).IsRequired();
+            entity.Property(b => b.KeyPrefix).HasMaxLength(CacheBinding.MaxKeyPrefixLength);
 
             entity.HasOne(b => b.RedisCluster)
                 .WithMany()

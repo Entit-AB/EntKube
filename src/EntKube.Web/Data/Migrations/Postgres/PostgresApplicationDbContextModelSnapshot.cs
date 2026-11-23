@@ -1694,6 +1694,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("KeyPrefix")
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
                     b.Property<string>("KubernetesSecretName")
                         .IsRequired()
                         .HasMaxLength(253)
@@ -1706,6 +1710,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasColumnType("uuid");
 
                     b.Property<bool>("SyncEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("SyncPending")
                         .HasColumnType("boolean");
 
                     b.Property<Guid>("TenantId")
@@ -7408,6 +7415,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(63)
                         .HasColumnType("character varying(63)");
 
+                    b.Property<DateTime?>("PerAppUsersSince")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<bool>("PersistenceEnabled")
                         .HasColumnType("boolean");
 
@@ -7430,6 +7440,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("UsersLeaseUntil")
+                        .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 

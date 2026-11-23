@@ -94,6 +94,7 @@ public class SweepTenancyRatchetTests
         ["CertificateDistributionReconcileService"] = ["CertificateDistributionService"],
         ["MessagingStatusPollingService"] = ["RabbitMQService", "KafkaService"],
         ["SearchStatusPollingService"] = ["ElasticsearchService"],
+        ["RedisUserReconcileService"] = ["RedisService"],
     };
 
     /// <summary>Sweeps with no tenant-scoped work to do, and why.</summary>

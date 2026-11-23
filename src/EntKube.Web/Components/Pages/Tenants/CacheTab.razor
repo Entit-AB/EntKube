@@ -252,7 +252,7 @@
                         {
                             <div class="card border-secondary mb-3">
                                 <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between py-2">
-                                    <span class="small fw-semibold"><i class="bi bi-key me-2"></i>Connection Details</span>
+                                    <span class="small fw-semibold"><i class="bi bi-key me-2"></i>Admin connection (<code>default</code> user)</span>
                                     <button class="btn btn-sm btn-outline-secondary border-0"
                                             @onclick="() => credClusterId = null">
                                         <i class="bi bi-x-lg"></i>
@@ -270,6 +270,10 @@
                                     }
                                     else
                                     {
+                                        <div class="alert alert-warning py-1 small mb-2">
+                                            This is the admin: it can read and delete every app's keys and reconfigure the cluster.
+                                            Do not give it to an app — bind the app below so it gets its own user.
+                                        </div>
                                         <div class="row g-2 small">
                                             <div class="col-md-5">
                                                 <span class="text-muted d-block">Host (leader service)</span>
@@ -297,6 +301,53 @@
                                         </div>
                                     }
                                 </div>
+                            </div>
+                        }
+
+                        @* ── Per-app users ── *@
+                        @if (!cluster.PerAppUsers)
+                        {
+                            <div class="alert alert-warning small py-2 mb-3">
+                                <div class="fw-semibold mb-1"><i class="bi bi-shield-exclamation me-1"></i>Every app bound to this Redis has the admin password</div>
+                                Any of them can read or delete the others' keys, flush the whole cache or reconfigure the cluster, and access
+                                cannot be taken back from one app without changing it for all.
+                                @if (RedisAcl.SupportsPerAppUsers(cluster.RedisVersion))
+                                {
+                                    List<CacheBinding> toMove = allBindings.TryGetValue(cluster.Id, out List<CacheBinding>? tm) ? tm : [];
+                                    int prefixed = toMove.Count(x => x.KeyPrefix is not null);
+                                    <div class="mt-2">
+                                        Switching gives each app its own user with no admin commands. The Redis pods restart one at a time.
+                                        <ul class="mb-0 mt-1">
+                                            <li>Apps bound with <em>all keys</em> keep every key, so they keep working.</li>
+                                            @if (prefixed > 0)
+                                            {
+                                                <li><strong>@prefixed app(s) have a key prefix and are confined to it from the switch.</strong>
+                                                    Make sure they already put <code>REDIS_KEY_PREFIX</code> in front of every key, or clear their prefix first.</li>
+                                            }
+                                            <li>Apps bound so far were given the admin password and still know it afterwards; only changing it takes that back.</li>
+                                        </ul>
+                                    </div>
+                                    @if (switchTarget == cluster.Id)
+                                    {
+                                        <div class="d-flex gap-2 mt-2">
+                                            <button class="btn btn-sm btn-warning" disabled="@switching" @onclick="() => SwitchToPerAppUsers(cluster)">
+                                                @if (switching) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Restart pods and switch
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" disabled="@switching" @onclick="() => switchTarget = null">Cancel</button>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-warning mt-2" @onclick="() => switchTarget = cluster.Id">
+                                            Switch to per-app users
+                                        </button>
+                                    }
+                                }
+                                else
+                                {
+                                    <div class="mt-2">Per-app users need Redis 7 or later; this one runs @cluster.RedisVersion.</div>
+                                }
                             </div>
                         }
 
@@ -334,8 +385,23 @@
                                                                placeholder="redis-cache" />
                                                     <ValidationMessage For="() => bindingForm.SecretName" class="text-danger small" />
                                                 </div>
+                                                <div class="col-md-5">
+                                                    <label class="form-label small mb-1">Key prefix</label>
+                                                    <InputText class="form-control form-control-sm" @bind-Value="bindingForm.KeyPrefix"
+                                                               disabled="@bindingForm.AllKeys"
+                                                               placeholder="@SuggestedPrefix(bindingForm.DeploymentId)" />
+                                                    <div class="form-check small mt-1">
+                                                        <InputCheckbox class="form-check-input" id="@($"allkeys-{cluster.Id}")" @bind-Value="bindingForm.AllKeys" />
+                                                        <label class="form-check-label" for="@($"allkeys-{cluster.Id}")">All keys (no prefix)</label>
+                                                    </div>
+                                                    <div class="form-text small">
+                                                        The app's user may only touch keys and channels starting with <code>@(PrefixShown(bindingForm))</code>;
+                                                        it receives the prefix as <code>REDIS_KEY_PREFIX</code> and must put it in front of every key.
+                                                    </div>
+                                                </div>
                                                 <div class="col-md-3 d-flex align-items-end gap-1">
-                                                    <button type="submit" class="btn btn-sm btn-primary">
+                                                    <button type="submit" class="btn btn-sm btn-primary" disabled="@addingBinding">
+                                                        @if (addingBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
                                                         Bind
                                                     </button>
                                                     <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelAddBinding">Cancel</button>
@@ -362,15 +428,52 @@
                             else
                             {
                                 <table class="table table-sm table-borderless small mb-0">
-                                    <thead class="text-muted"><tr><th>App / Deployment</th><th>Secret</th><th>Last Synced</th><th></th></tr></thead>
+                                    <thead class="text-muted"><tr><th>App / Deployment</th><th>Secret</th><th>Redis user</th><th>Keys</th><th>Last Synced</th><th></th></tr></thead>
                                     <tbody>
                                         @foreach (CacheBinding binding in clusterBindings)
                                         {
                                             <tr>
                                                 <td>@binding.AppDeployment.App.Name <span class="text-muted">/</span> @binding.AppDeployment.Name</td>
                                                 <td><code>@binding.KubernetesSecretName</code></td>
-                                                <td class="text-muted">@(binding.LastSyncedAt.HasValue ? binding.LastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm") : "Never")</td>
                                                 <td>
+                                                    @if (!cluster.PerAppUsers || RedisAcl.StillOnAdminPassword(binding, cluster))
+                                                    {
+                                                        <span class="badge bg-warning text-dark" title="This app's Secret holds the admin password. Sync it to move it to its own user.">admin password</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <code>@RedisAcl.UsernameFor(binding.Id)</code>
+                                                    }
+                                                    @if (binding.SyncPending)
+                                                    {
+                                                        <span class="badge bg-info text-dark ms-1" title="The key prefix changed and the app's Secret has not been updated yet. EntKube retries every 15 minutes, or press Sync.">sync pending</span>
+                                                    }
+                                                </td>
+                                                <td>
+                                                    @if (editPrefixBindingId == binding.Id)
+                                                    {
+                                                        <div class="d-flex gap-1 align-items-center">
+                                                            <input class="form-control form-control-sm py-0" style="max-width:10rem" placeholder="all keys"
+                                                                   @bind="editPrefixValue" />
+                                                            <button class="btn btn-sm btn-primary py-0" @onclick="() => SavePrefix(cluster.Id, binding.Id)">Save</button>
+                                                            <button class="btn btn-sm btn-outline-secondary py-0" @onclick="() => editPrefixBindingId = null">Cancel</button>
+                                                        </div>
+                                                        <div class="form-text small">Empty means all keys. Tightening applies to the app's open connections at once.</div>
+                                                    }
+                                                    else
+                                                    {
+                                                        @if (binding.KeyPrefix is null) { <span class="text-muted">all keys</span> }
+                                                        else { <code>@(binding.KeyPrefix):*</code> }
+                                                        <button class="btn btn-sm btn-link p-0 ms-1" title="Change the keys this app may use"
+                                                                @onclick="() => StartEditPrefix(binding)"><i class="bi bi-pencil"></i></button>
+                                                    }
+                                                </td>
+                                                <td class="text-muted">@(binding.LastSyncedAt.HasValue ? binding.LastSyncedAt.Value.ToString("yyyy-MM-dd HH:mm") : "Never")</td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-xs btn-sm btn-outline-secondary border-0 py-0" title="Sync credentials"
+                                                            @onclick="() => SyncBinding(cluster.Id, binding.Id)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
                                                     <button class="btn btn-xs btn-sm btn-outline-danger border-0 py-0"
                                                             @onclick="() => RemoveBinding(cluster.Id, binding.Id)">
                                                         <i class="bi bi-trash"></i>
@@ -386,7 +489,7 @@
                         <div class="d-flex gap-2 border-top pt-3">
                             <button class="btn btn-sm btn-outline-secondary"
                                     @onclick="() => ShowCredentials(cluster)">
-                                <i class="bi bi-key me-1"></i>Connection Details
+                                <i class="bi bi-key me-1"></i>Admin connection
                             </button>
 
                             @if (deleteTarget?.Id == cluster.Id)
@@ -508,7 +611,30 @@
         [RegularExpression(@"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
             ErrorMessage = "DNS-safe: lowercase letters, digits, and hyphens.")]
         public string SecretName { get; set; } = "redis-cache";
+
+        /// <summary>Empty takes the suggestion derived from the deployment's name.</summary>
+        public string? KeyPrefix { get; set; }
+
+        public bool AllKeys { get; set; }
     }
+
+    // App and deployment together: deployment names repeat across apps ("api"), and two apps with one
+    // prefix would share keys. The service refuses a prefix already used on the Redis either way.
+    private string SuggestedPrefix(Guid? deploymentId) =>
+        allDeployments.FirstOrDefault(d => d.Id == deploymentId) is { } dep
+            ? RedisAcl.SuggestPrefix($"{dep.AppName}-{dep.Name}")
+            : "my-app";
+
+    private bool addingBinding;
+
+    private string PrefixShown(AddBindingForm form) =>
+        form.AllKeys ? "(any key)" : RedisAcl.KeyPrefixValue(RedisAcl.NormalizePrefix(form.KeyPrefix) ?? SuggestedPrefix(form.DeploymentId));
+
+    // ── Per-app users switch / prefix edit ──
+    private Guid? switchTarget;
+    private bool switching;
+    private Guid? editPrefixBindingId;
+    private string? editPrefixValue;
 
     // ── Credentials ──
     private Guid? credClusterId;
@@ -682,12 +808,18 @@
 
     private async Task AddBinding(Guid clusterId)
     {
+        if (addingBinding) return;
+        addingBinding = true;
         addBindingError = null;
 
         try
         {
+            string? prefix = bindingForm.AllKeys
+                ? null
+                : RedisAcl.NormalizePrefix(bindingForm.KeyPrefix) ?? SuggestedPrefix(bindingForm.DeploymentId);
+
             await RedisService.CreateCacheBindingAsync(
-                TenantId, clusterId, bindingForm.DeploymentId!.Value, bindingForm.SecretName.Trim());
+                TenantId, clusterId, bindingForm.DeploymentId!.Value, bindingForm.SecretName.Trim(), prefix);
 
             addBindingClusterId = null;
             bindingForm = new AddBindingForm();
@@ -699,16 +831,71 @@
             addBindingError = ex.Message;
             Toasts.Error(ex.Message, "Failed to add binding");
         }
+        finally
+        {
+            addingBinding = false;
+        }
     }
 
     private async Task RemoveBinding(Guid clusterId, Guid bindingId)
     {
         try
         {
-            await RedisService.DeleteCacheBindingAsync(TenantId, bindingId);
+            string? warning = await RedisService.DeleteCacheBindingAsync(TenantId, bindingId);
             allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+            if (warning is null) Toasts.Success("Binding removed.");
+            else Toasts.Warning(warning, "Binding removed");
         }
         catch (Exception ex) { Toasts.Error(ex.Message, "Failed to remove binding"); }
+    }
+
+    private async Task SyncBinding(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await RedisService.SyncCacheBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Credentials synced.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message, "Failed to sync binding"); }
+    }
+
+    private void StartEditPrefix(CacheBinding binding)
+    {
+        editPrefixBindingId = binding.Id;
+        editPrefixValue = binding.KeyPrefix;
+    }
+
+    private async Task SavePrefix(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await RedisService.SetCacheBindingKeyPrefixAsync(TenantId, bindingId, editPrefixValue);
+            editPrefixBindingId = null;
+            allBindings[clusterId] = await RedisService.GetCacheBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Key prefix changed and synced.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message, "Failed to change the key prefix"); }
+    }
+
+    private async Task SwitchToPerAppUsers(RedisCluster cluster)
+    {
+        switching = true;
+        try
+        {
+            (int moved, IReadOnlyList<string> failures) = await RedisService.EnablePerAppUsersAsync(TenantId, cluster.Id);
+            switchTarget = null;
+            await LoadAsync();
+            if (failures.Count == 0)
+                Toasts.Success($"Switched. {moved} app(s) now have their own Redis user.");
+            else
+                Toasts.Warning(
+                    $"Switched; {moved} app(s) moved, {failures.Count} still on the admin password (they keep working and move "
+                    + $"automatically within 15 minutes, or press Sync once the pods have restarted). First error: {failures[0]}",
+                    "Switch partly done");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message, "Failed to switch to per-app users"); }
+        finally { switching = false; }
     }
 
     // ── Credentials ──

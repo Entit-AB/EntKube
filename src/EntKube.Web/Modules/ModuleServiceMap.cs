@@ -120,6 +120,7 @@ public static partial class ModuleMap
         [typeof(RedisService)] = Module.DataServices,
         [typeof(RegisteredPostgresService)] = Module.DataServices,
         [typeof(SearchStatusPollingService)] = Module.DataServices,
+        [typeof(RedisUserReconcileService)] = Module.DataServices,
         [typeof(StorageBrowserService)] = Module.DataServices,
         [typeof(StorageLinkClientFactory)] = Module.DataServices,
         [typeof(StorageService)] = Module.DataServices,
