@@ -423,7 +423,10 @@ public static class YamlFormMerger
         string[] segments = dotPath.Split('.');
         YamlMappingNode current = root;
 
-        // Walk down the tree following the path segments.
+        // Walk down the tree following the path segments. A numeric segment indexes into a
+        // sequence, mirroring SetValueAtPath: a field that can write "volume.dataDirs.0.size"
+        // must be able to read it back, or the edit form shows the default and saving writes
+        // that default over the installed value.
 
         for (int i = 0; i < segments.Length - 1; i++)
         {
@@ -431,12 +434,34 @@ public static class YamlFormMerger
                 .OfType<YamlScalarNode>()
                 .FirstOrDefault(k => k.Value == segments[i]);
 
-            if (key is null || current.Children[key] is not YamlMappingNode child)
+            if (key is null)
             {
                 return null;
             }
 
-            current = child;
+            YamlNode child = current.Children[key];
+
+            if (child is YamlSequenceNode sequence
+                && i + 1 < segments.Length - 1
+                && int.TryParse(segments[i + 1], out int index))
+            {
+                if (index < 0 || index >= sequence.Children.Count
+                    || sequence.Children[index] is not YamlMappingNode item)
+                {
+                    return null;
+                }
+
+                current = item;
+                i++; // the index segment is consumed
+                continue;
+            }
+
+            if (child is not YamlMappingNode mapping)
+            {
+                return null;
+            }
+
+            current = mapping;
         }
 
         // Read the leaf value.

@@ -248,15 +248,171 @@ public class ComponentCatalogTests : IDisposable
         entry.Category.Should().Be("Monitoring");
     }
 
+    // ── SeaweedFS: the defaults that make the chart safe to install ──
+
+    [Fact]
+    public void SeaweedFS_keeps_its_data_on_persistent_volumes()
+    {
+        // The chart defaults every directory to hostPath: a pod rescheduled to another node comes up
+        // empty, and two releases on one node share a directory. An emptyDir is no better for data —
+        // it is wiped on every restart — so data must be a PersistentVolumeClaim.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+        string Type(params string[] path) => ((YamlScalarNode)Navigate(values, path)).Value!;
+
+        List<string> dataTypes = [Type("master", "data", "type"), Type("filer", "data", "type")];
+        YamlSequenceNode dataDirs = (YamlSequenceNode)Navigate(values, "volume", "dataDirs");
+        dataDirs.Children.Should().NotBeEmpty();
+        dataTypes.AddRange(dataDirs.Children.Cast<YamlMappingNode>()
+            .Select(d => ((YamlScalarNode)d.Children[new YamlScalarNode("type")]).Value!));
+
+        dataTypes.Should().OnlyContain(t => t == "persistentVolumeClaim");
+    }
+
+    [Theory]
+    [InlineData("master")]
+    [InlineData("volume")]
+    [InlineData("filer")]
+    [InlineData("s3")]
+    public void SeaweedFS_keeps_its_logs_off_the_node(string server)
+    {
+        // Logs may be lost on restart, but they must not land in a hostPath on the node either.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, server, "logs", "type")).Value
+            .Should().BeOneOf("emptyDir", "persistentVolumeClaim");
+    }
+
+    [Theory]
+    [InlineData("master")]
+    [InlineData("volume")]
+    [InlineData("filer")]
+    [InlineData("s3")]
+    public void SeaweedFS_runs_every_server_as_a_non_root_user(string server)
+    {
+        // The image declares no USER, so without an explicit uid it runs as root. The chart renders a
+        // security context only when its "enabled" flag is set.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+        string Value(params string[] path) => ((YamlScalarNode)Navigate(values, [server, .. path])).Value!;
+
+        Value("podSecurityContext", "enabled").Should().Be("true");
+        Value("podSecurityContext", "runAsNonRoot").Should().Be("true");
+        int.Parse(Value("podSecurityContext", "runAsUser")).Should().BePositive();
+        Value("containerSecurityContext", "enabled").Should().Be("true");
+        Value("containerSecurityContext", "allowPrivilegeEscalation").Should().Be("false");
+    }
+
+    [Fact]
+    public void SeaweedFS_gateway_refuses_anonymous_requests()
+    {
+        // Without enableAuth the S3 gateway serves anyone who can reach the Service.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, "s3", "enabled")).Value.Should().Be("true");
+        ((YamlScalarNode)Navigate(values, "s3", "enableAuth")).Value.Should().Be("true");
+    }
+
+    [Fact]
+    public void SeaweedFS_volume_size_field_writes_the_first_data_directory()
+    {
+        // The volume size lives inside a list. The form path has to reach into it rather than
+        // create a sibling key the chart never reads.
+        CatalogEntry entry = ComponentCatalog.GetByKey("seaweedfs")!;
+        ComponentFormField field = entry.FormFields.Single(f => f.Key == "volume-size");
+
+        string merged = YamlFormMerger.MergeFormValues(entry.DefaultValues!, new Dictionary<string, string> { [field.YamlPath] = "200Gi" });
+
+        YamlMappingNode first = (YamlMappingNode)((YamlSequenceNode)Navigate(merged, "volume", "dataDirs")).Children[0];
+        ((YamlScalarNode)first.Children[new YamlScalarNode("size")]).Value.Should().Be("200Gi");
+        ((YamlScalarNode)first.Children[new YamlScalarNode("type")]).Value.Should().Be("persistentVolumeClaim");
+
+        // And it must read back. The edit form fills each field from the installed values; a path
+        // that cannot be read shows the default, and saving writes that default over 200Gi.
+        YamlFormMerger.ExtractValue(merged, field.YamlPath).Should().Be("200Gi");
+        YamlFormMerger.ExtractValue(entry.DefaultValues!, field.YamlPath).Should().Be(field.DefaultValue);
+    }
+
+    [Fact]
+    public void SeaweedFS_filer_and_volume_servers_refuse_unsigned_requests()
+    {
+        // s3.enableAuth guards only the gateway. Without signing, any pod can read or delete every
+        // object through the filer (8888) or a volume server (8080) without the S3 keys.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        foreach (string key in new[] { "volumeWrite", "volumeRead", "filerWrite", "filerRead" })
+        {
+            ((YamlScalarNode)Navigate(values, "global", "seaweedfs", "securityConfig", "jwtSigning", key))
+                .Value.Should().Be("true", $"jwtSigning.{key} closes a path around the S3 gateway");
+        }
+    }
+
+    [Fact]
+    public void SeaweedFS_admits_only_the_S3_port_from_outside_the_release()
+    {
+        // The master deletes whole buckets over unauthenticated HTTP (/col/delete) and the filer and
+        // volume gRPC ports read and delete objects with no token. Only the NetworkPolicy keeps other
+        // pods away from them: on, and with exactly one extra rule, for 8333 and nothing else.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, "networkPolicy", "enabled")).Value.Should().Be("true");
+
+        YamlSequenceNode extra = (YamlSequenceNode)Navigate(values, "networkPolicy", "extraIngress");
+        YamlMappingNode rule = (YamlMappingNode)extra.Children.Should().ContainSingle().Subject;
+        YamlSequenceNode ports = (YamlSequenceNode)rule.Children[new YamlScalarNode("ports")];
+        ports.Children.Cast<YamlMappingNode>()
+            .Select(p => ((YamlScalarNode)p.Children[new YamlScalarNode("port")]).Value)
+            .Should().Equal("8333");
+    }
+
+    [Fact]
+    public void SeaweedFS_grows_one_volume_per_new_bucket()
+    {
+        // Each bucket is a collection; the chart's default grows 7 volumes on a collection's first
+        // write, which exhausts a 50Gi volume server after about seven buckets.
+        string values = ComponentCatalog.GetByKey("seaweedfs")!.DefaultValues!;
+
+        ((YamlScalarNode)Navigate(values, "master", "extraEnvironmentVars", "WEED_MASTER_VOLUME_GROWTH_COPY_1"))
+            .Value.Should().Be("1");
+    }
+
+    [Fact]
+    public void SeaweedFS_form_offers_nothing_that_breaks_an_installed_release()
+    {
+        // The filer's and master's volumeClaimTemplates are immutable (the chart's resize hook covers
+        // only volume servers), and each extra volume server needs a node of its own.
+        ComponentCatalog.GetByKey("seaweedfs")!.FormFields.Select(f => f.YamlPath)
+            .Should().NotContain(["filer.data.size", "master.data.size", "volume.replicas", "master.replicas", "filer.replicas"]);
+    }
+
+    [Theory]
+    [InlineData("seaweedfs-csi-driver", "seaweedfs-csi-driver")]
+    [InlineData("seaweedfs-operator", "seaweedfs-operator")]
+    public void A_sibling_chart_of_seaweedfs_does_not_resolve_to_the_seaweedfs_entry(string release, string chart)
+    {
+        // The release name contains "seaweedfs", but the chart says it is the CSI driver or the
+        // operator. Resolving it to the seaweedfs entry would record the wrong chart on import and
+        // offer an "upgrade" that replaces it with a whole SeaweedFS cluster.
+        ComponentCatalog.FindByRelease(release, chart)?.Key.Should().NotBe("seaweedfs");
+    }
+
+    [Theory]
+    [InlineData("seaweedfs", "seaweedfs")]
+    [InlineData("objects", "seaweedfs")]
+    [InlineData("seaweedfs-prod", null)]
+    [InlineData("seaweedfs-prod", "seaweedfs")]
+    public void A_seaweedfs_release_still_resolves_to_the_seaweedfs_entry(string release, string? chart)
+    {
+        ComponentCatalog.FindByRelease(release, chart)!.Key.Should().Be("seaweedfs");
+    }
+
     [Fact]
     public void GetByKey_CaseInsensitive_ReturnsEntry()
     {
         // Operators shouldn't have to remember exact casing.
 
-        CatalogEntry? entry = ComponentCatalog.GetByKey("MINIO");
+        CatalogEntry? entry = ComponentCatalog.GetByKey("SEAWEEDFS");
 
         entry.Should().NotBeNull();
-        entry!.Key.Should().Be("minio");
+        entry!.Key.Should().Be("seaweedfs");
     }
 
     [Fact]
@@ -311,17 +467,17 @@ public class ComponentCatalogTests : IDisposable
         // The full flow: pick from catalog → register → component is ready
         // with all Helm details pre-filled.
 
-        CatalogEntry entry = ComponentCatalog.GetByKey("minio")!;
+        CatalogEntry entry = ComponentCatalog.GetByKey("seaweedfs")!;
         ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
 
         ClusterComponent component = await lifecycleService.RegisterComponentAsync(tenantId, clusterId, registration);
 
-        component.Name.Should().Be("minio");
-        component.HelmRepoUrl.Should().Be("https://charts.min.io/");
-        component.HelmChartName.Should().Be("minio");
-        component.Namespace.Should().Be("minio");
+        component.Name.Should().Be("seaweedfs");
+        component.HelmRepoUrl.Should().Be("https://seaweedfs.github.io/seaweedfs/helm");
+        component.HelmChartName.Should().Be("seaweedfs");
+        component.Namespace.Should().Be("seaweedfs");
         component.Status.Should().Be(ComponentStatus.NotInstalled);
-        component.HelmValues.Should().Contain("rootUser");
+        component.HelmValues.Should().Contain("enableAuth");
     }
 
     [Fact]
@@ -375,7 +531,7 @@ public class ComponentCatalogTests : IDisposable
     {
         // Components with no dependencies should always pass the check.
 
-        CatalogEntry entry = ComponentCatalog.GetByKey("minio")!;
+        CatalogEntry entry = ComponentCatalog.GetByKey("seaweedfs")!;
 
         DependencyCheckResult result = ComponentCatalog.CheckDependencies(entry, []);
 

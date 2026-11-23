@@ -2590,9 +2590,179 @@ public static class ComponentCatalog
 
         new CatalogEntry
         {
+            Key = "seaweedfs",
+            DisplayName = "SeaweedFS",
+            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. NetworkPolicies admit only the S3 port from outside the release; the master, filer and volume servers (HTTP and gRPC) are reachable only by the release's own pods, which needs a CNI that enforces NetworkPolicy. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
+            Icon = "bi-bucket",
+            Category = "Storage",
+            HelmRepoUrl = "https://seaweedfs.github.io/seaweedfs/helm",
+            HelmChartName = "seaweedfs",
+            HelmChartVersion = "4.54.0",
+            DefaultNamespace = "seaweedfs",
+            DefaultReleaseName = "seaweedfs",
+            FormFields =
+            [
+                // The only size offered in the form. The chart's resize hook grows the volume
+                // server's existing PVCs on upgrade; the filer's and master's volumeClaimTemplates
+                // have no such hook and are immutable once installed, so they stay in the values.
+                // The number of volume servers is not offered either: the chart requires one node
+                // per server, and with no replication configured, removing a server strands the
+                // objects stored on it.
+                new ComponentFormField
+                {
+                    Key = "volume-size", Label = "Volume Server Storage",
+                    YamlPath = "volume.dataDirs.0.size", Type = FormFieldType.Text,
+                    DefaultValue = "50Gi", Placeholder = "e.g. 50Gi, 500Gi",
+                    HelpText = "Persistent volume for object data. Every bucket takes at least one 1 GB volume, so 50Gi holds about 50 buckets. It can be raised later if the StorageClass allows volume expansion; lowering it does not shrink an existing volume."
+                }
+            ],
+            DefaultValues = """
+                # SeaweedFS: one master, one volume server, one filer and one S3 gateway.
+                #
+                # Every data and log directory is set explicitly. The chart's own default for
+                # each is hostPath on the node, so a pod rescheduled to another node would come
+                # up empty and two releases could share a directory.
+
+                # s3.enableAuth guards only the S3 gateway. Every other server is wide open to any
+                # pod that can reach it: the master's HTTP API deletes a whole bucket with
+                # /col/delete and hands out volume tokens from /dir/lookup, and the filer's and
+                # volume servers' gRPC ports read and delete objects with no authentication at all.
+                # So the release's NetworkPolicies admit the S3 port (8333) from anywhere and
+                # everything else only from the release's own pods. On a CNI that does not enforce
+                # NetworkPolicy (flannel, for one) this protection is absent.
+                networkPolicy:
+                  enabled: true
+                  extraIngress:
+                    - ports:
+                        - protocol: TCP
+                          port: 8333
+
+                # Defence in depth inside the release: the filer's and volume servers' HTTP APIs
+                # refuse requests without a token signed with keys only the SeaweedFS servers hold
+                # (generated into the <release>-security-config ConfigMap, kept on upgrade). This
+                # does not cover the master or any gRPC port, which is why the policy above exists.
+                global:
+                  seaweedfs:
+                    securityConfig:
+                      jwtSigning:
+                        volumeWrite: true
+                        volumeRead: true
+                        filerWrite: true
+                        filerRead: true
+
+                master:
+                  replicas: 1
+                  defaultReplication: "000"
+                  # Every bucket is its own collection, and the first write to a collection
+                  # creates this many volumes (1 GB slots by default). The chart's 7 fills the
+                  # slots a 50Gi volume server has after about seven buckets.
+                  extraEnvironmentVars:
+                    WEED_MASTER_VOLUME_GROWTH_COPY_1: "1"
+                  data:
+                    type: persistentVolumeClaim
+                    size: 2Gi
+                    storageClass: ""
+                  logs:
+                    type: emptyDir
+                  resources:
+                    requests: {cpu: 50m, memory: 64Mi}
+                    limits: {memory: 512Mi}
+                  podSecurityContext:
+                    enabled: true
+                    runAsNonRoot: true
+                    # The image declares no USER, so it would run as root without these.
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile: {type: RuntimeDefault}
+                  containerSecurityContext:
+                    enabled: true
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities: {drop: ["ALL"]}
+
+                volume:
+                  replicas: 1
+                  dataDirs:
+                    - name: data
+                      type: persistentVolumeClaim
+                      size: 50Gi
+                      storageClass: ""
+                      maxVolumes: 0
+                  logs:
+                    type: emptyDir
+                  resources:
+                    requests: {cpu: 100m, memory: 128Mi}
+                    limits: {memory: 1Gi}
+                  podSecurityContext:
+                    enabled: true
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile: {type: RuntimeDefault}
+                  containerSecurityContext:
+                    enabled: true
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities: {drop: ["ALL"]}
+
+                filer:
+                  replicas: 1
+                  defaultReplicaPlacement: "000"
+                  data:
+                    type: persistentVolumeClaim
+                    size: 5Gi
+                    storageClass: ""
+                  logs:
+                    type: emptyDir
+                  resources:
+                    requests: {cpu: 50m, memory: 128Mi}
+                    limits: {memory: 1Gi}
+                  podSecurityContext:
+                    enabled: true
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile: {type: RuntimeDefault}
+                  containerSecurityContext:
+                    enabled: true
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities: {drop: ["ALL"]}
+
+                s3:
+                  enabled: true
+                  # Without auth the gateway accepts anonymous requests.
+                  enableAuth: true
+                  replicas: 1
+                  logs:
+                    type: emptyDir
+                  resources:
+                    requests: {cpu: 50m, memory: 64Mi}
+                    limits: {memory: 512Mi}
+                  podSecurityContext:
+                    enabled: true
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile: {type: RuntimeDefault}
+                  containerSecurityContext:
+                    enabled: true
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities: {drop: ["ALL"]}
+                """
+        },
+
+        new CatalogEntry
+        {
             Key = "minio",
             DisplayName = "MinIO",
-            Description = "High-performance S3-compatible object storage. Use for application data, backups, and artifact storage.",
+            Retired = true,
+            Description = "RETIRED — do not install; use SeaweedFS. MinIO no longer publishes its server image: as of 2026-11-20 quay.io/minio/minio answers \"no such manifest\" for the tag this chart pins and docker.io/minio/minio no longer exists, so a fresh install cannot start a pod. This entry remains only so a MinIO already installed can be upgraded or uninstalled. Previously: S3-compatible object storage for application data, backups and artifacts.",
             Icon = "bi-bucket",
             Category = "Storage",
             HelmRepoUrl = "https://charts.min.io/",
@@ -2678,7 +2848,8 @@ public static class ComponentCatalog
         {
             Key = "minio-operator",
             DisplayName = "MinIO Operator",
-            Description = "Kubernetes operator for managing MinIO Tenant instances. Installs the minio.min.io/v2 Tenant CRD so tenants can be provisioned as first-class Kubernetes resources.",
+            Retired = true,
+            Description = "RETIRED — do not install; use SeaweedFS. The operator's own image still pulls, but every Tenant it runs needs the MinIO server image, which is no longer published (see the MinIO entry). This entry remains only so an operator already installed can be upgraded or uninstalled. Previously: managed MinIO Tenant instances through the minio.min.io/v2 Tenant CRD.",
             Icon = "bi-bucket-fill",
             Category = "Storage",
             HelmRepoUrl = "https://operator.min.io/",
@@ -6044,12 +6215,28 @@ public static class ComponentCatalog
         // catalog's DefaultReleaseName or Key as a substring, or vice versa.
         // For example, release "cloudnative-pg-cnpg" matching entry with Key "cloudnative-pg".
 
+        //
+        // Except when the release's own chart is a sibling of the entry's chart: release
+        // "seaweedfs-csi-driver" of chart "seaweedfs-csi-driver" contains "seaweedfs", but it is
+        // the CSI driver, not a SeaweedFS cluster. Resolving it to the seaweedfs entry would record
+        // the wrong chart on import and offer an "upgrade" that replaces the driver with a cluster.
+
         return Entries.FirstOrDefault(e =>
-            (!string.IsNullOrEmpty(e.DefaultReleaseName)
-                && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
-                    || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
-            || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase));
+            !IsSiblingChart(chartName, e)
+            && ((!string.IsNullOrEmpty(e.DefaultReleaseName)
+                    && (releaseName.Contains(e.DefaultReleaseName, StringComparison.OrdinalIgnoreCase)
+                        || e.DefaultReleaseName.Contains(releaseName, StringComparison.OrdinalIgnoreCase)))
+                || releaseName.Contains(e.Key, StringComparison.OrdinalIgnoreCase)));
     }
+
+    /// <summary>
+    /// The release's chart is a different chart from the entry's family, named
+    /// <c>&lt;entry chart&gt;-something</c> (seaweedfs-csi-driver, seaweedfs-operator).
+    /// </summary>
+    private static bool IsSiblingChart(string? chartName, CatalogEntry entry) =>
+        !string.IsNullOrEmpty(chartName)
+        && !string.IsNullOrEmpty(entry.HelmChartName)
+        && chartName.StartsWith(entry.HelmChartName + "-", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Distinguishing qualifiers for catalog entries that share a Helm chart. The Istio

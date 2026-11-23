@@ -343,4 +343,44 @@ public class YamlFormMergerTests
 
         result.Should().Be(yaml);
     }
+
+    // ── Indexed paths read back what they write ──
+
+    private const string ListYaml = """
+        volume:
+          dataDirs:
+            - name: data
+              size: 50Gi
+            - name: more
+              size: 10Gi
+          replicas: 1
+        """;
+
+    [Theory]
+    [InlineData("volume.dataDirs.0.size", "50Gi")]
+    [InlineData("volume.dataDirs.1.size", "10Gi")]
+    [InlineData("volume.replicas", "1")]
+    public void ExtractValue_reads_through_a_list_index(string path, string expected)
+    {
+        YamlFormMerger.ExtractValue(ListYaml, path).Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("volume.dataDirs.2.size")]   // past the end
+    [InlineData("volume.dataDirs.x.size")]   // not an index
+    [InlineData("volume.replicas.0.size")]   // a scalar is not a list
+    [InlineData("volume.dataDirs.size")]     // a list has no named keys
+    public void ExtractValue_returns_null_for_an_index_that_does_not_resolve(string path)
+    {
+        YamlFormMerger.ExtractValue(ListYaml, path).Should().BeNull();
+    }
+
+    [Fact]
+    public void An_indexed_path_round_trips_through_merge_and_extract()
+    {
+        string merged = YamlFormMerger.MergeFormValues(ListYaml, new Dictionary<string, string> { ["volume.dataDirs.1.size"] = "99Gi" });
+
+        YamlFormMerger.ExtractValue(merged, "volume.dataDirs.1.size").Should().Be("99Gi");
+        YamlFormMerger.ExtractValue(merged, "volume.dataDirs.0.size").Should().Be("50Gi");
+    }
 }

@@ -175,6 +175,11 @@ public class BlueprintFromClusterService(
 
                 if (string.IsNullOrEmpty(value)) continue;
 
+                // EntKube's own pull secret is not a setting to carry to another cluster: recorded
+                // there, it reads as the operator's choice and EntKube never creates the Secret.
+                if (field.YamlPath == ComponentLifecycleService.PullSecretPath
+                    && value == ComponentLifecycleService.ManagedPullSecretName) continue;
+
                 bool envSpecific = IsEnvSpecific(field);
                 // Skip values that just match the catalog default (keeps steps lean),
                 // but always keep env-specific values so they become variables.
