@@ -996,10 +996,14 @@ public class PrometheusService(
 
     /// <summary>
     /// Retrieves CloudNativePG cluster metrics from Prometheus: replication lag,
-    /// backend count, active queries, and per-database sizes.
+    /// backend count, active connections, and per-database sizes.
     /// </summary>
+    /// <param name="cnpgNamespace">
+    /// The database's namespace. Two CNPG clusters may share a name in different namespaces, and
+    /// the series carry no cluster label to tell them apart — see <see cref="CnpgSelector"/>.
+    /// </param>
     public async Task<KubernetesOperationResult<CnpgMetricsSummary>> GetCnpgClusterMetricsAsync(
-        Guid tenantId, Guid clusterId, string cnpgClusterName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string cnpgNamespace, string cnpgClusterName, CancellationToken ct = default)
     {
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<CnpgMetricsSummary>.Failure(error!);
@@ -1008,18 +1012,12 @@ public class PrometheusService(
             info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
-                string lagJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"max({CnpgSelector("cnpg_pg_replication_lag", cnpgClusterName)})")}",
-                    token);
-                string backendsJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"sum({CnpgSelector("cnpg_backends_total", cnpgClusterName)})")}",
-                    token);
-                string queriesJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q($"sum({CnpgSelector("cnpg_pg_stat_activity_count", cnpgClusterName, "state=\"active\"")})")}",
-                    token);
-                string sizesJson = await http.GetStringAsync(
-                    $"{baseUrl}/api/v1/query?query={Q(CnpgSelector("cnpg_pg_database_size_bytes", cnpgClusterName, "datname!=\"\""))}",
-                    token);
+                (string lag, string backends, string active, string sizes) =
+                    CnpgPanelQueries(cnpgNamespace, cnpgClusterName);
+                string lagJson = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(lag)}", token);
+                string backendsJson = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(backends)}", token);
+                string queriesJson = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(active)}", token);
+                string sizesJson = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(sizes)}", token);
 
                 List<PrometheusMetricResult> lagResults = ParseInstantQueryResult(lagJson);
                 List<PrometheusMetricResult> backendResults = ParseInstantQueryResult(backendsJson);
@@ -1051,22 +1049,48 @@ public class PrometheusService(
     }
 
     /// <summary>
+    /// The four queries behind the database monitoring panel, in one place so the metric names can
+    /// be checked against what CNPG actually exports. A name CNPG does not export returns an empty
+    /// result, not an error, so a wrong one reads as zero forever: "active queries" used to read
+    /// <c>cnpg_pg_stat_activity_count</c>, which CNPG 1.30 does not export. Active connections are
+    /// <c>cnpg_backends_total</c> with <c>state="active"</c>.
+    /// </summary>
+    public static (string Lag, string Backends, string Active, string Sizes) CnpgPanelQueries(
+        string cnpgNamespace, string cnpgClusterName) => (
+        $"max({CnpgSelector("cnpg_pg_replication_lag", cnpgNamespace, cnpgClusterName)})",
+        $"sum({CnpgSelector("cnpg_backends_total", cnpgNamespace, cnpgClusterName)})",
+        $"sum({CnpgSelector("cnpg_backends_total", cnpgNamespace, cnpgClusterName, "state=\"active\"")})",
+        CnpgSelector("cnpg_pg_database_size_bytes", cnpgNamespace, cnpgClusterName, "datname!=\"\""));
+
+    /// <summary>
     /// Builds the PromQL selector for one CNPG metric, scoped to a single database cluster.
     ///
-    /// Every matcher goes in ONE brace block: two adjacent blocks
-    /// (<c>metric{a="1"}{b="2"}</c>) are a PromQL parse error, and Prometheus answers the whole
-    /// request with 400 Bad Request rather than ignoring the second one.
+    /// <para><b>By namespace and pod, never by a <c>cluster</c> label.</b> This used to match
+    /// <c>cluster="name"</c> or <c>cluster_name="name"</c>, on the belief that CNPG's exporter
+    /// labels its series with the cluster. It does not. Measured on CNPG 1.30.2 behind
+    /// kube-prometheus-stack, of the ~80 <c>cnpg_*</c> series only <c>cnpg_collector_up</c> and
+    /// <c>cnpg_collector_postgres_version</c> carry <c>cluster</c>. Everything the panel reads
+    /// (<c>cnpg_backends_total</c>, <c>cnpg_pg_replication_lag</c>, <c>cnpg_pg_database_size_bytes</c>)
+    /// carries only what Kubernetes service discovery adds: <c>namespace</c>, <c>pod</c>,
+    /// <c>job</c>, <c>instance</c>. So the panel showed "no metrics" for every database, even
+    /// after the "Enable metrics" button had made Prometheus scrape it — and the button looked broken.</para>
     ///
-    /// Which label carries the cluster name depends on how the instances are scraped: CNPG's own
-    /// exporter emits <c>cluster</c>, while some setups relabel it to <c>cluster_name</c>. Both are
-    /// matched with <c>or</c> so the panel works either way — an unmatched alternative contributes
-    /// no series rather than an error.
+    /// <para>Instance pods are named <c>&lt;cluster&gt;-&lt;serial&gt;</c>, and PromQL anchors
+    /// regex matchers at both ends, so <c>shop-[0-9]+</c> matches <c>shop-1</c> but neither
+    /// <c>shop-2-1</c> (cluster <c>shop-2</c>) nor a Job pod such as <c>shop-1-initdb-x</c>.</para>
+    ///
+    /// <para>Every matcher goes in ONE brace block: two adjacent blocks
+    /// (<c>metric{a="1"}{b="2"}</c>) are a PromQL parse error, and Prometheus answers the whole
+    /// request with 400 Bad Request rather than ignoring the second one.</para>
     /// </summary>
-    public static string CnpgSelector(string metric, string cnpgClusterName, string? extraMatcher = null)
+    public static string CnpgSelector(
+        string metric, string cnpgNamespace, string cnpgClusterName, string? extraMatcher = null)
     {
         string extra = string.IsNullOrEmpty(extraMatcher) ? "" : $",{extraMatcher}";
-        return $"{metric}{{cluster=\"{cnpgClusterName}\"{extra}}}"
-             + $" or {metric}{{cluster_name=\"{cnpgClusterName}\"{extra}}}";
+        // A name may contain '.', which is a regex wildcard; escaped for RE2, and the backslash
+        // doubled for the PromQL string literal it sits in.
+        string podPattern = cnpgClusterName.Replace(".", "\\\\.") + "-[0-9]+";
+        return $"{metric}{{namespace=\"{cnpgNamespace}\",pod=~\"{podPattern}\"{extra}}}";
     }
 
     /// <summary>

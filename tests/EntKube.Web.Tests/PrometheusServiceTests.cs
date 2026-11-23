@@ -563,48 +563,70 @@ public class PrometheusServiceTests : IDisposable
     //  CNPG metric selectors
     // ════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Every <c>cnpg_*</c> metric CNPG 1.30.2 exported for one instance, read from a real
+    /// Prometheus (kube-prometheus-stack 93.9.0 on kind, the database's PodMonitor created by
+    /// <c>enablePodMonitor</c>). Only two of them carry a <c>cluster</c> label.
+    /// </summary>
+    private static readonly HashSet<string> CnpgExportedMetrics =
+    [
+        "cnpg_backends_max_tx_duration_seconds", "cnpg_backends_total", "cnpg_backends_waiting_total",
+        "cnpg_collector_up", "cnpg_collector_postgres_version", "cnpg_collector_pg_wal",
+        "cnpg_pg_database_size_bytes", "cnpg_pg_database_xid_age", "cnpg_pg_replication_lag",
+        "cnpg_pg_replication_in_recovery", "cnpg_pg_replication_streaming_replicas",
+        "cnpg_pg_stat_database_xact_commit", "cnpg_pg_stat_database_xact_rollback",
+        "cnpg_pg_stat_archiver_archived_count", "cnpg_pg_stat_archiver_failed_count",
+    ];
+
+    /// <summary>
+    /// The regression. The selector matched <c>cluster="name"</c>, a label the series the panel
+    /// reads do not carry, so the panel said "no metrics" for every database — including ones the
+    /// "Enable metrics" button had just made Prometheus scrape. What every scraped series does carry
+    /// is the pod's namespace and name.
+    /// </summary>
     [Fact]
-    public void CnpgSelector_KeepsEveryMatcherInOneBraceBlock()
+    public void CnpgSelector_matches_by_namespace_and_instance_pod_not_by_a_cluster_label()
+    {
+        PrometheusService.CnpgSelector("cnpg_backends_total", "apps", "shopdb")
+            .Should().Be("cnpg_backends_total{namespace=\"apps\",pod=~\"shopdb-[0-9]+\"}");
+    }
+
+    [Fact]
+    public void CnpgSelector_keeps_every_matcher_in_one_brace_block()
     {
         // Two adjacent brace blocks — metric{a="1"}{b="2"} — do not narrow the query, they fail
         // to parse, and Prometheus rejects the whole request with 400 Bad Request.
-        string query = PrometheusService.CnpgSelector("cnpg_pg_stat_activity_count", "postgres", "state=\"active\"");
+        string query = PrometheusService.CnpgSelector("cnpg_backends_total", "apps", "shopdb", "state=\"active\"");
 
         query.Should().NotContain("}{");
-        query.Should().Contain("cnpg_pg_stat_activity_count{cluster=\"postgres\",state=\"active\"}");
+        query.Should().Be("cnpg_backends_total{namespace=\"apps\",pod=~\"shopdb-[0-9]+\",state=\"active\"}");
     }
 
     [Fact]
-    public void CnpgSelector_MatchesEitherClusterLabelSpelling()
+    public void CnpgSelector_escapes_a_dot_so_it_matches_only_itself()
     {
-        // CNPG's exporter labels series with `cluster`; some scrape setups relabel to
-        // `cluster_name`. Matching both keeps the panel working on either.
-        string query = PrometheusService.CnpgSelector("cnpg_backends_total", "postgres");
-
-        query.Should().Be(
-            "cnpg_backends_total{cluster=\"postgres\"} or cnpg_backends_total{cluster_name=\"postgres\"}");
+        // In a regex '.' matches anything, so "a.b" would also select pods of cluster "axb".
+        PrometheusService.CnpgSelector("cnpg_backends_total", "apps", "a.b")
+            .Should().Contain("pod=~\"a\\\\.b-[0-9]+\"");
     }
 
+    /// <summary>
+    /// A metric CNPG does not export answers with an empty result, not an error, so a wrong name
+    /// reads as zero forever: "active queries" read <c>cnpg_pg_stat_activity_count</c>.
+    /// </summary>
     [Fact]
-    public void CnpgSelector_OmitsTheSeparatorWhenThereIsNoExtraMatcher()
+    public void Every_metric_the_cnpg_panel_reads_is_one_cnpg_exports()
     {
-        PrometheusService.CnpgSelector("cnpg_pg_replication_lag", "postgres")
-            .Should().NotContain(",}");
-    }
+        (string lag, string backends, string active, string sizes) = PrometheusService.CnpgPanelQueries("apps", "shopdb");
 
-    // ════════════════════════════════════════════════════════════════
-    //  CNPG scrape diagnosis — selector matching
-    // ════════════════════════════════════════════════════════════════
-
-    [Fact]
-    public void CnpgSelector_IsUsedForEveryMetricQuery()
-    {
-        // Guards the shape the diagnosis explains to the operator: one brace block per metric.
-        foreach (string metric in new[]
-                 { "cnpg_pg_replication_lag", "cnpg_backends_total", "cnpg_pg_database_size_bytes" })
+        foreach (string query in new[] { lag, backends, active, sizes })
         {
-            PrometheusService.CnpgSelector(metric, "postgres").Should().NotContain("}{");
+            string metric = System.Text.RegularExpressions.Regex.Match(query, "cnpg_[a-z_]+").Value;
+            CnpgExportedMetrics.Should().Contain(metric, "the query {0} must read a series CNPG 1.30 exports", query);
+            query.Should().Contain("namespace=\"apps\"").And.NotContain("cluster=");
         }
+
+        active.Should().Contain("cnpg_backends_total").And.Contain("state=\"active\"");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -834,7 +856,7 @@ public class PrometheusServiceTests : IDisposable
         await db.SaveChangesAsync();
 
         KubernetesOperationResult<CnpgMetricsSummary> result =
-            await sut.GetCnpgClusterMetricsAsync(stranger, clusterId, "db-1");
+            await sut.GetCnpgClusterMetricsAsync(stranger, clusterId, "apps", "db-1");
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("not found for this tenant",
@@ -847,7 +869,7 @@ public class PrometheusServiceTests : IDisposable
         (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
 
         KubernetesOperationResult<CnpgMetricsSummary> result =
-            await sut.GetCnpgClusterMetricsAsync(tenantId, clusterId, "db-1");
+            await sut.GetCnpgClusterMetricsAsync(tenantId, clusterId, "apps", "db-1");
 
         result.IsSuccess.Should().BeFalse("there is no prometheus component on this cluster");
         result.Error.Should().Contain("No prometheus component",
