@@ -1,0 +1,204 @@
+@using EntKube.Web.Services
+@inject KyvernoPolicyReportService ReportService
+
+@* ═══════════════════════════════════════════════════════════════════
+   KyvernoPolicyResults: what Kyverno's background scan found in the
+   tenant's app namespaces for one environment. Audit-mode policies
+   block nothing, so these reports are the only place their findings
+   appear. Read live from the clusters; nothing is stored.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <div>
+            <i class="bi bi-clipboard-check me-2 text-primary"></i>
+            <strong>Policy Results</strong>
+            <span class="text-muted small ms-2">What Kyverno found in this environment's app namespaces, including everything Audit mode lets through.</span>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            @if (overview is not null)
+            {
+                @if (overview.Failing > 0)
+                {
+                    <span class="badge bg-danger">@overview.Failing failing</span>
+                }
+                @if (overview.Warnings > 0)
+                {
+                    <span class="badge bg-warning text-dark">@overview.Warnings warning@(overview.Warnings == 1 ? "" : "s")</span>
+                }
+                <span class="badge bg-success-subtle text-success border border-success-subtle">@overview.Passing passing</span>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@loading">
+                @if (loading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                else { <i class="bi bi-arrow-clockwise me-1"></i> }
+                Refresh
+            </button>
+        </div>
+    </div>
+    <div class="card-body pt-2">
+        @if (loading && overview is null)
+        {
+            <div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></div>
+        }
+        else if (loadError is not null)
+        {
+            <div class="alert alert-danger py-2 small mb-0">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                <strong>Could not read policy results:</strong> @loadError
+            </div>
+        }
+        else if (overview is not null)
+        {
+            @if (!overview.IsComplete)
+            {
+                <div class="alert alert-warning py-2 small">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    <strong>These results are incomplete.</strong>
+                    @overview.NamespacesRead of @overview.NamespacesAsked namespace@(overview.NamespacesAsked == 1 ? " was" : "s were") read.
+                    Anything in the rest is not shown, so no failures here does not mean none exist.
+                    <ul class="mb-0 mt-1 ps-3">
+                        @foreach (PolicyReportGap gap in overview.Gaps)
+                        {
+                            <li><code>@gap.Cluster@(gap.Namespace is null ? "" : "/" + gap.Namespace)</code>: @gap.Reason</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            @if (overview.NamespacesAsked == 0)
+            {
+                <p class="text-muted small mb-0">No app is deployed in this environment, so there is nothing to report on.</p>
+            }
+            else if (overview.HasNoResults)
+            {
+                @if (overview.NamespacesRead > 0)
+                {
+                    <p class="text-muted small mb-0">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Kyverno has recorded no results in these namespaces. This is not the same as passing: its background
+                        scan may not have run yet (it runs hourly by default), or no policy matches anything deployed here.
+                    </p>
+                }
+            }
+            else
+            {
+                <div class="list-group list-group-flush">
+                    @foreach (PolicyResultSummary policy in overview.Policies)
+                    {
+                        bool expanded = expandedPolicies.Contains(policy.Policy);
+                        <div class="list-group-item px-0 py-1">
+                            <div class="d-flex align-items-center justify-content-between"
+                                 role="button" style="cursor: @(policy.Findings.Count > 0 ? "pointer" : "default");"
+                                 @onclick="() => Toggle(policy)">
+                                <div class="small d-flex align-items-center gap-2">
+                                    @if (policy.Findings.Count > 0)
+                                    {
+                                        <i class="bi @(expanded ? "bi-chevron-down" : "bi-chevron-right") text-muted"></i>
+                                    }
+                                    else
+                                    {
+                                        <i class="bi bi-check-circle text-success"></i>
+                                    }
+                                    <code>@policy.Policy</code>
+                                </div>
+                                <div class="d-flex align-items-center gap-1 small">
+                                    @if (policy.Fail > 0) { <span class="badge bg-danger">@policy.Fail fail</span> }
+                                    @if (policy.Error > 0) { <span class="badge bg-danger-subtle text-danger border border-danger-subtle">@policy.Error error</span> }
+                                    @if (policy.Warn > 0) { <span class="badge bg-warning text-dark">@policy.Warn warn</span> }
+                                    @if (policy.Pass > 0) { <span class="badge bg-success-subtle text-success border border-success-subtle">@policy.Pass pass</span> }
+                                    @if (policy.Skip > 0) { <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">@policy.Skip skipped</span> }
+                                </div>
+                            </div>
+
+                            @if (expanded)
+                            {
+                                <div class="table-responsive mt-2">
+                                    <table class="table table-sm small mb-1">
+                                        <thead class="text-muted">
+                                            <tr><th>Result</th><th>Resource</th><th>Namespace</th><th>Rule</th><th>Message</th><th>Checked</th></tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (PolicyResultRow row in policy.Findings.Take(FindingsShown))
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        <span class="badge @(row.Result == "warn" ? "bg-warning text-dark" : row.Result == "error" ? "bg-danger-subtle text-danger border border-danger-subtle" : "bg-danger")">@row.Result</span>
+                                                    </td>
+                                                    <td class="text-nowrap">@row.ResourceKind/<strong>@row.ResourceName</strong></td>
+                                                    <td class="text-nowrap" title="@row.Cluster">@row.Namespace</td>
+                                                    <td class="text-nowrap">@row.Rule</td>
+                                                    <td style="min-width: 16rem;">@row.Message</td>
+                                                    <td class="text-nowrap text-muted">@(row.Timestamp?.LocalDateTime.ToString("g"))</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                    @if (policy.Findings.Count > FindingsShown)
+                                    {
+                                        <p class="text-muted small mb-0">…and @(policy.Findings.Count - FindingsShown) more.</p>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+
+    private const int FindingsShown = 50;
+
+    private KyvernoReportOverview? overview;
+    private bool loading;
+    private string? loadError;
+    private readonly HashSet<string> expandedPolicies = [];
+    private (Guid Tenant, Guid Environment)? loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor != (TenantId, EnvironmentId))
+        {
+            overview = null;
+            expandedPolicies.Clear();
+            await LoadAsync();
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        loadError = null;
+        loadedFor = (TenantId, EnvironmentId);
+
+        try
+        {
+            overview = await ReportService.GetOverviewAsync(TenantId, EnvironmentId);
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void Toggle(PolicyResultSummary policy)
+    {
+        if (policy.Findings.Count == 0)
+        {
+            return;
+        }
+
+        if (!expandedPolicies.Remove(policy.Policy))
+        {
+            expandedPolicies.Add(policy.Policy);
+        }
+    }
+}
