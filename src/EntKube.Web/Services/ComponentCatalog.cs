@@ -4497,6 +4497,77 @@ public static class ComponentCatalog
                 """
         },
 
+        new CatalogEntry
+        {
+            Key = "tetragon",
+            DisplayName = "Tetragon (Runtime Security)",
+            Description = "eBPF runtime security from the Cilium project: records which process ran in which pod, and with TracingPolicies, file access, network connections and privilege changes, as they happen in the kernel. Kyverno only checks what is admitted; Tetragon watches what then runs. Events are written to the agent's log, so the in-cluster collector ships them to EntKube's logs. Needs a kernel with BTF (5.4+, standard on current distributions); works with or without Cilium as the CNI.",
+            Icon = "bi-eye",
+            Category = "Security",
+            HelmRepoUrl = "https://helm.cilium.io/",
+            HelmChartName = "tetragon",
+            HelmChartVersion = "1.8.0",
+            DefaultNamespace = "tetragon",
+            DefaultReleaseName = "tetragon",
+            InstallTimeout = "15m0s",
+            DetectionCrds = ["tracingpolicies.cilium.io"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "export-rate-limit", Label = "Event Rate Limit (per node, per minute)",
+                    YamlPath = "tetragon.exportRateLimit", Type = FormFieldType.Number,
+                    DefaultValue = "1000",
+                    HelpText = "Events above this are dropped (and counted) rather than shipped. Every process start in every pod is an event, so an unlimited export can outgrow the telemetry store. -1 removes the limit."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Agent Memory Limit",
+                    YamlPath = "tetragon.resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
+                    HelpText = "The agent caches every process on the node; raise this on nodes running thousands of processes."
+                },
+                new ComponentFormField
+                {
+                    Key = "service-monitor", Label = "Create ServiceMonitor",
+                    YamlPath = "tetragon.prometheus.serviceMonitor.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Lets kube-prometheus-stack scrape event and policy metrics. Needs the Prometheus Operator CRDs."
+                }
+            ],
+            DefaultValues = """
+                tetragon:
+                  # Process starts, plus whatever TracingPolicies add (kprobes, uprobes, tracepoints, LSM hooks).
+                  # Process exits are left out: one per process, and they say little the start did not.
+                  exportAllowList: |-
+                    {"event_set":["PROCESS_EXEC", "PROCESS_KPROBE", "PROCESS_UPROBE", "PROCESS_TRACEPOINT", "PROCESS_LSM"]}
+                  # Health-check probes, the host, the control plane and Tetragon itself are noise.
+                  exportDenyList: |-
+                    {"health_check":true}
+                    {"namespace":["", "cilium", "kube-system", "tetragon"]}
+                  # A ceiling per node, so the event stream cannot swamp the telemetry pipeline.
+                  exportRateLimit: 1000
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 256Mi
+                    limits:
+                      memory: 1Gi
+                  prometheus:
+                    serviceMonitor:
+                      enabled: false
+
+                export:
+                  mode: stdout
+                  resources:
+                    requests:
+                      cpu: 10m
+                      memory: 32Mi
+                    limits:
+                      memory: 128Mi
+                """
+        },
+
         // ── Workloads ──
 
         new CatalogEntry
@@ -4556,6 +4627,110 @@ public static class ComponentCatalog
                         memory: 128Mi
                       limits:
                         memory: 512Mi
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "descheduler",
+            DisplayName = "Descheduler",
+            Description = "Moves pods that the scheduler would place differently today: off nodes they no longer tolerate or fit, away from duplicates and topology-spread violations, and from busy nodes onto underused ones after new nodes join. It evicts through the eviction API, so PodDisruptionBudgets are respected; pods with persistent volumes, system-critical pods and pods without a controller are never moved.",
+            Icon = "bi-shuffle",
+            Category = "Workloads",
+            HelmRepoUrl = "https://kubernetes-sigs.github.io/descheduler/",
+            HelmChartName = "descheduler",
+            HelmChartVersion = "0.37.0",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "descheduler",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "interval", Label = "Run Every",
+                    YamlPath = "deschedulingInterval", Type = FormFieldType.Text,
+                    DefaultValue = "10m", Placeholder = "e.g. 10m, 30m, 1h",
+                    HelpText = "How often the descheduler looks for pods to move. Each pass can restart pods, so shorter is not better."
+                },
+                new ComponentFormField
+                {
+                    Key = "dry-run", Label = "Dry Run",
+                    YamlPath = "cmdOptions.dry-run", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Log which pods would be evicted without evicting any. Useful to see what it will do on a busy cluster first."
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "256Mi", Placeholder = "e.g. 256Mi, 512Mi"
+                }
+            ],
+            DefaultValues = """
+                # A long-running Deployment that wakes every deschedulingInterval. The chart's default is a
+                # CronJob every two minutes, which leaves a pod object behind on every run.
+                kind: Deployment
+                deschedulingInterval: 10m
+
+                cmdOptions:
+                  v: 3
+                  dry-run: false
+
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 128Mi
+                  limits:
+                    memory: 256Mi
+
+                deschedulerPolicy:
+                  profiles:
+                    - name: default
+                      pluginConfig:
+                        - name: DefaultEvictor
+                          args:
+                            podProtections:
+                              # Pods with only emptyDir scratch space may move; pods with a PVC never do.
+                              defaultDisabled:
+                                - "PodsWithLocalStorage"
+                              extraEnabled:
+                                - "PodsWithPVC"
+                        - name: RemoveDuplicates
+                        - name: RemovePodsHavingTooManyRestarts
+                          args:
+                            podRestartThreshold: 100
+                            includingInitContainers: true
+                        - name: RemovePodsViolatingNodeAffinity
+                          args:
+                            nodeAffinityType:
+                              - requiredDuringSchedulingIgnoredDuringExecution
+                        - name: RemovePodsViolatingNodeTaints
+                        - name: RemovePodsViolatingInterPodAntiAffinity
+                        - name: RemovePodsViolatingTopologySpreadConstraint
+                        # Spreads load from busy nodes onto underused ones. With cluster-autoscaler this
+                        # also keeps underused nodes occupied, so they are scaled down less readily; remove
+                        # it from the balance list below on clusters where shrinking matters more.
+                        - name: LowNodeUtilization
+                          args:
+                            thresholds:
+                              cpu: 20
+                              memory: 20
+                              pods: 20
+                            targetThresholds:
+                              cpu: 50
+                              memory: 50
+                              pods: 50
+                      plugins:
+                        balance:
+                          enabled:
+                            - RemoveDuplicates
+                            - RemovePodsViolatingTopologySpreadConstraint
+                            - LowNodeUtilization
+                        deschedule:
+                          enabled:
+                            - RemovePodsHavingTooManyRestarts
+                            - RemovePodsViolatingNodeTaints
+                            - RemovePodsViolatingNodeAffinity
+                            - RemovePodsViolatingInterPodAntiAffinity
                 """
         },
 
@@ -5640,7 +5815,135 @@ public static class ComponentCatalog
                       verbs: ["get", "list", "update", "watch", "patch"]
                 """,
             FormFields = []
-        }
+        },
+
+        // ── Nodes ──
+
+        new CatalogEntry
+        {
+            Key = "kured",
+            DisplayName = "Kured (Reboot Daemon)",
+            Description = "Reboots nodes after the operating system installs updates that need it, one node at a time: cordon, drain (respecting PodDisruptionBudgets), reboot, uncordon. For clusters whose nodes patch their own OS: kubeadm and EntKube-provisioned clusters, and managed node pools with unattended upgrades. Managed pools that replace node images instead (GKE, EKS) do not need it.",
+            Icon = "bi-arrow-counterclockwise",
+            Category = "Nodes",
+            HelmRepoUrl = "https://kubereboot.github.io/charts",
+            HelmChartName = "kured",
+            HelmChartVersion = "6.1.0",
+            DefaultNamespace = "kube-system",
+            DefaultReleaseName = "kured",
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "start-time", Label = "Reboot Window Start",
+                    YamlPath = "configuration.startTime", Type = FormFieldType.Text,
+                    DefaultValue = "1:00", Placeholder = "e.g. 1:00, 22:00",
+                    HelpText = "Nodes are only rebooted between this time and the window end, in the time zone below."
+                },
+                new ComponentFormField
+                {
+                    Key = "end-time", Label = "Reboot Window End",
+                    YamlPath = "configuration.endTime", Type = FormFieldType.Text,
+                    DefaultValue = "5:00", Placeholder = "e.g. 5:00, 6:00"
+                },
+                new ComponentFormField
+                {
+                    Key = "time-zone", Label = "Time Zone",
+                    YamlPath = "configuration.timeZone", Type = FormFieldType.Text,
+                    DefaultValue = "Europe/Stockholm", Placeholder = "e.g. Europe/Stockholm, UTC"
+                },
+                new ComponentFormField
+                {
+                    Key = "prometheus-url", Label = "Prometheus URL (blocks reboots while alerts fire)",
+                    YamlPath = "configuration.prometheusUrl", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "e.g. http://kube-prometheus-stack-prometheus.monitoring:9090",
+                    HelpText = "When set, a node is not rebooted while any alert is firing, so a reboot never lands on top of an incident."
+                },
+                new ComponentFormField
+                {
+                    Key = "sentinel-command", Label = "Reboot-Needed Command (RHEL-family nodes)",
+                    YamlPath = "configuration.rebootSentinelCommand", Type = FormFieldType.Text,
+                    DefaultValue = "", Placeholder = "e.g. sh -c \"! needs-restarting --reboothint\"",
+                    HelpText = "Debian and Ubuntu nodes signal a needed reboot with /var/run/reboot-required, which is the default. RHEL, Rocky and Alma do not write that file; give a command that succeeds when a reboot is needed."
+                }
+            ],
+            DefaultValues = """
+                configuration:
+                  # Reboot nights only. Without a window kured reboots at any hour, including office hours.
+                  startTime: "1:00"
+                  endTime: "5:00"
+                  timeZone: "Europe/Stockholm"
+                  # One node at a time.
+                  concurrency: 1
+                  # A PodDisruptionBudget that never allows eviction would otherwise hold the drain open for
+                  # ever. On timeout kured gives up on this node for now (forceReboot stays false: it never
+                  # reboots through a failed drain) and tries again on a later check.
+                  drainTimeout: "30m"
+                  forceReboot: false
+                  # A node that dies holding the reboot lock would otherwise stop every other reboot for good.
+                  lockTtl: "2h"
+                  # Keep new pods off a node that is about to go down.
+                  preferNoScheduleTaint: "weave.works/kured-node-reboot"
+                  annotateNodes: true
+
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 32Mi
+                  limits:
+                    memory: 128Mi
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "gpu-operator",
+            DisplayName = "NVIDIA GPU Operator",
+            Description = "Makes NVIDIA GPUs schedulable: installs the driver, container toolkit and device plugin on GPU nodes (found by node-feature-discovery), plus DCGM metrics and MIG support, so pods can request nvidia.com/gpu. On AKS, GKE and EKS, create GPU node pools without the provider's own driver, or turn driver installation off here, since only one driver can own the GPU.",
+            Icon = "bi-gpu-card",
+            Category = "Nodes",
+            HelmRepoUrl = "https://helm.ngc.nvidia.com/nvidia",
+            HelmChartName = "gpu-operator",
+            HelmChartVersion = "v26.7.2",
+            DefaultNamespace = "gpu-operator",
+            DefaultReleaseName = "gpu-operator",
+            InstallTimeout = "15m0s",
+            // Owned by the GPU operator alone; a cluster with it installed some other way is found by it.
+            DetectionCrds = ["clusterpolicies.nvidia.com"],
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "install-driver", Label = "Install NVIDIA Driver",
+                    YamlPath = "driver.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Turn off where the node image already carries the driver (AKS, GKE and EKS GPU images, or nodes prepared by hand). Two drivers cannot share a GPU."
+                },
+                new ComponentFormField
+                {
+                    Key = "service-monitor", Label = "Create ServiceMonitor for GPU Metrics",
+                    YamlPath = "dcgmExporter.serviceMonitor.enabled", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Lets kube-prometheus-stack scrape per-GPU utilisation, memory and temperature. Needs the Prometheus Operator CRDs."
+                }
+            ],
+            DefaultValues = """
+                driver:
+                  enabled: true
+
+                dcgmExporter:
+                  serviceMonitor:
+                    enabled: false
+
+                operator:
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 128Mi
+                    limits:
+                      memory: 350Mi
+                """
+        },
     ];
 
     /// <summary>
