@@ -931,6 +931,10 @@ public static class ComponentCatalog
             Category = "Monitoring",
             HelmRepoUrl = "https://prometheus-community.github.io/helm-charts",
             HelmChartName = "kube-prometheus-stack",
+            // Pinned: unpinned, every install got whatever chart was newest that day, so what
+            // kube-state-metrics exports, how the kubelet is scraped and which values keys exist all
+            // varied by cluster. 93.9.0 is the version the scrape defaults below were verified with.
+            HelmChartVersion = "93.9.0",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "kube-prometheus-stack",
             // Heavy: Prometheus + Grafana + Alertmanager + a node-exporter DaemonSet + CRDs.
@@ -983,6 +987,14 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
+                    Key = "prom-storage-size", Label = "Prometheus Storage Size",
+                    YamlPath = "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage",
+                    Type = FormFieldType.Text,
+                    DefaultValue = "20Gi", Placeholder = "e.g. 20Gi, 50Gi",
+                    HelpText = "Disk for the metrics history. Without it Prometheus keeps its history in the pod and loses it on every restart, whatever the retention says. On an install that has no disk yet, saving this restarts Prometheus onto the new volume and the history kept in the pod so far is not carried over. Size it to retention × ingest; it can be raised later on a storage class that allows expansion."
+                },
+                new ComponentFormField
+                {
                     Key = "prom-cpu-request", Label = "Prometheus CPU Request",
                     YamlPath = "prometheus.prometheusSpec.resources.requests.cpu", Type = FormFieldType.Text,
                     DefaultValue = "250m", Placeholder = "e.g. 250m, 500m"
@@ -1023,6 +1035,55 @@ public static class ComponentCatalog
                     probeSelectorNilUsesHelmValues: false
                     scrapeConfigSelectorNilUsesHelmValues: false
                     ruleSelectorNilUsesHelmValues: false
+                    # The metrics history on a volume. Without a storageSpec the chart keeps the
+                    # TSDB on an emptyDir, so every restart or reschedule starts from nothing.
+                    storageSpec:
+                      volumeClaimTemplate:
+                        spec:
+                          accessModes: ["ReadWriteOnce"]
+                          resources:
+                            requests:
+                              storage: 20Gi
+                    # Pods that ask to be scraped with the usual annotations — see
+                    # YamlFormMerger.PodAnnotationScrapeJob for what each one does. Only annotated
+                    # pods: an app opts in, nothing is scraped that nobody asked for.
+                    additionalScrapeConfigs:
+                      - job_name: kubernetes-pods-annotated
+                        kubernetes_sd_configs:
+                          - role: pod
+                        relabel_configs:
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                            action: keep
+                            regex: "true"
+                          - source_labels: [__meta_kubernetes_pod_phase]
+                            action: drop
+                            regex: Pending|Succeeded|Failed|Unknown
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+                            action: replace
+                            regex: (https?)
+                            target_label: __scheme__
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                            action: replace
+                            regex: (.+)
+                            target_label: __metrics_path__
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+                            action: replace
+                            regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+                            replacement: "[$2]:$1"
+                            target_label: __address__
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+                            action: replace
+                            regex: (\d+);((([0-9]+?)(\.|$)){4})
+                            replacement: "$2:$1"
+                            target_label: __address__
+                          - source_labels: [__meta_kubernetes_namespace]
+                            target_label: namespace
+                          - source_labels: [__meta_kubernetes_pod_name]
+                            target_label: pod
+                          - source_labels: [__meta_kubernetes_pod_container_name]
+                            target_label: container
+                          - action: labelmap
+                            regex: __meta_kubernetes_pod_label_(app_kubernetes_io_name|app_kubernetes_io_instance)
 
                 # ── External access via Gateway API HTTPRoutes ──
                 # Uncomment and adjust the hostnames to expose services externally.
