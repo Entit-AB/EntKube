@@ -129,6 +129,32 @@ public class DeploymentMetricsSummary
 /// <summary>
 /// CPU%, memory%, and pod-count time series for a cluster's monitoring graphs.
 /// </summary>
+/// <summary>
+/// An aggregate across clusters that keeps what each cluster said: the totals of those that
+/// answered, the scopes to chart them with, and why every other cluster contributed nothing.
+/// </summary>
+public sealed class AppMetricsOverview
+{
+    /// <summary>The sum over the clusters that answered; null when none did, never a zero for "nothing answered".</summary>
+    public DeploymentMetricsSummary? Totals { get; init; }
+
+    /// <summary>The clusters that answered, with their namespaces — what the charts query.</summary>
+    public List<AppMetricsScope> Scopes { get; init; } = [];
+
+    /// <summary>Clusters EntKube reached that have no Prometheus component: an empty state, not an error.</summary>
+    public List<string> ClustersWithoutPrometheus { get; init; } = [];
+
+    /// <summary>Every other cluster that did not answer, as "cluster: why".</summary>
+    public List<string> Problems { get; init; } = [];
+
+    /// <summary>The sentence shown for a cluster that has no Prometheus.</summary>
+    public static string NotInstalled(string clusterName) => $"Prometheus is not installed on {clusterName}.";
+
+    /// <summary>Every reason, one sentence each: what a failure carries.</summary>
+    public string Describe() =>
+        string.Join(" ", ClustersWithoutPrometheus.Select(NotInstalled).Concat(Problems));
+}
+
 public sealed record ClusterMetricsHistory(
     List<TimeSeriesDataPoint> CpuPercent,
     List<TimeSeriesDataPoint> MemoryPercent,
@@ -653,6 +679,19 @@ public class PrometheusService(
     public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesAsync(
         Guid tenantId, Guid clusterId, string label, string? matchSelector, TimeSpan lookback,
         CancellationToken ct = default)
+        => await GetLabelValuesMatchingAnyAsync(
+            tenantId, clusterId, label,
+            string.IsNullOrEmpty(matchSelector) ? [] : [matchSelector], lookback, ct);
+
+    /// <summary>
+    /// The label-values lookup with several series selectors, of which a series has to match
+    /// <b>any</b> — Prometheus's repeated <c>match[]</c>, which is a union. A selector cannot
+    /// express "this label or that one", so the metrics explorer asks with one selector per
+    /// label spelling. No selectors means no constraint.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesMatchingAnyAsync(
+        Guid tenantId, Guid clusterId, string label, IReadOnlyList<string> matchSelectors, TimeSpan lookback,
+        CancellationToken ct = default)
     {
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
@@ -660,11 +699,12 @@ public class PrometheusService(
         long end = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long start = end - (long)lookback.TotalSeconds;
         string path = $"/api/v1/label/{Uri.EscapeDataString(label)}/values?start={start}&end={end}";
-        if (!string.IsNullOrEmpty(matchSelector))
+        foreach (string matchSelector in matchSelectors.Where(s => !string.IsNullOrEmpty(s)))
             path += $"&match[]={Q(matchSelector)}";
 
         return await queryCache.GetOrFetchAsync(
-            EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "labels", label, matchSelector, (long)lookback.TotalSeconds),
+            EntKube.Web.Services.Telemetry.PromQueryCache.Key(
+                clusterId, "labels", label, string.Join("\n", matchSelectors), (long)lookback.TotalSeconds),
             async () => await WithServiceAsync<List<string>>(
                 info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
                 async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
@@ -956,16 +996,75 @@ public class PrometheusService(
         // each cluster through the seam, so this method was resolving half of it a second time.
         // The "has a stored kubeconfig" filter went with it: ForAsync refuses a cluster with no
         // credential, which is the same answer read from the place that owns it.
-        List<(Guid ClusterId, string NsRegex)> clusterQueries =
-            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
-                .Where(d => d.AppId == appId)
-                .GroupBy(d => d.ClusterId)
-                .Select(g => (g.Key, NsRegex(g)))];
+        List<ClusterQuery> clusterQueries = ByCluster(
+            (await delivery.GetDeploymentsForTenantAsync(tenantId, ct)).Where(d => d.AppId == appId));
 
         if (clusterQueries.Count == 0)
             return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this app.");
 
-        return await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct);
+        return TotalsOrFailure(await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct));
+    }
+
+    /// <summary>
+    /// CPU, memory, pods and restarts for what one app runs in <b>one environment</b>, with the
+    /// per-cluster scopes the environment's charts query.
+    ///
+    /// <para>⚠️ <b>The environment's Metrics tab used to call <see cref="GetAppMetricsAsync"/></b>,
+    /// which sums every environment of the app, under a heading that said "aggregate across all
+    /// deployments in this environment" — so production's tab showed production plus staging plus
+    /// test, and nothing on the screen said so. This asks Delivery for the environment's own
+    /// deployments.</para>
+    ///
+    /// <para>Succeeds without <see cref="AppMetricsOverview.Totals"/> when every cluster simply has
+    /// no Prometheus: that is a true answer, shown as an empty state naming the cluster, not a zero.
+    /// Fails when nothing answered for any other reason.</para>
+    /// </summary>
+    public async Task<KubernetesOperationResult<AppMetricsOverview>> GetEnvironmentMetricsAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
+    {
+        List<ClusterQuery> clusterQueries = ByCluster(
+            await delivery.GetDeploymentsForAppEnvironmentAsync(tenantId, appId, environmentId, ct));
+
+        if (clusterQueries.Count == 0)
+            return KubernetesOperationResult<AppMetricsOverview>.Failure(
+                "No deployments with clusters configured for this app in this environment.");
+
+        AppMetricsOverview overview = await AggregateMetricsAsync(
+            tenantId, clusterQueries, $"environment metrics {appId}/{environmentId}", ct);
+
+        return overview.Totals is null && overview.Problems.Count > 0
+            ? KubernetesOperationResult<AppMetricsOverview>.Failure(overview.Describe())
+            : KubernetesOperationResult<AppMetricsOverview>.Success(overview);
+    }
+
+    /// <summary>
+    /// The volume claims of one app's namespaces on one cluster: used, capacity and free for each
+    /// mounted claim, and the requested size of each unmounted one. See
+    /// <see cref="AppWorkloadQueries.PvcRows"/>.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<PvcUsageRow>>> GetPvcUsageAsync(
+        Guid tenantId, Guid clusterId, string nsRegex, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(nsRegex))
+            return KubernetesOperationResult<List<PvcUsageRow>>.Failure(
+                "No namespace to look for volume claims in.");
+
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        if (info is null) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(error!);
+
+        IReadOnlyDictionary<string, string> all = AppWorkloadQueries.Build(nsRegex);
+        Dictionary<string, string> queries = AppWorkloadQueries.PvcKeys.ToDictionary(k => k, k => all[k]);
+
+        return await WithServiceAsync<List<PvcUsageRow>>(
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            async (http, baseUrl, token) =>
+            {
+                Dictionary<string, List<PrometheusMetricResult>> r = await QueryManyAsync(http, baseUrl, queries, token);
+                return AppWorkloadQueries.PvcRows(
+                    r[AppWorkloadQueries.PvcUsed], r[AppWorkloadQueries.PvcCapacity],
+                    r[AppWorkloadQueries.PvcAvailable], r[AppWorkloadQueries.PvcRequested]);
+            },
+            $"volume usage for {clusterId}", ct, probeHealthEndpoint: false);
     }
 
     /// <summary>
@@ -982,16 +1081,13 @@ public class PrometheusService(
                 .Where(a => a.CustomerId == customerId)
                 .Select(a => a.Id)];
 
-        List<(Guid ClusterId, string NsRegex)> clusterQueries =
-            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
-                .Where(d => customerApps.Contains(d.AppId))
-                .GroupBy(d => d.ClusterId)
-                .Select(g => (g.Key, NsRegex(g)))];
+        List<ClusterQuery> clusterQueries = ByCluster(
+            (await delivery.GetDeploymentsForTenantAsync(tenantId, ct)).Where(d => customerApps.Contains(d.AppId)));
 
         if (clusterQueries.Count == 0)
             return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this customer.");
 
-        return await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct);
+        return TotalsOrFailure(await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct));
     }
 
     /// <summary>
@@ -2083,19 +2179,20 @@ public class PrometheusService(
         }
     }
 
-    /// <summary>
-    /// Queries each cluster/namespace-regex pair, sums CPU, memory, pods across all clusters,
-    /// and returns a single aggregated DeploymentMetricsSummary.
-    /// </summary>
-    /// <summary>
-    /// Sums one metric set across several clusters. Takes cluster <em>ids</em> and resolves each
-    /// through the seam, so a cluster this tenant does not own is skipped rather than queried —
-    /// the tuple used to carry a kubeconfig, which made every producer of it a custodian.
-    /// </summary>
+    /// <summary>One cluster's share of an aggregate: which cluster, its name for messages, and the namespaces.</summary>
+    private sealed record ClusterQuery(Guid ClusterId, string ClusterName, string NsRegex);
+
+    /// <summary>Deployments grouped by cluster, each group reduced to its namespace alternation.</summary>
+    private static List<ClusterQuery> ByCluster(IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments)
+        => [.. deployments
+            .GroupBy(d => d.ClusterId)
+            .Select(g => new ClusterQuery(g.Key, g.First().ClusterName, NsRegex(g)))];
+
     /// <summary>
     /// The namespace alternation for one cluster's deployments, escaped. Distinct, because several
     /// deployments of one app can share a namespace and a repeated alternative is a longer query
-    /// for the same answer.
+    /// for the same answer. Empty when none of them has a namespace — which
+    /// <see cref="AggregateMetricsAsync"/> refuses rather than queries.
     /// </summary>
     private static string NsRegex(IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments)
         => string.Join("|", deployments
@@ -2103,32 +2200,67 @@ public class PrometheusService(
             .Where(ns => ns.Length > 0)
             .Distinct());
 
-    private async Task<KubernetesOperationResult<DeploymentMetricsSummary>> AggregateMetricsAsync(
+    /// <summary>The single-number callers' view of an overview: no totals is a failure, never a zero.</summary>
+    private static KubernetesOperationResult<DeploymentMetricsSummary> TotalsOrFailure(AppMetricsOverview overview)
+        => overview.Totals is null
+            ? KubernetesOperationResult<DeploymentMetricsSummary>.Failure(overview.Describe())
+            : KubernetesOperationResult<DeploymentMetricsSummary>.Success(overview.Totals);
+
+    /// <summary>
+    /// Sums one metric set across several clusters, and says what happened to each one that did
+    /// not contribute.
+    ///
+    /// <para>Takes cluster <em>ids</em> and resolves each through the seam, so a cluster this
+    /// tenant does not own is skipped rather than queried — the tuple used to carry a kubeconfig,
+    /// which made every producer of it a custodian.</para>
+    ///
+    /// <para>⚠️ <b>Two ways this used to answer a successful zero.</b> A cluster without a
+    /// Prometheus component was queried anyway on the default service name
+    /// (<c>requireComponent: false</c>), so "Prometheus is not installed here" surfaced, if at
+    /// all, as a proxy error about a service nobody had installed. And a group whose deployments
+    /// had no namespace was queried with <c>namespace=~""</c>, which matches only series without a
+    /// namespace label — no container series, so 0 cores and 0 pods, reported as success. Both are
+    /// now reasons in <see cref="AppMetricsOverview"/>, and <see cref="AppMetricsOverview.Totals"/>
+    /// is null unless at least one cluster actually answered.</para>
+    /// </summary>
+    private async Task<AppMetricsOverview> AggregateMetricsAsync(
         Guid tenantId,
-        IEnumerable<(Guid ClusterId, string NsRegex)> clusterQueries,
+        IEnumerable<ClusterQuery> clusterQueries,
         string logContext,
         CancellationToken ct)
     {
         double totalCpu = 0, totalMemBytes = 0, totalPods = 0, totalRestarts = 0;
-        bool anySuccess = false;
+        List<AppMetricsScope> answered = [];
+        List<string> withoutPrometheus = [];
+        List<string> problems = [];
 
-        foreach ((Guid clusterId, string nsRegex) in clusterQueries)
+        foreach (ClusterQuery q in clusterQueries)
         {
-            // Resolved here rather than by the callers, which were each doing half of it: the
-            // cluster comes from the seam and the Prometheus service from Catalog. `requireComponent:
-            // false` keeps the behaviour the callers had — a cluster running a Prometheus EntKube did
-            // not install is still queried on the default service name, which is the only way those
-            // clusters ever answered.
-            (ReachablePrometheus? reachable, _) =
-                await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent: false);
+            if (q.NsRegex.Length == 0)
+            {
+                problems.Add($"{q.ClusterName}: no namespace is recorded for the deployments there, so there is nothing to scope a query to.");
+                continue;
+            }
 
-            // Skipped, not failed: this aggregates across a tenant's clusters and one it cannot
-            // reach contributes nothing. `anySuccess` below is what decides whether the whole
-            // answer is a failure, so an unreachable cluster cannot masquerade as a zero.
-            if (reachable is null) continue;
+            (ReachablePrometheus? reachable, string? error) =
+                await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: true);
+
+            if (reachable is null)
+            {
+                // Which refusal was it? Asked again without the component requirement: if the
+                // cluster resolves then, the only thing missing was Prometheus. Decided by the
+                // resolver's own contract rather than by matching its wording.
+                (ReachablePrometheus? clusterOnly, string? clusterError) =
+                    await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: false);
+
+                if (clusterOnly is not null) withoutPrometheus.Add(q.ClusterName);
+                else problems.Add($"{q.ClusterName}: {clusterError ?? error}");
+                continue;
+            }
 
             EntKube.Web.Services.Clusters.IClusterClient cluster = reachable.Cluster;
             PrometheusConfig cfg = reachable.Config;
+            string nsRegex = q.NsRegex;
 
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
@@ -2151,27 +2283,34 @@ public class PrometheusService(
 
             if (result.IsSuccess)
             {
-                anySuccess      =  true;
+                answered.Add(new AppMetricsScope(q.ClusterId, q.ClusterName, q.NsRegex));
                 totalCpu      += result.Data.Item1;
                 totalMemBytes += result.Data.Item2;
                 totalPods     += result.Data.Item3;
                 totalRestarts += result.Data.Item4;
             }
+            else
+            {
+                problems.Add($"{q.ClusterName}: {result.Error}");
+            }
         }
 
-        if (!anySuccess)
-            return KubernetesOperationResult<DeploymentMetricsSummary>.Failure(
-                "Could not reach Prometheus on any cluster for this resource.");
-
-        return KubernetesOperationResult<DeploymentMetricsSummary>.Success(new DeploymentMetricsSummary
+        return new AppMetricsOverview
         {
-            Namespace    = "aggregated",
-            CpuCores     = Math.Round(totalCpu, 4),
-            MemoryMiB    = Math.Round(totalMemBytes / (1024 * 1024), 1),
-            PodCount     = (int)totalPods,
-            RestartCount = (int)totalRestarts,
-            QueriedAt    = DateTime.UtcNow
-        });
+            // Null unless something answered: a skipped cluster must not read as a measured zero.
+            Totals = answered.Count == 0 ? null : new DeploymentMetricsSummary
+            {
+                Namespace    = "aggregated",
+                CpuCores     = Math.Round(totalCpu, 4),
+                MemoryMiB    = Math.Round(totalMemBytes / (1024 * 1024), 1),
+                PodCount     = (int)totalPods,
+                RestartCount = (int)totalRestarts,
+                QueriedAt    = DateTime.UtcNow
+            },
+            Scopes = answered,
+            ClustersWithoutPrometheus = withoutPrometheus,
+            Problems = problems,
+        };
     }
 
     // ──────── Internal Helpers ────────
