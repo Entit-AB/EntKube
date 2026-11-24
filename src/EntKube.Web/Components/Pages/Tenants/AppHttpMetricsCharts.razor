@@ -1,0 +1,46 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   AppHttpMetricsCharts — request rate, 5xx rate and p95 latency of an app's
+   HTTP servers, as the eBPF agent (OBI) measures them from outside the
+   process. Nothing to instrument; but the agent only publishes once both it
+   and Prometheus are installed, so an absent series is said plainly rather
+   than drawn as a flat line at zero.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+@if (!Available)
+{
+    <div class="alert alert-secondary py-2 small mb-0" data-empty="http">
+        <span class="bi bi-info-circle me-1"></span>
+        No HTTP metrics yet — the eBPF agent publishes them once Prometheus and the agent are
+        installed; apply the agent again after installing Prometheus.
+    </div>
+}
+else
+{
+    <div class="row g-3">
+        <div class="col-md-4">
+            <MetricChart Title="Requests" DataPoints="Rate" Color="#0d6efd" Unit="/s" HeightPx="90" ShowAxes="true" />
+        </div>
+        <div class="col-md-4">
+            <MetricChart Title="5xx errors" DataPoints="Errors" Color="#dc3545" Unit="/s" HeightPx="90" ShowAxes="true" />
+        </div>
+        <div class="col-md-4">
+            <MetricChart Title="p95 latency" DataPoints="P95Ms" Color="#fd7e14" Unit="ms" HeightPx="90" ShowAxes="true" />
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>
+    /// Whether Prometheus holds any HTTP series for these namespaces at all. A series of zeros is
+    /// available — an idle server — and is charted; no series is the empty state.
+    /// </summary>
+    [Parameter] public bool Available { get; set; }
+
+    [Parameter] public List<TimeSeriesDataPoint> Rate { get; set; } = [];
+    [Parameter] public List<TimeSeriesDataPoint> Errors { get; set; } = [];
+
+    /// <summary>p95 latency in milliseconds, already free of the NaN steps that had no requests.</summary>
+    [Parameter] public List<TimeSeriesDataPoint> P95Ms { get; set; } = [];
+}

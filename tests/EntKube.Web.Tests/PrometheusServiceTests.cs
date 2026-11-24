@@ -1032,6 +1032,182 @@ public class PrometheusServiceTests : IDisposable
         result.Error.Should().Contain("No prometheus component");
     }
 
+    // ──────── The environment's Metrics tab ────────
+
+    /// <summary>
+    /// An app with a deployment in prod on <c>prod-cluster</c> and one in staging on
+    /// <c>staging-cluster</c>. Neither cluster has Prometheus, so each cluster's name surfaces in
+    /// the answer — which is how these tests see which deployments were counted without a live
+    /// Prometheus.
+    /// </summary>
+    private async Task<(Guid TenantId, Guid AppId, Guid ProdEnvId, Guid StagingEnvId)> SeedAppInTwoEnvironmentsAsync(
+        string prodNamespace = "billing")
+    {
+        (Guid tenantId, Guid prodClusterId) = await SeedReachableClusterAsync();
+        Guid prodEnvId = db.Set<Data.Environment>().First(e => e.TenantId == tenantId).Id;
+
+        Data.Environment staging = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "staging" };
+        KubernetesCluster stagingCluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, EnvironmentId = staging.Id,
+            Name = "staging-cluster", ApiServerUrl = "https://k8s.example.com",
+        };
+        db.Set<Data.Environment>().Add(staging);
+        db.KubernetesClusters.Add(stagingCluster);
+        await db.SaveChangesAsync();
+        await testDb.SeedKubeconfigAsync(vaultService, tenantId, stagingCluster.Id, TestKubeconfig.Valid);
+
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Contoso" };
+        App app = new() { Id = Guid.NewGuid(), CustomerId = customer.Id, Name = "billing" };
+        db.Customers.Add(customer);
+        db.Apps.Add(app);
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = Guid.NewGuid(), AppId = app.Id, Name = "prod", Type = DeploymentType.Manual,
+            EnvironmentId = prodEnvId, ClusterId = prodClusterId, Namespace = prodNamespace, IsManaged = true,
+        });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = Guid.NewGuid(), AppId = app.Id, Name = "staging", Type = DeploymentType.Manual,
+            EnvironmentId = staging.Id, ClusterId = stagingCluster.Id, Namespace = "billing-staging", IsManaged = true,
+        });
+        await db.SaveChangesAsync();
+
+        return (tenantId, app.Id, prodEnvId, staging.Id);
+    }
+
+    /// <summary>
+    /// The tab said "aggregate across all deployments in this environment" and summed every
+    /// environment of the app. Production's tab must consult production's cluster and nothing else.
+    /// </summary>
+    [Fact]
+    public async Task GetEnvironmentMetricsAsync_AsksOnlyAboutThisEnvironmentsDeployments()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, Guid stagingEnvId) = await SeedAppInTwoEnvironmentsAsync();
+
+        KubernetesOperationResult<AppMetricsOverview> prod =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+        KubernetesOperationResult<AppMetricsOverview> staging =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, stagingEnvId);
+
+        prod.IsSuccess.Should().BeTrue(prod.Error);
+        prod.Data!.ClustersWithoutPrometheus.Should().Equal(["prod-cluster"],
+            "staging's deployment is on staging-cluster and is not this environment's");
+        staging.Data!.ClustersWithoutPrometheus.Should().Equal(["staging-cluster"]);
+    }
+
+    /// <summary>
+    /// A cluster with no Prometheus component is said to have none — an empty state naming the
+    /// cluster — rather than queried on a guessed service name, which surfaced as a proxy error
+    /// about a service nobody installed.
+    /// </summary>
+    [Fact]
+    public async Task GetEnvironmentMetricsAsync_ClusterWithoutPrometheus_IsAnEmptyStateNotAZero()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeTrue("'Prometheus is not installed' is an answer, not a failure");
+        result.Data!.Totals.Should().BeNull("nothing was measured, so there are no numbers to show — not zeros");
+        result.Data.Scopes.Should().BeEmpty();
+        result.Data.Problems.Should().BeEmpty();
+        result.Data.Describe().Should().Be("Prometheus is not installed on prod-cluster.");
+    }
+
+    /// <summary>
+    /// The single-number callers turn the same answer into a failure that names the cluster: no
+    /// totals is never a successful zero.
+    /// </summary>
+    [Fact]
+    public async Task GetAppMetricsAsync_NoPrometheusAnywhere_FailsNamingEachCluster()
+    {
+        (Guid tenantId, Guid appId, _, _) = await SeedAppInTwoEnvironmentsAsync();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result = await sut.GetAppMetricsAsync(tenantId, appId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Prometheus is not installed on prod-cluster.")
+            .And.Contain("Prometheus is not installed on staging-cluster.");
+    }
+
+    /// <summary>
+    /// A group whose deployments have no namespace used to be queried with <c>namespace=~""</c>,
+    /// which matches no container series and came back as a successful 0 cores, 0 pods.
+    /// </summary>
+    [Fact]
+    public async Task GetEnvironmentMetricsAsync_DeploymentsWithoutANamespace_FailInsteadOfAnsweringZero()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync(prodNamespace: "");
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("prod-cluster: no namespace is recorded");
+        result.Error.Should().NotContain("not installed",
+            "the namespace is checked first; a message both paths emit would prove nothing");
+    }
+
+    /// <summary>
+    /// A cluster EntKube cannot reach at all is not a cluster without Prometheus: it is a failure,
+    /// and it is not offered as the empty state.
+    /// </summary>
+    [Fact]
+    public async Task GetEnvironmentMetricsAsync_ClusterWithoutKubeconfig_IsAProblemNotAnEmptyState()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+
+        KubernetesCluster unreachable = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, EnvironmentId = prodEnvId,
+            Name = "dark-cluster", ApiServerUrl = "https://k8s.example.com",
+        };
+        db.KubernetesClusters.Add(unreachable);
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = Guid.NewGuid(), AppId = appId, Name = "prod-2", Type = DeploymentType.Manual,
+            EnvironmentId = prodEnvId, ClusterId = unreachable.Id, Namespace = "billing", IsManaged = true,
+        });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeFalse("one cluster could not be asked at all, and none answered");
+        result.Error.Should().Contain("Prometheus is not installed on prod-cluster.")
+            .And.Contain("dark-cluster: ")
+            .And.NotContain("Prometheus is not installed on dark-cluster");
+    }
+
+    [Fact]
+    public async Task GetEnvironmentMetricsAsync_AnotherTenantsApp_ResolvesNothing()
+    {
+        (_, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(stranger, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("No deployments");
+        result.Error.Should().NotContain("prod-cluster", "a stranger does not learn which cluster the app runs on");
+    }
+
+    [Fact]
+    public async Task GetPvcUsageAsync_EmptyNamespaceMatch_IsRefused()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+
+        KubernetesOperationResult<List<PvcUsageRow>> result = await sut.GetPvcUsageAsync(tenantId, clusterId, "");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("No namespace");
+    }
+
     /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>
     private async Task<(Guid TenantId, Guid ClusterId)> SeedReachableClusterAsync()
     {

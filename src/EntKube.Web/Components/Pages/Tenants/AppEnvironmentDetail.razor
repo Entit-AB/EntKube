@@ -1145,37 +1145,73 @@
                     <i class="bi bi-exclamation-triangle me-1"></i>@envMetricsError
                 </div>
             }
-            else if (envMetrics is not null)
+            else if (envMetrics is not null && envMetrics.Totals is null)
             {
+                @* Every cluster of this environment answered "no Prometheus here": an empty state, not a zero. *@
+                <div class="alert alert-secondary small py-2 mb-0">
+                    @foreach (string clusterName in envMetrics.ClustersWithoutPrometheus)
+                    {
+                        <div class="fw-semibold"><i class="bi bi-info-circle me-1"></i>@AppMetricsOverview.NotInstalled(clusterName)</div>
+                    }
+                    <div class="text-muted mt-1">
+                        App metrics come from the cluster's own Prometheus. Install the Prometheus component
+                        (kube-prometheus-stack) on the cluster and CPU, memory, restarts, volumes and HTTP
+                        metrics appear here with nothing to configure.
+                    </div>
+                </div>
+            }
+            else if (envMetrics?.Totals is DeploymentMetricsSummary totals)
+            {
+                @foreach (string clusterName in envMetrics.ClustersWithoutPrometheus)
+                {
+                    <div class="alert alert-secondary small py-1 mb-2">
+                        <i class="bi bi-info-circle me-1"></i>@AppMetricsOverview.NotInstalled(clusterName)
+                        Its deployments are not counted below.
+                    </div>
+                }
+                @foreach (string problem in envMetrics.Problems)
+                {
+                    <div class="alert alert-warning small py-1 mb-2">
+                        <i class="bi bi-exclamation-triangle me-1"></i>Not counted below — @problem
+                    </div>
+                }
                 <div class="row g-3 mb-2">
                     <div class="col-sm-6 col-lg-3">
                         <div class="border rounded text-center p-3">
                             <div class="fs-3 fw-bold text-primary">
-                                @(envMetrics.CpuCores >= 1 ? $"{(int)Math.Round(envMetrics.CpuCores)} cores" : $"{(int)Math.Round(envMetrics.CpuCores * 1000)}m")
+                                @(totals.CpuCores >= 1 ? $"{(int)Math.Round(totals.CpuCores)} cores" : $"{(int)Math.Round(totals.CpuCores * 1000)}m")
                             </div>
                             <div class="small text-muted">CPU (5 m avg)</div>
                         </div>
                     </div>
                     <div class="col-sm-6 col-lg-3">
                         <div class="border rounded text-center p-3">
-                            <div class="fs-3 fw-bold text-info">@envMetrics.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
+                            <div class="fs-3 fw-bold text-info">@totals.MemoryMiB.ToString("F0") <small class="fs-6">MiB</small></div>
                             <div class="small text-muted">Memory (working set)</div>
                         </div>
                     </div>
                     <div class="col-sm-6 col-lg-3">
                         <div class="border rounded text-center p-3">
-                            <div class="fs-3 fw-bold text-success">@envMetrics.PodCount</div>
+                            <div class="fs-3 fw-bold text-success">@totals.PodCount</div>
                             <div class="small text-muted">Pods running</div>
                         </div>
                     </div>
                     <div class="col-sm-6 col-lg-3">
                         <div class="border rounded text-center p-3">
-                            <div class="fs-3 fw-bold @(envMetrics.RestartCount > 0 ? "text-warning" : "text-success")">@envMetrics.RestartCount</div>
+                            <div class="fs-3 fw-bold @(totals.RestartCount > 0 ? "text-warning" : "text-success")">@totals.RestartCount</div>
                             <div class="small text-muted">Container restarts</div>
                         </div>
                     </div>
                 </div>
-                <div class="text-muted small"><i class="bi bi-clock me-1"></i>Queried @envMetrics.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+                <div class="text-muted small mb-3"><i class="bi bi-clock me-1"></i>Queried @totals.QueriedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+
+                @foreach (AppMetricsScope scope in envMetrics.Scopes)
+                {
+                    <div class="border-top pt-3 mt-2">
+                        <AppWorkloadMetricsPanel @key="scope" TenantId="TenantId" Scope="scope"
+                                                 ShowClusterName="@(envMetrics.Scopes.Count > 1)" />
+                    </div>
+                }
             }
         </div>
     </div>
@@ -2512,7 +2548,7 @@
     private bool activityLoading;
 
     // Env-aggregate metrics
-    private DeploymentMetricsSummary? envMetrics;
+    private AppMetricsOverview? envMetrics;
     private bool envMetricsLoading;
     private string? envMetricsError;
 
@@ -3545,8 +3581,10 @@
     {
         section = "metrics";
         envMetricsLoading = true; envMetricsError = null; envMetrics = null; StateHasChanged();
-        KubernetesOperationResult<DeploymentMetricsSummary> result =
-            await PrometheusService.GetAppMetricsAsync(TenantId, App.Id);
+        // This environment's deployments only. GetAppMetricsAsync sums every environment of the
+        // app, which this tab used to show under a heading that said otherwise.
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await PrometheusService.GetEnvironmentMetricsAsync(TenantId, App.Id, Environment.Id);
         if (result.IsSuccess) envMetrics = result.Data;
         else envMetricsError = result.Error;
         envMetricsLoading = false;
