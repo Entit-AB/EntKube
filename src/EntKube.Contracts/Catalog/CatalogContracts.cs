@@ -124,6 +124,31 @@ public interface IComponentNaming
     string? ReleaseName { get; }
 }
 
+/// <summary>
+/// What counts as "this cluster has Prometheus", for the callers that already hold a list of
+/// components and would otherwise spell the predicate themselves.
+///
+/// <para><see cref="ICatalogApi.FindPrometheusAsync"/> is the question asked of one cluster; this
+/// is the same rule applied to components already in hand — the tenant-wide sweeps
+/// (<c>AlertSyncService</c>, <c>ResourceUsageCollectorService</c>) list every component of a
+/// tenant once rather than asking cluster by cluster. Both read <see cref="HelmChartName"/>, and
+/// <c>PrometheusPresenceTests</c> asks both the same question for every status so the two cannot
+/// drift apart.</para>
+/// </summary>
+public static class PrometheusPresence
+{
+    /// <summary>
+    /// The chart EntKube installs Prometheus from. The chart, not the catalog key or the release
+    /// name: those are EntKube's or the operator's to choose, and "contains prometheus" also
+    /// matched exporters, adapters and anything else with the word in it.
+    /// </summary>
+    public const string HelmChartName = "kube-prometheus-stack";
+
+    /// <summary>True when <paramref name="component"/> is a Prometheus that is installed.</summary>
+    public static bool Answers(InstalledComponent component)
+        => component.HelmChartName == HelmChartName && component.Status == ComponentStatus.Installed;
+}
+
 public sealed record InstalledComponent(
     Guid Id,
     Guid TenantId,
@@ -187,6 +212,25 @@ public interface ICatalogApi
     /// <summary>Every installation of one catalog key across the tenant's clusters.</summary>
     Task<IReadOnlyList<InstalledComponent>> FindComponentsAsync(
         Guid tenantId, string catalogKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// The cluster's Prometheus, or null when it has none — the one answer to "does this cluster
+    /// have Prometheus".
+    ///
+    /// <para>"Has" means what <see cref="PrometheusPresence.Answers"/> says: a
+    /// <c>kube-prometheus-stack</c> chart whose status is <see cref="ComponentStatus.Installed"/>.
+    /// The question used to be answered several ways at once. <c>PrometheusService</c> took the
+    /// first component whose <em>name</em> contained "prometheus", ignoring the chart and the
+    /// status, while the alert and monitoring pages asked for the chart and the status — so a
+    /// cluster whose Prometheus install had failed was one the metrics views tried to query and
+    /// the alert views did not list. Decisions with a cost now hang on the answer (whether OBI
+    /// renders a ServiceMonitor, which fails the whole release on a cluster without the
+    /// Prometheus Operator's CRDs), so it is asked here and nowhere else.</para>
+    ///
+    /// <para>Null, as everywhere on this contract, also when the cluster is not this tenant's.</para>
+    /// </summary>
+    Task<InstalledComponent?> FindPrometheusAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default);
 
     /// <summary>
     /// Merges form values into a component's stored Helm values and returns it as it now stands.

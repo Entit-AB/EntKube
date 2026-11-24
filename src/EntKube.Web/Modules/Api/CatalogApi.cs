@@ -114,6 +114,37 @@ public sealed class CatalogApi(
         return await Scoped(db, tenantId).Where(c => c.Name == catalogKey).Select(ToContract).ToListAsync(ct);
     }
 
+    public async Task<InstalledComponent?> FindPrometheusAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        await using CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await FindPrometheusAsync(db.ClusterComponents, tenantId, clusterId, ct);
+    }
+
+    /// <summary>
+    /// The query behind <see cref="FindPrometheusAsync(Guid, Guid, CancellationToken)"/>, over
+    /// whichever context's component set the caller already holds.
+    ///
+    /// <para>Exists for <c>ComponentLifecycleService</c>, which is Catalog's own and builds the helm
+    /// command over the module's wider context: it asks the same question at apply time (does OBI
+    /// render a ServiceMonitor) and must get the same answer the metrics views get, which a second
+    /// copy of the predicate would only promise.</para>
+    ///
+    /// <para>The status is compared as the entity's enum, in the query. Casting it to the
+    /// contract's enum inside the expression is the shape that translates to a 22P02 on Postgres
+    /// for a string-stored enum while SQLite quietly reads 0.</para>
+    /// </summary>
+    internal static Task<InstalledComponent?> FindPrometheusAsync(
+        IQueryable<ClusterComponent> components, Guid tenantId, Guid clusterId, CancellationToken ct)
+        => components.AsNoTracking()
+            .Where(c => c.Cluster.TenantId == tenantId
+                && c.ClusterId == clusterId
+                && c.HelmChartName == PrometheusPresence.HelmChartName
+                && c.Status == EntKube.Web.Data.ComponentStatus.Installed)
+            .Select(ToContract)
+            .FirstOrDefaultAsync(ct);
+
     public Task<InstalledComponent?> MergeHelmValuesAsync(
         Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> formValues,
         string? configuration = null, CancellationToken ct = default)

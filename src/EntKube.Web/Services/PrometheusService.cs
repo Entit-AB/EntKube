@@ -2208,9 +2208,12 @@ public class PrometheusService(
         if (cluster is null)
             return (null, "Cluster not found for this tenant, or it has no kubeconfig configured.");
 
+        // Catalog's one answer to "does this cluster have Prometheus". This used to be the first
+        // component whose NAME contained "prometheus" — any status, any chart — so a failed install
+        // was queried as if it were running, and whichever prometheus-named component came back
+        // first decided the service name.
         EntKube.Contracts.Catalog.InstalledComponent? prometheusComponent =
-            (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
-            .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
+            await catalog.FindPrometheusAsync(tenantId, clusterId, ct);
 
         if (prometheusComponent is null)
         {

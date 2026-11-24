@@ -173,7 +173,7 @@ public class ComponentCatalogTests : IDisposable
     }
 
     [Fact]
-    public void OtelEbpf_ShipsWithBothMetricExportersOff()
+    public void OtelEbpf_ShipsWithOtlpMetricsOff_AndThePrometheusPortOnlyWhereSomethingScrapesIt()
     {
         // Both have to be said out loud, because config.data is a MAP-MERGE: the chart's own
         // defaults put an OTLP metrics endpoint at ${HOST_IP}:4318 and a Prometheus endpoint on
@@ -182,9 +182,16 @@ public class ComponentCatalogTests : IDisposable
         // a collector with no metrics pipeline and to a scrape endpoint with no scraper — and
         // OBI's Prometheus registry only evicts expired label sets inside Collect(), which runs
         // on a scrape and nowhere else, so with no scraper nothing was ever evicted.
+        //
+        // The port is 9090 in the catalog now, because a cluster WITH Prometheus scrapes it — and
+        // the guarantee for one without moved to the apply step, which forces it to 0 there
+        // (ObiPrometheusMetricsTests pins that step; this pins it against the catalog's document).
         CatalogEntry entry = ComponentCatalog.GetByKey("otel-ebpf")!;
 
         YamlFormMerger.ExtractValue(entry.DefaultValues!, "config.data.prometheus_export.port")
+            .Should().Be("9090");
+        YamlFormMerger.ExtractValue(
+                YamlFormMerger.KeepObiPrometheusMetricsOff(entry.DefaultValues!), "config.data.prometheus_export.port")
             .Should().Be("0", "an unscraped Prometheus endpoint never runs its own reaper");
         YamlFormMerger.ExtractValue(entry.DefaultValues!, "config.data.otel_metrics_export.endpoint")
             .Should().BeNullOrEmpty("the EntKube collector runs no metrics pipeline to receive them");

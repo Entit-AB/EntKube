@@ -6,6 +6,7 @@
 @inject OnCallService OnCallService
 @inject OperationsAdvisorService Advisor
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject EntKube.Contracts.Catalog.ICatalogApi Catalog
 
 <div class="d-flex justify-content-end align-items-center mb-3">
     <AutoRefresh OnRefresh="Refresh" IntervalSeconds="60" Enabled="true"
@@ -378,7 +379,6 @@
         using (ApplicationDbContext db = DbFactory.CreateDbContext())
         {
             clusters = await db.KubernetesClusters
-                .Include(c => c.Components)
                 .Where(c => c.TenantId == TenantId)
                 .OrderBy(c => c.Name)
                 .ToListAsync();
@@ -445,8 +445,9 @@
     private async Task<ClusterSummaryVm> LoadClusterSummaryAsync(
         KubernetesCluster cluster, FiringCounts firing)
     {
-        bool hasPrometheus = cluster.Components.Any(c =>
-            c.HelmChartName == "kube-prometheus-stack" && c.Status == ComponentStatus.Installed);
+        // Catalog's answer, the one PrometheusService itself resolves the cluster's Prometheus by —
+        // so a tile is never offered for a cluster the health query then reports as having none.
+        bool hasPrometheus = await Catalog.FindPrometheusAsync(TenantId, cluster.Id) is not null;
 
         if (!hasPrometheus)
             return new ClusterSummaryVm(cluster, null, null, firing);

@@ -679,6 +679,247 @@ public static class YamlFormMerger
         return changed ? SerializeToYaml(root) : yaml;
     }
 
+    /// <summary>The port OBI serves RED metrics on when nothing else is said — the convention, and the chart's own.</summary>
+    public const string ObiPrometheusPort = "9090";
+
+    /// <summary>
+    /// URL paths that are scraped or probed rather than used: their RED series are noise in every
+    /// dashboard and, on a busy node, a large share of the series OBI holds.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ObiIgnoredRoutes = ["/metrics", "/healthz", "/readyz", "/livez"];
+
+    /// <summary>
+    /// Turns OBI's per-workload HTTP/gRPC/SQL RED metrics on, for a cluster where
+    /// <c>kube-prometheus-stack</c> is installed. Runs at apply time; the stored values are not touched.
+    ///
+    /// <para><b>The port is the operator's knob, and a 0 is respected.</b> EntKube's own 0 (the
+    /// catalog default until 2026-11-24, and what the form wrote) and an operator's deliberate 0 are
+    /// the same scalar at the same path — nothing in the values tells them apart, and the chart's
+    /// strict values schema leaves nowhere to keep a marker. So a 0 means off, whoever wrote it, and the
+    /// catalog default is 9090 instead. Only an ABSENT port (an install older than the bounds) or one
+    /// that is not a number becomes <see cref="ObiPrometheusPort"/>.</para>
+    ///
+    /// <para><b>Derived, not filled in:</b> <c>service.enabled</c> and <c>serviceMonitor.enabled</c>
+    /// are set from the port, overriding what is stored. The chart renders a ServiceMonitor only when
+    /// BOTH are true and there is a port to scrape, and a Service with no port is invalid — so the old
+    /// form toggle, which set only <c>serviceMonitor.enabled</c>, never produced one, and the
+    /// <c>false</c> it stored in every component registered through the form is not a decision anyone
+    /// saw take effect. Leaving that <c>false</c> in place would leave the endpoint open with nothing
+    /// scraping it, which is the one state that costs memory for nothing.</para>
+    ///
+    /// <para><b>Filled in only where absent</b> (an operator's value wins): the scrape interval, the
+    /// relabelling, the protocol list, the feature set and the ignored routes.</para>
+    /// <list type="bullet">
+    /// <item><c>serviceMonitor.metrics.endpoint.metricRelabelings</c> copies
+    ///   <c>k8s_namespace_name</c>/<c>k8s_pod_name</c>/<c>k8s_container_name</c> onto
+    ///   <c>namespace</c>/<c>pod</c>/<c>container</c>. OBI runs on the host network and is scraped as
+    ///   ITS pod, so without this every series carries <c>namespace="monitoring"</c> and the OBI pod's
+    ///   name — and no per-app query (which selects on <c>namespace</c>) can find them. The regex is
+    ///   <c>(.+)</c> so that a series without the source label (OBI's own) keeps its target label
+    ///   instead of having it blanked.</item>
+    /// <item><c>prometheus_export.instrumentations</c>: the Prometheus exporter does NOT inherit
+    ///   <c>otel_traces_export</c>'s list; its own default is every protocol, which loads every probe set
+    ///   on every instrumented executable.</item>
+    /// <item><c>metrics.features: [application_red]</c>: the top-level selector (the exporter-level
+    ///   <c>features</c> is deprecated in v1.0.0). <c>application</c>, the default, also emits the
+    ///   request and response body-size histograms.</item>
+    /// <item><c>routes.ignored_patterns</c> with <c>ignore_mode: metrics</c>, so probes and scrapes stay
+    ///   out of the metrics and still appear in traces as before.</item>
+    /// </list>
+    ///
+    /// <para>Only a Config v1 document is edited — non-empty <c>config.data</c> without
+    /// <c>extensions.obi.version: "2.0"</c>, which is every document the catalog writes. Creating
+    /// <c>config.data</c> where there is none would switch the chart from its v2 defaults to its v1
+    /// ones, a reinstall with different settings rather than a fill-in.</para>
+    /// </summary>
+    public static string EnableObiPrometheusMetrics(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        if (!TryGetObiV1Config(root, out YamlMappingNode? data)) return yaml;
+
+        bool changed = false;
+        YamlMappingNode export = GetOrCreateMapping(data!, "prometheus_export", ref changed);
+
+        string? port = TryGetValue(export, "port", out YamlNode? portNode) && portNode is YamlScalarNode s
+            && int.TryParse(s.Value, out int parsed) && parsed >= 0
+                ? parsed.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : null;
+
+        if (port is null)
+        {
+            SetScalar(export, "port", ObiPrometheusPort);
+            port = ObiPrometheusPort;
+            changed = true;
+        }
+
+        bool serve = port != "0" || ObiInternalMetricsPort(data!) > 0;
+
+        YamlMappingNode service = GetOrCreateMapping(root, "service", ref changed);
+        YamlMappingNode monitor = GetOrCreateMapping(root, "serviceMonitor", ref changed);
+        changed |= SetBool(service, "enabled", serve);
+        changed |= SetBool(monitor, "enabled", serve);
+
+        if (port == "0") return changed ? SerializeToYaml(root) : yaml;
+
+        if (!TryGetValue(export, "instrumentations", out _))
+        {
+            export.Children.Add(new YamlScalarNode("instrumentations"), Sequence("http", "grpc", "sql"));
+            changed = true;
+        }
+
+        YamlMappingNode metrics = GetOrCreateMapping(data!, "metrics", ref changed);
+        if (!TryGetValue(metrics, "features", out _))
+        {
+            metrics.Children.Add(new YamlScalarNode("features"), Sequence("application_red"));
+            changed = true;
+        }
+
+        YamlMappingNode routes = GetOrCreateMapping(data!, "routes", ref changed);
+        if (!TryGetValue(routes, "ignored_patterns", out _))
+        {
+            routes.Children.Add(new YamlScalarNode("ignored_patterns"), Sequence([.. ObiIgnoredRoutes]));
+            // Only alongside patterns EntKube wrote: an operator's own patterns keep upstream's
+            // default (`all`), which is what they were written against.
+            if (!TryGetValue(routes, "ignore_mode", out _)) SetScalar(routes, "ignore_mode", "metrics");
+            changed = true;
+        }
+
+        YamlMappingNode endpoint = GetOrCreateMapping(
+            GetOrCreateMapping(monitor, "metrics", ref changed), "endpoint", ref changed);
+        if (!TryGetValue(endpoint, "interval", out _))
+        {
+            SetScalar(endpoint, "interval", "30s");
+            changed = true;
+        }
+        if (!TryGetValue(endpoint, "metricRelabelings", out _))
+        {
+            endpoint.Children.Add(new YamlScalarNode("metricRelabelings"), new YamlSequenceNode(
+                ObiRelabel("k8s_namespace_name", "namespace"),
+                ObiRelabel("k8s_pod_name", "pod"),
+                ObiRelabel("k8s_container_name", "container")));
+            changed = true;
+        }
+
+        return changed ? SerializeToYaml(root) : yaml;
+    }
+
+    /// <summary>
+    /// The other half of <see cref="EnableObiPrometheusMetrics"/>, for a cluster WITHOUT Prometheus:
+    /// the RED-metrics port is forced to 0 and the Service and ServiceMonitor off, whatever is stored.
+    ///
+    /// <para>The ServiceMonitor is the hard reason. Its kind exists only where the Prometheus Operator's
+    /// CRDs are installed, so rendering one on a cluster without them fails the whole release with "no
+    /// matches for kind ServiceMonitor" — the tracing agent would not install at all. The port is the
+    /// soft one: OBI evicts expired series only when scraped, so an endpoint with no scraper is heap
+    /// that grows and is never given back. Forcing both, rather than respecting a stored value, is what
+    /// lets the catalog default the port to 9090.</para>
+    ///
+    /// <para>An absent port is written as 0 too: in a v1 document the chart's own default (9090)
+    /// survives the merge otherwise.</para>
+    /// </summary>
+    public static string KeepObiPrometheusMetricsOff(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        bool changed = false;
+
+        // Absent means the chart's default, which is false for both — nothing to write.
+        foreach (string key in new[] { "service", "serviceMonitor" })
+        {
+            if (TryGetMapping(root, key, out YamlMappingNode? section) && IsTrue(section!, "enabled"))
+            {
+                changed |= SetBool(section!, "enabled", false);
+            }
+        }
+
+        if (TryGetObiV1Config(root, out YamlMappingNode? data))
+        {
+            YamlMappingNode export = GetOrCreateMapping(data!, "prometheus_export", ref changed);
+            if (!(TryGetValue(export, "port", out YamlNode? port) && port is YamlScalarNode { Value: "0" }))
+            {
+                SetScalar(export, "port", "0");
+                changed = true;
+            }
+        }
+
+        return changed ? SerializeToYaml(root) : yaml;
+    }
+
+    /// <summary>
+    /// <c>config.data</c> when it is a Config v1 document — non-empty, without the v2 marker — which is
+    /// the only shape whose keys these steps know. See the chart's <c>obi.configData</c>.
+    /// </summary>
+    private static bool TryGetObiV1Config(YamlMappingNode root, out YamlMappingNode? data)
+    {
+        data = null;
+        if (!TryGetMapping(root, "config", out YamlMappingNode? config)
+            || !TryGetMapping(config!, "data", out YamlMappingNode? found)
+            || found!.Children.Count == 0)
+        {
+            return false;
+        }
+
+        if (TryGetMapping(found, "extensions", out YamlMappingNode? extensions)
+            && TryGetMapping(extensions!, "obi", out YamlMappingNode? obi)
+            && TryGetValue(obi!, "version", out _))
+        {
+            return false;
+        }
+
+        data = found;
+        return true;
+    }
+
+    /// <summary>OBI's own-metrics port (<c>internal_metrics.prometheus.port</c>), which the chart's Service also serves.</summary>
+    private static int ObiInternalMetricsPort(YamlMappingNode data)
+        => TryGetMapping(data, "internal_metrics", out YamlMappingNode? internalMetrics)
+           && TryGetMapping(internalMetrics!, "prometheus", out YamlMappingNode? prometheus)
+           && TryGetValue(prometheus!, "port", out YamlNode? port)
+           && port is YamlScalarNode scalar
+           && int.TryParse(scalar.Value, out int value)
+            ? value
+            : 0;
+
+    private static YamlMappingNode ObiRelabel(string sourceLabel, string targetLabel)
+    {
+        YamlMappingNode node = new();
+        node.Children.Add(new YamlScalarNode("sourceLabels"), Sequence(sourceLabel));
+        node.Children.Add(new YamlScalarNode("regex"), new YamlScalarNode("(.+)"));
+        node.Children.Add(new YamlScalarNode("targetLabel"), new YamlScalarNode(targetLabel));
+        node.Children.Add(new YamlScalarNode("replacement"), new YamlScalarNode("$1"));
+        node.Children.Add(new YamlScalarNode("action"), new YamlScalarNode("replace"));
+        return node;
+    }
+
+    private static YamlSequenceNode Sequence(params string[] items)
+        => new(items.Select(i => (YamlNode)new YamlScalarNode(i)));
+
+    /// <summary>Sets a boolean, reporting whether the stored value was anything else.</summary>
+    private static bool SetBool(YamlMappingNode parent, string key, bool value)
+    {
+        string wanted = value ? "true" : "false";
+        if (TryGetValue(parent, key, out YamlNode? existing)
+            && existing is YamlScalarNode scalar
+            && string.Equals(scalar.Value, wanted, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        SetScalar(parent, key, wanted);
+        return true;
+    }
+
+    /// <summary><see cref="GetOrCreateMapping(YamlMappingNode, string)"/>, noting when it had to create one.</summary>
+    private static YamlMappingNode GetOrCreateMapping(YamlMappingNode parent, string key, ref bool changed)
+    {
+        if (TryGetMapping(parent, key, out YamlMappingNode? existing)) return existing!;
+        changed = true;
+        return GetOrCreateMapping(parent, key);
+    }
+
     /// <summary>
     /// The keys under <c>prometheus.prometheusSpec</c> that an existing kube-prometheus-stack install is
     /// given from the catalog when it has none of its own: the five monitor-selector flags, and the

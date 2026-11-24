@@ -68,8 +68,7 @@ public class ResourceUsageCollectorService(
             {
                 targets.AddRange(
                     (await catalog.GetComponentsForTenantAsync(tenantId, ct))
-                        .Where(c => c.HelmChartName == "kube-prometheus-stack"
-                                 && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                        .Where(EntKube.Contracts.Catalog.PrometheusPresence.Answers)
                         .Select(c => (tenantId, c.ClusterId)));
             }
         }

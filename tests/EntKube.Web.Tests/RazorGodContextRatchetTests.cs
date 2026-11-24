@@ -51,7 +51,7 @@ public class RazorGodContextRatchetTests
         "TenantMonitoringOverview.razor",  // Telemetry ×2 + OnCall (Support) + OperationsAdvisor (Advisor)
         "TicketDetail.razor",              // Support ×2 + UserAccessService (Identity)
         "UpgradesTab.razor",               // ComponentUpgrade (Catalog) + NodeManagement (Fleet)
-        "TenantAlertRulesTab.razor",       // no injected service to derive a subject from
+        "TenantAlertRulesTab.razor",       // no module service to derive a subject from (ICatalogApi is a contract, asked for Prometheus)
         "TenantInfraMetricsTab.razor",     // ditto
         "TenantMetricsTab.razor",          // ditto
         "TenantTracesTab.razor",           // ditto

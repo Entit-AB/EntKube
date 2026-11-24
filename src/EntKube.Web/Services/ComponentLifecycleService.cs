@@ -917,6 +917,22 @@ public class ComponentLifecycleService(
         // eBPF maps, and a RED-metrics endpoint nothing scrapes. Only genuinely absent keys are filled.
         if (component.HelmChartName == "opentelemetry-ebpf-instrumentation")
         {
+            // RED metrics follow the cluster: on where kube-prometheus-stack is installed, forced off
+            // where it is not — a ServiceMonitor on a cluster without the Prometheus Operator's CRDs
+            // fails the whole release. Asked of Catalog's one answer, the query the metrics views use,
+            // and asked at every apply, so installing Prometheus and re-applying this turns them on.
+            //
+            // ⚠️ BEFORE the bounds below, which write `prometheus_export.port: 0` when the block is
+            // absent. This step reads 0 as the operator's "off" (it cannot tell whose 0 it is), so
+            // running second would turn an old install's absent port — which this step makes 9090 —
+            // into a 0 it then respects.
+            bool clusterHasPrometheus = await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
+                db.ClusterComponents, tenantId, component.ClusterId, ct) is not null;
+
+            valuesYaml = clusterHasPrometheus
+                ? YamlFormMerger.EnableObiPrometheusMetrics(valuesYaml ?? "")
+                : YamlFormMerger.KeepObiPrometheusMetricsOff(valuesYaml ?? "");
+
             valuesYaml = YamlFormMerger.EnsureObiResourceBounds(valuesYaml ?? "");
         }
 

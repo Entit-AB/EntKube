@@ -1945,16 +1945,21 @@ public static class ComponentCatalog
         {
             Key = "otel-ebpf",
             DisplayName = "EntKube Trace Auto-Instrumentation (eBPF)",
-            Description = "Zero-code distributed tracing. Runs the OpenTelemetry eBPF Instrumentation (OBI) — the vendor-neutral, Apache-2.0 upstream of Grafana Beyla, donated to OpenTelemetry — as a privileged DaemonSet that uses eBPF to synthesize HTTP/gRPC/SQL spans and RED metrics for EVERY workload on the node without touching application code or requiring a service mesh. Exports OTLP to the EntKube Telemetry Collector, which enriches and forwards to the native store, so the Traces and Metrics views populate automatically. Requires the EntKube Telemetry Collector. Linux kernel 5.8+ (5.17+ for network-level distributed-trace context propagation); note eBPF-only traces are best-effort across TLS/L7/multi-node hops — pair with SDK instrumentation on boundary services for guaranteed end-to-end context.",
+            Description = "Zero-code distributed tracing. Runs the OpenTelemetry eBPF Instrumentation (OBI) — the vendor-neutral, Apache-2.0 upstream of Grafana Beyla, donated to OpenTelemetry — as a privileged DaemonSet that uses eBPF to synthesize HTTP/gRPC/SQL spans and RED metrics for EVERY workload on the node without touching application code or requiring a service mesh. Traces go over OTLP to the EntKube Telemetry Collector, which enriches and forwards them to the native store, so the Traces view populates automatically. HTTP/gRPC/SQL RED metrics (request rate, errors, latency) go to the cluster's own Prometheus — only on a cluster where kube-prometheus-stack is installed, which is detected on every apply: re-apply this component after installing Prometheus. Requires the EntKube Telemetry Collector. Linux kernel 5.8+ (5.17+ for network-level distributed-trace context propagation); note eBPF-only traces are best-effort across TLS/L7/multi-node hops — pair with SDK instrumentation on boundary services for guaranteed end-to-end context.",
             Icon = "bi-diagram-3-fill",
             Category = "Monitoring",
             HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
             HelmChartName = "opentelemetry-ebpf-instrumentation",
-            // Version intentionally unpinned (OBI is v0.x beta with a shifting config
-            // surface — the Helm chart tracks it). Pin the image via the field below for
-            // reproducibility. The chart provisions the DaemonSet securityContext
-            // (CAP_BPF/PERFMON/SYS_PTRACE/NET_RAW), hostPID, ServiceAccount + RBAC, and
-            // the K8s metadata cache — the fragile eBPF plumbing we would otherwise hand-roll.
+            // 0.16.4 ships OBI v1.0.0 (its appVersion, and the image tag a blank `image.tag` gets).
+            // Pinned because the chart's config surface moves under it: 0.14.0 made Config v2 the
+            // default for an EMPTY config.data and kept v1 only for non-empty data without the
+            // `extensions.obi.version: "2.0"` marker — which is what every values document below
+            // is, so every key here is a v1 key (templates/_helpers.tpl, obi.configData). Its
+            // values.schema.json also refuses unknown top-level keys, so nothing EntKube-private
+            // can ride along in the values. The chart provisions the DaemonSet securityContext
+            // (CAP_BPF/PERFMON/SYS_PTRACE/NET_RAW), hostPID, ServiceAccount + RBAC, and the K8s
+            // metadata cache — the fragile eBPF plumbing we would otherwise hand-roll.
+            HelmChartVersion = "0.16.4",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "otel-ebpf",
             // DaemonSet rollout (one pod per node) — give --wait headroom.
@@ -1968,8 +1973,8 @@ public static class ComponentCatalog
                 {
                     Key = "image-tag", Label = "OBI Version",
                     YamlPath = "image.tag", Type = FormFieldType.Text,
-                    DefaultValue = "", Placeholder = "e.g. v0.8.0 (blank = chart default)",
-                    HelpText = "opentelemetry-ebpf-instrumentation image tag. Leave blank for the chart's tested default; pin an explicit tag for reproducibility (OBI is v0.x beta — avoid 'main')."
+                    DefaultValue = "", Placeholder = "e.g. v1.0.0 (blank = the chart's appVersion)",
+                    HelpText = "opentelemetry-ebpf-instrumentation image tag, with the leading v (the image is tagged v1.0.0, not 1.0.0). Leave blank to run the version the pinned chart was released with — chart 0.16.4 ships OBI v1.0.0. Pin a tag only to hold the agent back or forward independently of the chart; avoid 'main'."
                 },
                 new ComponentFormField
                 {
@@ -2047,21 +2052,21 @@ public static class ComponentCatalog
                     DefaultValue = "-1",
                     HelpText = "Powers of two applied to every eBPF map size: -1 halves them, -2 quarters them, 0 is upstream's default, and the valid range is -3..3. Maps are preallocated, so this is a direct and deterministic cut in the kernel memory charged to the pod. Too small shows up as dropped events under load, not as wrong data."
                 },
-                // RED metrics are off by default (see the config below) because nothing scraped
-                // them. These two fields are how you turn them on — together, or not at all.
+                // RED metrics follow the cluster, not a toggle: on every apply EntKube asks Catalog
+                // whether kube-prometheus-stack is installed here (YamlFormMerger
+                // .EnableObiPrometheusMetrics / KeepObiPrometheusMetricsOff). There used to be a
+                // "Create ServiceMonitor" toggle beside this field. It never worked — the chart
+                // renders a ServiceMonitor only when `service.enabled` is ALSO true, and nothing set
+                // that — and it is gone because the ServiceMonitor is not a separate decision: with
+                // Prometheus present a port without one is memory nobody reads, and without
+                // Prometheus one fails the whole release (no kind ServiceMonitor). So the port is the
+                // one knob, and the apply step derives the Service and ServiceMonitor from it.
                 new ComponentFormField
                 {
                     Key = "prometheus-port", Label = "RED Metrics Port (0 = off)",
                     YamlPath = "config.data.prometheus_export.port", Type = FormFieldType.Number,
-                    DefaultValue = "0",
-                    HelpText = "Opens OBI's Prometheus endpoint (9090 is the convention). Generating these metrics costs heap in proportion to services × routes on the node, so it is off unless something scrapes it — turn on the ServiceMonitor below at the same time."
-                },
-                new ComponentFormField
-                {
-                    Key = "service-monitor", Label = "Create ServiceMonitor",
-                    YamlPath = "serviceMonitor.enabled", Type = FormFieldType.Toggle,
-                    DefaultValue = "false",
-                    HelpText = "Registers the RED metrics endpoint above with a Prometheus Operator install. Pointless without a port; and a port without this is memory spent on metrics no one reads."
+                    DefaultValue = "9090",
+                    HelpText = "Where OBI serves per-workload HTTP/gRPC/SQL request rate, error and latency metrics for the cluster's Prometheus. Takes effect only on a cluster where kube-prometheus-stack is installed: there EntKube also creates the Service and ServiceMonitor that make Prometheus scrape it. On a cluster without Prometheus it is forced to 0 at apply time — OBI evicts expired series only when scraped, so an unscraped endpoint grows for ever. OBI runs on the host network, so this port is opened on every node; change it only if 9090 is taken there. 0 keeps RED metrics off even where Prometheus is installed. Components registered before 2026-11-24 stored 0 here, which was then the default; EntKube cannot tell that 0 from a deliberate one, so they stay off until this is set to 9090."
                 },
                 new ComponentFormField
                 {
@@ -2191,21 +2196,20 @@ public static class ComponentCatalog
                       # services, at a per-connection memory cost on all of them. Set it back to
                       # `all` on a cluster that genuinely needs that and can afford it.
                       context_propagation: headers
-                    # Metrics off, on BOTH paths, and both have to be said out loud: config.data is
-                    # a map merge, so the chart's own defaults — an OTLP metrics endpoint at
-                    # ${HOST_IP}:4318 and a Prometheus endpoint on :9090 — survive simply omitting
-                    # them here. Together they had OBI aggregating RED metrics per service and per
-                    # route, holding that state in its heap for the whole export interval, and
-                    # sending it to a collector with no metrics pipeline (it drops them) and to a
-                    # scrape endpoint with no scraper (the chart's ServiceMonitor is off). That is
-                    # a large share of this pod's heap spent on data with no reader.
-                    #
-                    # To get RED metrics back: set prometheus_export.port to 9090 AND turn on the
-                    # ServiceMonitor field above, so something actually reads what they cost.
+                    # OTLP metrics off, said out loud: config.data is a map merge, so the chart's own
+                    # default — an OTLP metrics endpoint at ${HOST_IP}:4318 — survives simply
+                    # omitting it, and the EntKube collector has no metrics pipeline to receive them.
                     otel_metrics_export:
                       endpoint: ""
+                    # RED metrics go to the cluster's Prometheus instead, and ONLY where there is
+                    # one. 9090 is the port they are served on when kube-prometheus-stack is
+                    # installed on the cluster; the apply step (EnableObiPrometheusMetrics) then
+                    # adds the Service and ServiceMonitor, the protocol list, the RED-only feature
+                    # set and the relabelling. On a cluster without Prometheus the apply step forces
+                    # this to 0 (KeepObiPrometheusMetricsOff): OBI evicts expired series only inside
+                    # a scrape, so an endpoint nothing scrapes is heap that is never given back.
                     prometheus_export:
-                      port: 0
+                      port: 9090
 
                     # The cap that makes turning those back on safe. Without a routes section OBI
                     # falls back to its `heuristic` decorator, which replaces only the path segments
