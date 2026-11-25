@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using EntKube.Web.Services.ScrapeMonitors;
 
 namespace EntKube.Web.Services;
 
@@ -178,102 +179,6 @@ public sealed record ScrapeEvidence
 }
 
 /// <summary>
-/// A Kubernetes label selector as it appears on a Prometheus resource or a monitor.
-///
-/// <para>The answer has three values because the diagnosis must not guess: an operator this code
-/// does not know makes it "cannot tell" (null), never yes and never no.</para>
-/// </summary>
-public static class MonitorSelector
-{
-    /// <summary>
-    /// Whether <paramref name="selector"/> selects something carrying <paramref name="labels"/>.
-    ///
-    /// <para>The Prometheus CRD: "An empty label selector matches all objects. A null label
-    /// selector matches no objects." An absent selector used to be read as "selects everything",
-    /// which reported scraping as running on a Prometheus that reads no monitors at all.</para>
-    /// </summary>
-    public static bool? Selects(JsonNode? selector, IReadOnlyDictionary<string, string> labels)
-    {
-        if (selector is null) return false;
-        if (selector is not JsonObject parts) return null;
-
-        bool cannotTell = false;
-
-        if (parts["matchLabels"] is JsonObject wanted)
-        {
-            foreach (KeyValuePair<string, JsonNode?> w in wanted)
-            {
-                if (!labels.TryGetValue(w.Key, out string? value) || value != Text(w.Value)) return false;
-            }
-        }
-        else if (parts["matchLabels"] is not null)
-        {
-            cannotTell = true;
-        }
-
-        if (parts["matchExpressions"] is JsonArray expressions)
-        {
-            foreach (JsonNode? expression in expressions)
-            {
-                switch (Satisfies(expression, labels))
-                {
-                    case false: return false;
-                    case null: cannotTell = true; break;
-                }
-            }
-        }
-        else if (parts["matchExpressions"] is not null)
-        {
-            cannotTell = true;
-        }
-
-        return cannotTell ? null : true;
-    }
-
-    private static bool? Satisfies(JsonNode? expression, IReadOnlyDictionary<string, string> labels)
-    {
-        if (expression is not JsonObject e || Text(e["key"]) is not { Length: > 0 } key) return null;
-
-        bool present = labels.TryGetValue(key, out string? value);
-        List<string?>? values = (e["values"] as JsonArray)?.Select(Text).ToList();
-
-        return Text(e["operator"]) switch
-        {
-            "Exists" => present,
-            "DoesNotExist" => !present,
-            "In" when values is not null => present && values.Contains(value),
-            // Kubernetes: NotIn also selects what does not carry the key at all.
-            "NotIn" when values is not null => !present || !values.Contains(value),
-            _ => null,
-        };
-    }
-
-    /// <summary>The selector in one line, as a reader would write it.</summary>
-    public static string Describe(JsonNode? selector)
-    {
-        if (selector is not JsonObject parts) return "nothing";
-
-        List<string> said = [];
-        if (parts["matchLabels"] is JsonObject wanted)
-            said.AddRange(wanted.Select(w => $"{w.Key}={Text(w.Value)}"));
-        if (parts["matchExpressions"] is JsonArray expressions)
-        {
-            said.AddRange(expressions.Select(e =>
-            {
-                string values = e?["values"] is JsonArray v && v.Count > 0 ? $" ({string.Join(", ", v.Select(Text))})" : "";
-                return $"{Text(e?["key"])} {Text(e?["operator"])}{values}";
-            }));
-        }
-
-        return said.Count == 0 ? "everything" : string.Join(", ", said);
-    }
-
-    /// <summary>A scalar as text. Ports are a name in one monitor and a number in the next.</summary>
-    internal static string? Text(JsonNode? node) =>
-        node is JsonValue ? node.ToString() : null;
-}
-
-/// <summary>
 /// Compares the two halves that have to line up — the monitor that selects a workload, and the
 /// selector Prometheus decides by which monitors it reads — and says which one is missing.
 /// Pure: it decides over a <see cref="ScrapeEvidence"/> that somebody else read.
@@ -306,7 +211,7 @@ public static class ScrapeDiagnostician
         List<string> unread = [];
         foreach (JsonNode monitor in selecting)
         {
-            bool? byLabels = MonitorSelector.Selects(selector, LabelsOf(monitor["metadata"]?["labels"]));
+            bool? byLabels = Selects(selector, LabelsOf(monitor["metadata"]?["labels"]));
             bool? byNamespace = ReadsNamespace(prometheus, workload.Type, NamespaceOf(monitor), seen);
 
             if (byLabels == true && byNamespace == true) read.Add(monitor);
@@ -385,7 +290,7 @@ public static class ScrapeDiagnostician
         foreach (JsonNode monitor in seen.Monitors!)
         {
             bool? selects = SelectsTheWorkload(monitor, workload, seen);
-            string asksFor = MonitorSelector.Describe(monitor["spec"]?["selector"]);
+            string asksFor = Describe(monitor["spec"]?["selector"]);
 
             if (selects is null)
                 doubts.Add($"Cannot tell whether {kind} {NameOf(monitor)} selects {workload.Title}: its selector ({asksFor}) was not understood.");
@@ -423,7 +328,7 @@ public static class ScrapeDiagnostician
                 ? $"Prometheus {NameOf(prometheus)} has no {type.NamespaceSelector}, so it only looks in its own "
                   + $"namespace and does not see a {type.Kind} in {workload.Namespace}."
                 : $"Prometheus {NameOf(prometheus)} does not look in namespace {workload.Namespace}: its "
-                  + $"{type.NamespaceSelector} asks for {MonitorSelector.Describe(byNamespace)}.");
+                  + $"{type.NamespaceSelector} asks for {Describe(byNamespace)}.");
         }
 
         return blind;
@@ -458,12 +363,12 @@ public static class ScrapeDiagnostician
             Dictionary<string, string> labels = LabelsOf(monitor["metadata"]?["labels"]);
             string have = labels.Count == 0 ? "no labels" : string.Join(", ", labels.Select(l => $"{l.Key}={l.Value}"));
             return $"{kind} {NameOf(monitor)} exists but Prometheus does not select it: it reads "
-                + $"{kind}s by {MonitorSelector.Describe(selector)}, and this one has {have}.";
+                + $"{kind}s by {Describe(selector)}, and this one has {have}.";
         }
 
         return $"Cannot tell whether Prometheus reads {kind} {NameOf(monitor)}: "
             + (byLabels is null
-                ? $"its selector ({MonitorSelector.Describe(selector)}) was not understood."
+                ? $"its selector ({Describe(selector)}) was not understood."
                 : "the selector it picks namespaces by was not understood.");
     }
 
@@ -496,7 +401,7 @@ public static class ScrapeDiagnostician
         // Prometheus to its own namespace.
         if (selector is null) return ns == NamespaceOf(prometheus);
         if (seen.NamespaceLabels.TryGetValue(ns, out Dictionary<string, string>? labels))
-            return MonitorSelector.Selects(selector, labels);
+            return Selects(selector, labels);
 
         return selector is JsonObject { Count: 0 } ? true : null;
     }
@@ -516,7 +421,7 @@ public static class ScrapeDiagnostician
         bool cannotTell = false;
         foreach (Dictionary<string, string> labels in judgedBy)
         {
-            switch (MonitorSelector.Selects(monitor["spec"]?["selector"], labels))
+            switch (Selects(monitor["spec"]?["selector"], labels))
             {
                 case true: return true;
                 case null: cannotTell = true; break;
@@ -528,10 +433,10 @@ public static class ScrapeDiagnostician
     private static bool Reaches(JsonNode monitor, string ns)
     {
         JsonNode? selector = monitor["spec"]?["namespaceSelector"];
-        if (MonitorSelector.Text(selector?["any"]) == "true") return true;
+        if (Text(selector?["any"]) == "true") return true;
 
         return selector?["matchNames"] is JsonArray { Count: > 0 } names
-            ? names.Any(n => MonitorSelector.Text(n) == ns)
+            ? names.Any(n => Text(n) == ns)
             : NamespaceOf(monitor) == ns;
     }
 
@@ -547,9 +452,9 @@ public static class ScrapeDiagnostician
 
         foreach (JsonNode? endpoint in listed)
         {
-            string? port = MonitorSelector.Text(endpoint?["port"])
-                ?? MonitorSelector.Text(endpoint?["portNumber"])
-                ?? MonitorSelector.Text(endpoint?["targetPort"]);
+            string? port = Text(endpoint?["port"])
+                ?? Text(endpoint?["portNumber"])
+                ?? Text(endpoint?["targetPort"]);
             if (port is null) continue;
 
             if (workload.Ports.Count > 0)
@@ -561,10 +466,47 @@ public static class ScrapeDiagnostician
                 port = known[0].ToString();
             }
 
-            endpoints.Add($"{port}{MonitorSelector.Text(endpoint?["path"]) ?? "/metrics"}");
+            endpoints.Add($"{port}{Text(endpoint?["path"]) ?? "/metrics"}");
         }
         return endpoints;
     }
+
+    /// <summary>
+    /// Whether a selector on a Prometheus resource or a monitor selects these labels, read the way
+    /// the monitor engine reads it (<see cref="LabelSelector"/>): absent selects nothing, empty
+    /// everything, and what cannot be evaluated is "cannot tell". The diagnosis had a copy of its
+    /// own, which read an In without values as "cannot tell" where the engine read it as "nothing";
+    /// one reader means the two can no longer disagree about the same monitor.
+    /// </summary>
+    private static bool? Selects(JsonNode? selector, IReadOnlyDictionary<string, string> labels) =>
+        LabelSelector.Selects(LabelSelector.From(selector), labels);
+
+    /// <summary>
+    /// The selector in one line, as a reader would write it. From the JSON as written, so a
+    /// selector that was not understood is still shown as it is.
+    /// </summary>
+    private static string Describe(JsonNode? selector)
+    {
+        if (selector is not JsonObject parts) return "nothing";
+
+        List<string> said = [];
+        if (parts["matchLabels"] is JsonObject wanted)
+            said.AddRange(wanted.Select(w => $"{w.Key}={Text(w.Value)}"));
+        if (parts["matchExpressions"] is JsonArray expressions)
+        {
+            said.AddRange(expressions.Select(e =>
+            {
+                string values = e?["values"] is JsonArray v && v.Count > 0 ? $" ({string.Join(", ", v.Select(Text))})" : "";
+                return $"{Text(e?["key"])} {Text(e?["operator"])}{values}";
+            }));
+        }
+
+        return said.Count == 0 ? "everything" : string.Join(", ", said);
+    }
+
+    /// <summary>A scalar as text. Ports are a name in one monitor and a number in the next.</summary>
+    private static string? Text(JsonNode? node) =>
+        node is JsonValue ? node.ToString() : null;
 
     private static bool IsOurs(JsonNode monitor, MonitoredWorkload workload) =>
         NamespaceOf(monitor) == workload.Namespace && PlainName(monitor) == workload.EntKubeMonitor;
@@ -572,14 +514,14 @@ public static class ScrapeDiagnostician
     private static JsonNode? OursFirst(List<JsonNode> monitors, MonitoredWorkload workload) =>
         monitors.FirstOrDefault(m => IsOurs(m, workload)) ?? monitors.FirstOrDefault();
 
-    private static string PlainName(JsonNode resource) => MonitorSelector.Text(resource["metadata"]?["name"]) ?? "";
+    private static string PlainName(JsonNode resource) => Text(resource["metadata"]?["name"]) ?? "";
 
-    private static string NamespaceOf(JsonNode resource) => MonitorSelector.Text(resource["metadata"]?["namespace"]) ?? "";
+    private static string NamespaceOf(JsonNode resource) => Text(resource["metadata"]?["namespace"]) ?? "";
 
     private static string NameOf(JsonNode resource) => $"{NamespaceOf(resource)}/{PlainName(resource)}";
 
     private static Dictionary<string, string> LabelsOf(JsonNode? node) =>
         node is JsonObject labels
-            ? labels.ToDictionary(l => l.Key, l => MonitorSelector.Text(l.Value) ?? "", StringComparer.Ordinal)
+            ? labels.ToDictionary(l => l.Key, l => Text(l.Value) ?? "", StringComparer.Ordinal)
             : [];
 }

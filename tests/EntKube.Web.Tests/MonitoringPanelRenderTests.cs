@@ -4,6 +4,8 @@ using EntKube.Web.Components.Pages.Tenants;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
+using EntKube.Web.Services.ScrapeMonitors;
+using EntKube.Contracts.DataServices;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,6 +24,7 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
 
     private readonly InterceptingTestDb testDb = new(TestRootKey);
     private readonly ScrapedClusterFake cluster = new();
+    private readonly RecordingMonitors monitors = new();
 
     public MonitoringPanelRenderTests()
     {
@@ -31,8 +34,7 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
 
         Services.AddSingleton(cluster.Prometheus);
         Services.AddSingleton<IDbContextFactory<DataServicesDbContext>>(testDb.Factory);
-        Services.AddSingleton(new CnpgService(
-            testDb.Factory, vault, TestServices.NoClusterAccess, catalog, delivery, TestServices.NewGate()));
+        Services.AddSingleton<IScrapeMonitors>(monitors);
         Services.AddSingleton(new RabbitMQService(
             testDb.Factory, TestServices.NoClusterAccess, vault, catalog, delivery));
 
@@ -117,13 +119,117 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
     public void What_the_second_databases_other_button_did_is_shown_on_the_second_card_alone()
     {
         IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => KubernetesOperationResult<ScrapeMonitorPlan>.Failure("The cluster refused the PodMonitors: Forbidden");
 
-        Button(cut.Find("[data-database='web/shop']"), "Enable metrics").Click();
+        Button(cut.Find("[data-database='web/shop']"), ApplyButton).Click();
 
-        // No cluster credential in this test, so the apply is refused, and where it says so is the point.
-        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop']").QuerySelectorAll(".text-danger")
-            .Should().ContainSingle());
+        // Beside the button, on its own card, and red.
+        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop'] [data-apply] .text-danger").TextContent
+            .Should().Contain("The cluster refused the PodMonitors: Forbidden"));
         cut.Find("[data-database='billing/shop']").QuerySelectorAll(".text-danger").Should().BeEmpty();
+    }
+
+    // ──────── Apply monitors now ────────
+
+    /// <summary>The button's name, as the diagnosis's remedy spells it. One string, so they cannot drift apart.</summary>
+    private static readonly string ApplyButton =
+        System.Text.RegularExpressions.Regex.Match(ScrapeDiagnostician.ApplyMonitors, "\"([^\"]+)\"").Groups[1].Value;
+
+    private const string WebShopPods = """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/podRole":"instance"}}""";
+
+    /// <summary>The engine's row for a data service, keyed the way the engine keys it.</summary>
+    private static MonitorPlanRow RowFor(ManagedServiceKind kind, string ns, string name, MonitorState state, string detail)
+    {
+        string key = ScrapeTargetCatalog.For([], [new ManagedServiceSummary(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), kind, name, ns, ManagedServiceStatus.Running,
+            IsOperatorManaged: true, IsInCluster: true, HasExporter: false)])[0].Key;
+        return new MonitorPlanRow(key, name, kind.ToString(), ns, null, state, MonitorChange.None, detail, []);
+    }
+
+    private static KubernetesOperationResult<ScrapeMonitorPlan> Planned(params MonitorPlanRow[] rows) =>
+        KubernetesOperationResult<ScrapeMonitorPlan>.Success(new ScrapeMonitorPlan(rows, [], []));
+
+    [Fact]
+    public void The_remedy_names_a_button_the_database_panel_has()
+    {
+        ApplyButton.Should().Be("Apply monitors now");
+
+        TwoDatabasesCalledShop().FindAll("[data-database='web/shop'] button")
+            .Select(b => b.TextContent.Trim()).Should().Contain(ApplyButton);
+    }
+
+    /// <summary>
+    /// ⭐ The button rebuilt the database's whole Cluster spec from EntKube's rows, which could roll an
+    /// imported or restored database. Now it asks the engine, which writes monitors and nothing else.
+    /// </summary>
+    [Fact]
+    public void Apply_monitors_now_applies_the_clusters_monitors_once_and_diagnoses_again()
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "billing", "shop", MonitorState.Managed, "Billing's row."),
+            RowFor(ManagedServiceKind.Postgres, "web", "shop", MonitorState.Managed, "Web's row: scraped by EntKube's monitor."));
+        monitors.OnApply = () => cluster.ServeList(PodMonitorsPath, PodMonitor("web", "entkube-cnpg-shop", WebShopPods));
+
+        IElement web = cut.Find("[data-database='web/shop']");
+        web.TextContent.Should().Contain("every database and component on this Kubernetes cluster",
+            "the button applies the whole cluster's monitors, and says so");
+        Button(web, ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop']").TextContent
+            .Should().Contain("web/entkube-cnpg-shop selects database 'shop' and Prometheus reads it"));
+        monitors.Applied.Should().Equal([(cluster.TenantId, cluster.ClusterId)]);
+        cluster.Requests.Should().Contain("/api/v1/namespaces/web/pods", "the diagnosis ran again after the apply");
+
+        string said = cut.Find("[data-database='web/shop'] [data-apply]").TextContent;
+        said.Should().Contain("Web's row: scraped by EntKube's monitor.").And.NotContain("Billing's row.");
+    }
+
+    /// <summary>
+    /// A database whose Cluster still asks CNPG for a PodMonitor keeps the operator's, and the engine
+    /// adds none beside it. Nothing on the card may then send anybody to change the Cluster.
+    /// </summary>
+    [Fact]
+    public void A_database_the_cnpg_operator_still_monitors_is_not_told_to_change_anything()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("web", "shop", WebShopPods));
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => Planned(RowFor(ManagedServiceKind.Postgres, "web", "shop", MonitorState.CoveredElsewhere,
+            "PodMonitor web/shop, which EntKube did not create, already selects it. EntKube adds no monitor of its own, "
+            + "because two would count everything twice."));
+
+        Button(cut.Find("[data-database='web/shop']"), ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop']").TextContent
+            .Should().Contain("web/shop selects database 'shop' and Prometheus reads it"));
+        string card = cut.Find("[data-database='web/shop']").TextContent;
+        card.Should().Contain("already selects it");
+        card.Should().NotContainAny(["enablePodMonitor", "Cluster resource", "Cluster spec", "spec pushed", "re-appl", "Re-appl", "Enable metrics"]);
+        cut.Find("[data-database='web/shop'] pre").TextContent.Should().NotContain(ApplyButton,
+            "the diagnosis has nothing to remedy where the operator's monitor is read");
+    }
+
+    [Fact]
+    public void An_apply_that_throws_is_shown_beside_the_button_and_the_panel_stays()
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.OnApply = () => throw new InvalidOperationException("Vault is sealed.");
+
+        Button(cut.Find("[data-database='web/shop']"), ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop'] [data-apply] .text-danger").TextContent
+            .Should().Contain("Vault is sealed."));
+        Button(cut.Find("[data-database='web/shop']"), ApplyButton).HasAttribute("disabled").Should().BeFalse();
+    }
+
+    /// <summary>The buttons that rebuilt a database's spec and wrote a broker's monitor are gone, not hidden.</summary>
+    [Fact]
+    public void Nothing_but_the_engine_writes_a_monitor_any_more()
+    {
+        typeof(CnpgService).GetMethod("ReapplyClusterSpecAsync").Should().BeNull(
+            "it rebuilt an imported or restored database's spec from EntKube's rows and could restart it");
+        typeof(RabbitMQService).GetMethod("EnableMetricsScrapeAsync").Should().BeNull(
+            "the engine owns <name>-metrics now, and a second writer of it would undo the first");
     }
 
     [Fact]
@@ -260,6 +366,57 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         cut.Markup.Should().NotContain("Prometheus query failed").And.NotContain("No ServiceMonitor");
     }
 
+    private const string OrdersServices =
+        """{"matchLabels":{"app.kubernetes.io/name":"orders","app.kubernetes.io/component":"rabbitmq"}}""";
+
+    private void UnscrapedOrders()
+    {
+        cluster.Query = q => q.Contains("or vector(0)") ? Series("0") : NoSeries;
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            Labelled("mq", "orders", "\"app.kubernetes.io/name\":\"orders\",\"app.kubernetes.io/component\":\"rabbitmq\""));
+    }
+
+    [Fact]
+    public void Apply_monitors_now_on_a_broker_applies_the_clusters_monitors_once_and_diagnoses_again()
+    {
+        UnscrapedOrders();
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.RabbitMq, "mq", "orders", MonitorState.Managed, "Orders' row: scraped by EntKube's monitor."));
+        monitors.OnApply = () => cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("mq", "orders-metrics", OrdersServices));
+        IRenderedComponent<RabbitMQMonitoringPanel> cut = Brokers(Broker("mq", "orders"));
+
+        cut.Markup.Should().Contain("every database and component on this Kubernetes cluster");
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("mq/orders-metrics selects RabbitMQ 'orders' and Prometheus reads it"));
+        monitors.Applied.Should().Equal([(cluster.TenantId, cluster.ClusterId)]);
+        cut.Find("[data-apply]").TextContent.Should().Contain("Orders' row: scraped by EntKube's monitor.");
+    }
+
+    [Fact]
+    public void A_failed_broker_apply_is_shown_beside_the_button()
+    {
+        UnscrapedOrders();
+        monitors.Answer = () => KubernetesOperationResult<ScrapeMonitorPlan>.Failure("Cancelled. Nothing was changed.");
+        IRenderedComponent<RabbitMQMonitoringPanel> cut = Brokers(Broker("mq", "orders"));
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-apply] .text-danger").TextContent
+            .Should().Contain("Cancelled. Nothing was changed."));
+        monitors.Applied.Should().ContainSingle();
+    }
+
+    /// <summary>A broker EntKube did not install gets no monitor from the engine, so it gets no button.</summary>
+    [Fact]
+    public void An_external_broker_has_no_apply_button()
+    {
+        cluster.Query = q => q.Contains("or vector(0)") ? Series("0") : NoSeries;
+
+        Brokers(Broker("legacy", "rabbit", external: true)).FindAll("button")
+            .Select(b => b.TextContent.Trim()).Should().NotContain(ApplyButton);
+    }
+
     // ──────── Keycloak ────────
 
     [Fact]
@@ -293,5 +450,29 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         cut.WaitForAssertion(() => cut.Find("[data-diagnosis-error]").TextContent
             .Should().Contain("Could not read the ServiceMonitors"));
         cut.Markup.Should().Contain("Why is this empty?").And.NotContain("Prometheus query failed");
+    }
+
+    /// <summary>The engine, as a panel sees it: what was asked of it, and what it answers.</summary>
+    private sealed class RecordingMonitors : IScrapeMonitors
+    {
+        public List<(Guid Tenant, Guid Cluster)> Applied { get; } = [];
+
+        public Func<KubernetesOperationResult<ScrapeMonitorPlan>> Answer { get; set; } =
+            () => KubernetesOperationResult<ScrapeMonitorPlan>.Success(new ScrapeMonitorPlan([], [], []));
+
+        /// <summary>What the apply does to the cluster, before it answers.</summary>
+        public Action? OnApply { get; set; }
+
+        public Task<KubernetesOperationResult<ScrapeMonitorPlan>> PlanAsync(
+            Guid tenantId, Guid clusterId, CancellationToken ct = default) => Task.FromResult(Answer());
+
+        public async Task<KubernetesOperationResult<ScrapeMonitorPlan>> ApplyAsync(
+            Guid tenantId, Guid clusterId, CancellationToken ct = default)
+        {
+            Applied.Add((tenantId, clusterId));
+            await Task.Yield();
+            OnApply?.Invoke();
+            return Answer();
+        }
     }
 }

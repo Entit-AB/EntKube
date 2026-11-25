@@ -1235,62 +1235,6 @@ public class RabbitMQService(
         await db.SaveChangesAsync(ct);
     }
 
-    // ── Metrics scraping ──────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Creates the ServiceMonitor that makes Prometheus scrape this broker.
-    ///
-    /// Nothing does this on its own: the RabbitMQ operator exposes the Prometheus plugin on a
-    /// port named <c>prometheus</c> but never creates a monitor for it, so a broker installed
-    /// through EntKube serves metrics that nothing collects. The shape follows the operator's
-    /// own published ServiceMonitor, narrowed to a single cluster.
-    ///
-    /// Only the aggregated <c>/metrics</c> endpoint is scraped. RabbitMQ's published monitor also
-    /// scrapes <c>/metrics/detailed</c> for per-queue series, but EntKube reads per-queue depth
-    /// straight off the broker with rabbitmqctl, so that endpoint would buy nothing while costing
-    /// cardinality proportional to the queue count — and it emits a second
-    /// <c>rabbitmq_identity_info</c> series per node, which doubles the node count and makes the
-    /// cluster-name join ambiguous.
-    ///
-    /// External brokers are refused rather than guessed at: their Service names, labels and
-    /// metrics ports come from whatever chart installed them, and a ServiceMonitor pointed at
-    /// the wrong port would look installed while collecting nothing.
-    /// </summary>
-    public async Task EnableMetricsScrapeAsync(
-        Guid tenantId, Guid clusterId, CancellationToken ct = default)
-    {
-        RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
-
-        if (!cluster.IsOperatorManaged)
-            throw new InvalidOperationException(
-                $"'{cluster.Name}' was not installed by EntKube, so its metrics port and Service "
-                + "labels are not known. Create a ServiceMonitor for it by hand — RabbitMQ publishes "
-                + "one at rabbitmq/cluster-operator under observability/prometheus/monitors.");
-
-        string manifest = $"""
-            apiVersion: monitoring.coreos.com/v1
-            kind: ServiceMonitor
-            metadata:
-              name: {cluster.Name}-metrics
-              namespace: {cluster.Namespace}
-              labels:
-                app.kubernetes.io/name: {cluster.Name}
-                app.kubernetes.io/component: rabbitmq
-            spec:
-              selector:
-                matchLabels:
-                  app.kubernetes.io/name: {cluster.Name}
-                  app.kubernetes.io/component: rabbitmq
-              endpoints:
-                - port: prometheus
-                  scheme: http
-                  interval: 15s
-                  scrapeTimeout: 14s
-            """;
-
-        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
-    }
-
     // ── External brokers: rabbitmqctl control channel ─────────────────────────
     //
     // An external broker has no topology CRs to apply and its management API is not reachable

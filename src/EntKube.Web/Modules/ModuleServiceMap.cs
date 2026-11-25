@@ -214,6 +214,7 @@ public static partial class ModuleMap
         [typeof(RumSiteService)] = Module.Telemetry,
         [typeof(LiveScrapeStateReader)] = Module.Telemetry,
         [typeof(ScrapeMonitorService)] = Module.Telemetry,
+        [typeof(IScrapeMonitors)] = Module.Telemetry,
         [typeof(ScrapeMonitorReconcileService)] = Module.Telemetry,
         [typeof(SloService)] = Module.Telemetry,
         [typeof(SloTallySweep)] = Module.Telemetry,

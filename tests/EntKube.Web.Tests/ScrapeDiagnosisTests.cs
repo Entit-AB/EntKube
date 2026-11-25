@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json.Nodes;
 using EntKube.Web.Services;
+using EntKube.Web.Services.ScrapeMonitors;
 using FluentAssertions;
 using static EntKube.Web.Tests.ScrapedClusterFake;
 
@@ -205,8 +206,9 @@ public sealed class ScrapeDiagnosisTests
         JsonNode selector = JsonNode.Parse(
             """{"matchLabels":{"release":"prom"},"matchExpressions":[{"key":"a","operator":"Matches"}]}""")!;
 
-        MonitorSelector.Selects(selector, new Dictionary<string, string> { ["release"] = "other" }).Should().BeFalse();
-        MonitorSelector.Selects(selector, new Dictionary<string, string> { ["release"] = "prom" }).Should().BeNull();
+        // The diagnosis and the engine read selectors with one class, so they cannot disagree on one.
+        LabelSelector.Selects(LabelSelector.From(selector), new Dictionary<string, string> { ["release"] = "other" }).Should().BeFalse();
+        LabelSelector.Selects(LabelSelector.From(selector), new Dictionary<string, string> { ["release"] = "prom" }).Should().BeNull();
     }
 
     // ──────── A failed read is a failure ────────

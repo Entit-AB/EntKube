@@ -1210,11 +1210,11 @@ public class CnpgServiceTests : IDisposable
     // ════════════════════════════════════════════════════════════════
 
     [Fact]
-    public async Task CreateClusterAsync_EnablesThePodMonitorSoPrometheusScrapesTheDatabase()
+    public async Task CreateClusterAsync_TurnsTheOperatorsPodMonitorOffExplicitly()
     {
-        // CNPG instances expose metrics on :9187, but the operator only creates a PodMonitor
-        // when asked to. Without this the database monitoring panel queries cnpg_* series that
-        // no scrape ever produced, and shows an empty card for a perfectly healthy database.
+        // EntKube makes the database's PodMonitor itself (enablePodMonitor is deprecated upstream).
+        // The block is written, with false, rather than left out: a client-side apply that drops
+        // spec.monitoring deletes all of it, tls included, and losing that rolls the database.
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
 
         List<string> appliedManifests = [];
@@ -1227,11 +1227,11 @@ public class CnpgServiceTests : IDisposable
             tenant.Id, cluster.Id, "metrics-pg", "databases", 1, "5Gi", storageLink.Id, null);
 
         string clusterManifest = appliedManifests.First(m => m.Contains("kind: Cluster"));
-        clusterManifest.Should().Contain("  monitoring:\n    enablePodMonitor: true");
+        clusterManifest.Should().Contain("  monitoring:\n    enablePodMonitor: false");
     }
 
     [Fact]
-    public async Task RestoreAsync_EnablesThePodMonitorOnTheRestoredCluster()
+    public async Task RestoreAsync_TurnsTheOperatorsPodMonitorOffExplicitly()
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
 
@@ -1260,60 +1260,9 @@ public class CnpgServiceTests : IDisposable
             new DateTime(2026, 5, 17, 10, 30, 0, DateTimeKind.Utc));
 
         string clusterManifest = appliedManifests.First(m => m.Contains("restored-metrics-pg") && m.Contains("kind: Cluster"));
-        clusterManifest.Should().Contain("enablePodMonitor: true");
+        clusterManifest.Should().Contain("  monitoring:\n    enablePodMonitor: false");
     }
 
-    [Fact]
-    public async Task ReapplyClusterSpecAsync_PushesTheClusterResourceWithMonitoringEnabled()
-    {
-        // The recovery path for databases created before the PodMonitor opt-in existed: rebuild
-        // the manifest from the stored settings and apply it, changing nothing else.
-        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-
-        CnpgCluster existing = new()
-        {
-            Id = Guid.NewGuid(),
-            TenantId = tenant.Id,
-            KubernetesClusterId = cluster.Id,
-            Name = "legacy-pg",
-            Namespace = "databases",
-            PostgresVersion = "18",
-            Instances = 2,
-            StorageSize = "10Gi",
-            StorageLinkId = storageLink.Id,
-            Status = CnpgClusterStatus.Running
-        };
-        db.CnpgClusters.Add(existing);
-        await db.SaveChangesAsync();
-
-        List<string> appliedManifests = [];
-        k8sFactory.Setup(f => f.ApplyManifestAsync(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .ReturnsAsync(string.Empty);
-
-        await sut.ReapplyClusterSpecAsync(tenant.Id, existing.Id);
-
-        appliedManifests.Should().ContainSingle();
-        appliedManifests[0].Should().Contain("kind: Cluster");
-        appliedManifests[0].Should().Contain("name: legacy-pg");
-        appliedManifests[0].Should().Contain("enablePodMonitor: true");
-        // Rebuilt from the same stored settings — the diff the operator acknowledges should be
-        // the monitoring block, not a resize or a version change.
-        appliedManifests[0].Should().Contain("instances: 2");
-        appliedManifests[0].Should().Contain("size: 10Gi");
-        appliedManifests[0].Should().Contain("postgresql:18");
-    }
-
-    [Fact]
-    public async Task ReapplyClusterSpecAsync_RejectsAnUnknownCluster()
-    {
-        (Tenant tenant, KubernetesCluster _, StorageLink _) = await SeedTenantWithClusterAsync();
-
-        Func<Task> act = () => sut.ReapplyClusterSpecAsync(tenant.Id, Guid.NewGuid());
-
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
-    }
     // ──────── Tenancy of the binding pairing ────────
 
     /// <summary>
