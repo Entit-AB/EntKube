@@ -658,9 +658,7 @@ public static class YamlFormMerger
         }
         if (!TryGetValue(data!, "routes", out _))
         {
-            YamlMappingNode routes = GetOrCreateMapping(data!, "routes");
-            SetScalar(routes, "unmatched", "low-cardinality");
-            SetScalar(routes, "max_path_segment_cardinality", "10");
+            AddObiRouteCardinalityCap(GetOrCreateMapping(data!, "routes"));
             changed = true;
         }
 
@@ -726,7 +724,12 @@ public static class YamlFormMerger
     ///   <c>features</c> is deprecated in v1.0.0). <c>application</c>, the default, also emits the
     ///   request and response body-size histograms.</item>
     /// <item><c>routes.ignored_patterns</c> with <c>ignore_mode: metrics</c>, so probes and scrapes stay
-    ///   out of the metrics and still appear in traces as before.</item>
+    ///   out of the metrics and still appear in traces as before. A <c>routes</c> block this step
+    ///   creates also gets the cardinality cap the bounds would have written.</item>
+    /// <item><c>serviceMonitor.additionalLabels.release</c> = <paramref name="prometheusReleaseName"/>:
+    ///   the only label a Prometheus still selecting with <c>serviceMonitorSelectorNilUsesHelmValues:
+    ///   true</c> matches. Required rather than optional because forgetting it is silent — an endpoint
+    ///   nothing scrapes, which is the one state this method exists to prevent.</item>
     /// </list>
     ///
     /// <para>Only a Config v1 document is edited — non-empty <c>config.data</c> without
@@ -734,7 +737,7 @@ public static class YamlFormMerger
     /// <c>config.data</c> where there is none would switch the chart from its v2 defaults to its v1
     /// ones, a reinstall with different settings rather than a fill-in.</para>
     /// </summary>
-    public static string EnableObiPrometheusMetrics(string yaml)
+    public static string EnableObiPrometheusMetrics(string yaml, string prometheusReleaseName)
     {
         if (string.IsNullOrWhiteSpace(yaml)) return yaml;
 
@@ -778,7 +781,15 @@ public static class YamlFormMerger
             changed = true;
         }
 
+        // ⚠️ The route cap goes in WITH the block when this step is the one creating it. The bounds
+        // (which run after this, see ComponentLifecycleService) write the cap only where `routes` is
+        // absent — so on an install older than both, a block holding just ignored_patterns made the
+        // bounds stand down, and OBI served RED metrics per route with the heuristic decorator alone:
+        // the unbounded series this endpoint is most expensive for. A block that already exists is
+        // the operator's or the bounds' and keeps whatever cap it has (or has not), as before.
+        bool creatingRoutes = !TryGetMapping(data!, "routes", out _);
         YamlMappingNode routes = GetOrCreateMapping(data!, "routes", ref changed);
+        if (creatingRoutes) AddObiRouteCardinalityCap(routes);
         if (!TryGetValue(routes, "ignored_patterns", out _))
         {
             routes.Children.Add(new YamlScalarNode("ignored_patterns"), Sequence([.. ObiIgnoredRoutes]));
@@ -804,7 +815,34 @@ public static class YamlFormMerger
             changed = true;
         }
 
+        // The label the OLDEST Prometheus installs select monitors by. A kube-prometheus-stack
+        // registered before 2026-08-20 and not re-applied since still runs with
+        // serviceMonitorSelectorNilUsesHelmValues: true, so its selector is `release: <its release>`
+        // and a ServiceMonitor carrying only the chart's own labels is never scraped — the endpoint
+        // is open, nothing reads it, and OBI (which evicts expired series only inside a scrape) grows.
+        // Where the flags are false the selector is {} and this label changes nothing.
+        if (!string.IsNullOrWhiteSpace(prometheusReleaseName))
+        {
+            YamlMappingNode labels = GetOrCreateMapping(monitor, "additionalLabels", ref changed);
+            if (!TryGetValue(labels, "release", out _))
+            {
+                SetScalar(labels, "release", prometheusReleaseName.Trim());
+                changed = true;
+            }
+        }
+
         return changed ? SerializeToYaml(root) : yaml;
+    }
+
+    /// <summary>
+    /// OBI's route-cardinality cap, written wherever EntKube creates a <c>routes</c> block. One place
+    /// for both steps that can create it (<see cref="EnsureObiResourceBounds"/> and
+    /// <see cref="EnableObiPrometheusMetrics"/>), so the block never exists in a shape without it.
+    /// </summary>
+    private static void AddObiRouteCardinalityCap(YamlMappingNode routes)
+    {
+        SetScalar(routes, "unmatched", "low-cardinality");
+        SetScalar(routes, "max_path_segment_cardinality", "10");
     }
 
     /// <summary>
@@ -820,6 +858,11 @@ public static class YamlFormMerger
     ///
     /// <para>An absent port is written as 0 too: in a v1 document the chart's own default (9090)
     /// survives the merge otherwise.</para>
+    ///
+    /// <para><c>serviceMonitor.additionalLabels</c> is left alone. The <c>release</c> label the
+    /// enabling step adds lives only in the apply-time copy — the stored values never carry it — so
+    /// there is nothing of EntKube's here to take back, and a label on a ServiceMonitor the chart does
+    /// not render is inert. Anything found there is the operator's.</para>
     /// </summary>
     public static string KeepObiPrometheusMetricsOff(string yaml)
     {

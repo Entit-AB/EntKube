@@ -20,6 +20,22 @@ public class ObiPrometheusMetricsTests
 {
     private static string CatalogDefaults => ComponentCatalog.GetByKey("otel-ebpf")!.DefaultValues!;
 
+    private const string PrometheusRelease = "kube-prometheus-stack";
+
+    private static string Enable(string yaml, string prometheusRelease = PrometheusRelease)
+        => YamlFormMerger.EnableObiPrometheusMetrics(yaml, prometheusRelease);
+
+    /// <summary>The two steps in the order the apply hook runs them: metrics first, then the bounds.</summary>
+    private static string ApplyHook(string yaml) => YamlFormMerger.EnsureObiResourceBounds(Enable(yaml));
+
+    /// <summary>The shape of an install older than both steps: config.data with no routes, no exporter.</summary>
+    private const string OldestInstall = """
+        config:
+          data:
+            otel_traces_export:
+              endpoint: http://otel-collector.monitoring:4317
+        """;
+
     private static YamlMappingNode Root(string yaml)
     {
         YamlStream stream = new();
@@ -50,7 +66,7 @@ public class ObiPrometheusMetricsTests
     [Fact]
     public void With_prometheus_the_catalog_defaults_render_a_scrapable_endpoint()
     {
-        string values = YamlFormMerger.EnableObiPrometheusMetrics(CatalogDefaults);
+        string values = Enable(CatalogDefaults);
 
         Scalar(values, "config", "data", "prometheus_export", "port").Should().Be("9090");
 
@@ -85,7 +101,7 @@ public class ObiPrometheusMetricsTests
     [Fact]
     public void The_series_are_relabelled_onto_the_workload_they_measure()
     {
-        string values = YamlFormMerger.EnableObiPrometheusMetrics(CatalogDefaults);
+        string values = Enable(CatalogDefaults);
 
         YamlSequenceNode relabelings = (YamlSequenceNode)At(
             values, "serviceMonitor", "metrics", "endpoint", "metricRelabelings")!;
@@ -134,7 +150,7 @@ public class ObiPrometheusMetricsTests
                       sourceLabels: [url_path]
             """;
 
-        string values = YamlFormMerger.EnableObiPrometheusMetrics(operatorValues);
+        string values = Enable(operatorValues);
 
         Scalar(values, "config", "data", "prometheus_export", "port").Should().Be("9400",
             "a port other than 9090 is someone moving off a port taken on the host network");
@@ -170,7 +186,7 @@ public class ObiPrometheusMetricsTests
               enabled: false
             """;
 
-        string values = YamlFormMerger.EnableObiPrometheusMetrics(old);
+        string values = Enable(old);
 
         Scalar(values, "config", "data", "prometheus_export", "port").Should().Be(YamlFormMerger.ObiPrometheusPort);
         Scalar(values, "service", "enabled").Should().Be("true");
@@ -187,8 +203,134 @@ public class ObiPrometheusMetricsTests
                   endpoint: http://otel-collector.monitoring:4317
             """;
 
-        Scalar(YamlFormMerger.EnableObiPrometheusMetrics(old), "config", "data", "prometheus_export", "port")
+        Scalar(Enable(old), "config", "data", "prometheus_export", "port")
             .Should().Be("9090", "an absent port is no one's decision — the chart's own default is 9090 too");
+    }
+
+    /// <summary>
+    /// ⚠️ The trap was the ORDER. The bounds write the route cap only where <c>routes</c> is absent, and
+    /// the metrics step runs first and creates the block for its ignored patterns — so on the oldest
+    /// installs the bounds saw a block, stood down, and RED metrics were served per route uncapped.
+    /// Each step alone looked right; only the two together, in this order, showed it.
+    /// </summary>
+    [Fact]
+    public void Through_the_hooks_order_the_oldest_install_gets_the_route_cap_with_its_metrics()
+    {
+        string values = ApplyHook(OldestInstall);
+
+        Scalar(values, "config", "data", "prometheus_export", "port").Should().Be("9090");
+        Items(values, "config", "data", "routes", "ignored_patterns")
+            .Should().Equal("/metrics", "/healthz", "/readyz", "/livez");
+        Scalar(values, "config", "data", "routes", "ignore_mode").Should().Be("metrics");
+        Scalar(values, "config", "data", "routes", "unmatched").Should().Be("low-cardinality",
+            "without it the heuristic decorator keeps every directory-shaped path as its own series");
+        Scalar(values, "config", "data", "routes", "max_path_segment_cardinality").Should().Be("10");
+    }
+
+    [Fact]
+    public void Through_the_hooks_order_an_operators_routes_are_never_overwritten()
+    {
+        const string operatorValues = """
+            config:
+              data:
+                routes:
+                  unmatched: wildcard
+                  max_path_segment_cardinality: 50
+                  ignored_patterns: [/ping]
+                  ignore_mode: all
+            """;
+
+        string values = ApplyHook(operatorValues);
+
+        Scalar(values, "config", "data", "routes", "unmatched").Should().Be("wildcard");
+        Scalar(values, "config", "data", "routes", "max_path_segment_cardinality").Should().Be("50");
+        Items(values, "config", "data", "routes", "ignored_patterns").Should().Equal("/ping");
+        Scalar(values, "config", "data", "routes", "ignore_mode").Should().Be("all");
+    }
+
+    /// <summary>
+    /// An operator's routes block without the cap stays without it — the same "present is a decision"
+    /// rule the bounds have always applied. Only a block EntKube creates gets the cap.
+    /// </summary>
+    [Fact]
+    public void An_operators_routes_block_without_the_cap_is_not_given_one()
+    {
+        const string operatorValues = """
+            config:
+              data:
+                routes:
+                  patterns: ["/api/{id}"]
+            """;
+
+        string values = ApplyHook(operatorValues);
+
+        At(values, "config", "data", "routes", "unmatched").Should().BeNull();
+        At(values, "config", "data", "routes", "max_path_segment_cardinality").Should().BeNull();
+    }
+
+    [Fact]
+    public void Through_the_hooks_order_a_full_routes_block_is_unchanged()
+    {
+        string full = ApplyHook(OldestInstall);
+
+        ApplyHook(full).Should().Be(full,
+            "a document already carrying every routes key has nothing left to fill in");
+    }
+
+    // ──────── The release label ────────
+
+    /// <summary>
+    /// A kube-prometheus-stack registered before 2026-08-20 and not re-applied still selects
+    /// ServiceMonitors by <c>release: &lt;its release&gt;</c>; one carrying only the chart's labels is
+    /// never scraped, and OBI's series are evicted only inside a scrape.
+    /// </summary>
+    [Fact]
+    public void The_monitor_carries_the_release_label_an_old_prometheus_selects_by()
+    {
+        string values = Enable(CatalogDefaults, "prom-main");
+
+        Scalar(values, "serviceMonitor", "additionalLabels", "release").Should().Be("prom-main");
+    }
+
+    [Fact]
+    public void An_operators_own_release_label_is_kept()
+    {
+        string stored = CatalogDefaults + """
+
+            serviceMonitor:
+              additionalLabels:
+                release: monitoring
+                team: platform
+            """;
+
+        string values = Enable(stored, "kube-prometheus-stack");
+
+        Scalar(values, "serviceMonitor", "additionalLabels", "release").Should().Be("monitoring",
+            "someone who set the label knows which Prometheus selects it");
+        Scalar(values, "serviceMonitor", "additionalLabels", "team").Should().Be("platform");
+    }
+
+    [Fact]
+    public void Labelling_is_idempotent()
+    {
+        string once = Enable(CatalogDefaults, "prom-main");
+
+        Enable(once, "prom-main").Should().Be(once);
+    }
+
+    [Fact]
+    public void Without_prometheus_the_monitors_labels_are_left_alone()
+    {
+        string stored = CatalogDefaults + """
+
+            serviceMonitor:
+              additionalLabels:
+                release: kube-prometheus-stack
+            """;
+
+        Scalar(YamlFormMerger.KeepObiPrometheusMetricsOff(stored), "serviceMonitor", "additionalLabels", "release")
+            .Should().Be("kube-prometheus-stack",
+                "the label is inert on a monitor that is not rendered, and EntKube never stored one to take back");
     }
 
     /// <summary>
@@ -201,15 +343,15 @@ public class ObiPrometheusMetricsTests
     {
         string stored = CatalogDefaults + "\nserviceMonitor:\n  enabled: false\n";
 
-        Scalar(YamlFormMerger.EnableObiPrometheusMetrics(stored), "serviceMonitor", "enabled").Should().Be("true");
+        Scalar(Enable(stored), "serviceMonitor", "enabled").Should().Be("true");
     }
 
     [Fact]
     public void Enabling_is_idempotent()
     {
-        string once = YamlFormMerger.EnableObiPrometheusMetrics(CatalogDefaults);
+        string once = Enable(CatalogDefaults);
 
-        YamlFormMerger.EnableObiPrometheusMetrics(once).Should().Be(once,
+        Enable(once).Should().Be(once,
             "a re-serialised document is a helm upgrade that exists only because of the rewrite");
     }
 
@@ -222,7 +364,7 @@ public class ObiPrometheusMetricsTests
     {
         // Writing config.data where it is empty would flip the chart from its Config v2 defaults to its
         // v1 ones — a reinstall with different settings — and a v2 document has none of these keys.
-        YamlFormMerger.EnableObiPrometheusMetrics(yaml).Should().Be(yaml);
+        Enable(yaml).Should().Be(yaml);
     }
 
     // ──────── Without Prometheus ────────
@@ -378,12 +520,14 @@ public class ObiPrometheusMetricsApplyTests : IDisposable
         return obi.Id;
     }
 
-    private void AddPrometheus(Guid cluster, ComponentStatus status)
+    private void AddPrometheus(
+        Guid cluster, ComponentStatus status, string name = "kube-prometheus-stack", string? releaseName = null)
     {
         db.ClusterComponents.Add(new ClusterComponent
         {
-            Id = Guid.NewGuid(), ClusterId = cluster, Name = "kube-prometheus-stack", ComponentType = "HelmChart",
+            Id = Guid.NewGuid(), ClusterId = cluster, Name = name, ComponentType = "HelmChart",
             HelmChartName = "kube-prometheus-stack", Namespace = "monitoring", Status = status,
+            ReleaseName = releaseName,
         });
         db.SaveChanges();
     }
@@ -451,6 +595,36 @@ public class ObiPrometheusMetricsApplyTests : IDisposable
 
         Scalar(values, "config", "data", "prometheus_export", "port").Should().Be("9090");
         Scalar(values, "serviceMonitor", "enabled").Should().Be("true");
+
+        // And the route cap with them: the metrics step creates `routes` for its ignored patterns, and
+        // the bounds after it fill the cap only where `routes` is absent — so the cap has to come with
+        // the block, or this install serves RED metrics with unbounded route cardinality.
+        Scalar(values, "config", "data", "routes", "ignore_mode").Should().Be("metrics",
+            "only written alongside the ignored patterns, so this also says they are there");
+        Scalar(values, "config", "data", "routes", "unmatched").Should().Be("low-cardinality");
+        Scalar(values, "config", "data", "routes", "max_path_segment_cardinality").Should().Be("10");
+    }
+
+    [Fact]
+    public async Task The_monitor_is_labelled_with_the_release_prometheus_runs_under()
+    {
+        AddPrometheus(clusterId, ComponentStatus.Installed, name: "monitoring", releaseName: "prom-main");
+        Guid obi = AddObi(ComponentCatalog.GetByKey("otel-ebpf")!.DefaultValues!);
+
+        Scalar(await RenderAsync(obi), "serviceMonitor", "additionalLabels", "release").Should().Be("prom-main");
+    }
+
+    /// <summary>
+    /// A component with no stored ReleaseName was installed as <c>ReleaseName ?? Name</c> — its Name.
+    /// The catalog's default release would be the wrong label for any Prometheus not named that.
+    /// </summary>
+    [Fact]
+    public async Task A_prometheus_with_no_stored_release_is_labelled_by_the_name_it_was_installed_under()
+    {
+        AddPrometheus(clusterId, ComponentStatus.Installed, name: "monitoring-stack", releaseName: null);
+        Guid obi = AddObi(ComponentCatalog.GetByKey("otel-ebpf")!.DefaultValues!);
+
+        Scalar(await RenderAsync(obi), "serviceMonitor", "additionalLabels", "release").Should().Be("monitoring-stack");
     }
 
     [Fact]
