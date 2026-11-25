@@ -28,8 +28,10 @@ namespace EntKube.Web.Services.Telemetry;
 /// <para>A metric is a counter (needing <c>rate()</c>) when its name ends in <c>_total</c> or is a
 /// histogram's <c>_bucket</c> — see <see cref="IsCounter"/>. <c>_count</c> and <c>_sum</c> are
 /// counters only when they belong to a histogram or summary, which the name alone cannot say:
-/// plenty of gauges end in <c>_count</c>. <see cref="HistogramFamily"/> and
-/// <see cref="FamilyMemberSelectors"/> are how the caller asks Prometheus.</para>
+/// plenty of gauges end in <c>_count</c>. <see cref="HistogramFamily"/>,
+/// <see cref="FamilyMemberSelectors"/> and <see cref="ProvesCumulativeFamily"/> are how the caller
+/// asks Prometheus — a <c>_bucket</c>, a <c>quantile</c>, or the <c>_sum</c>/<c>_count</c> pair
+/// in scope.</para>
 /// </summary>
 public static class PromMetricsQueryBuilder
 {
@@ -67,9 +69,19 @@ public static class PromMetricsQueryBuilder
     }
 
     /// <summary>
-    /// Selectors for the series that would prove <paramref name="family"/> is a histogram (a
-    /// <c>_bucket</c> series) or a summary (the bare name with a <c>quantile</c>), within the
-    /// explorer's scope — so the check sees only what the explorer itself may see.
+    /// Selectors for every series that could prove <paramref name="family"/> is a histogram or a
+    /// summary, within the explorer's scope — so the check sees only what the explorer itself may
+    /// see. Per scope spelling: the <c>_bucket</c> series, the bare name with a <c>quantile</c>,
+    /// and the <c>_sum</c> and <c>_count</c> pair. One label-values lookup answers all of them;
+    /// <see cref="ProvesCumulativeFamily"/> reads the names it returns.
+    ///
+    /// <para>⚠️ <b>Buckets and quantiles alone miss the commonest summary.</b> A summary with no
+    /// quantile objectives — the default in Python's prometheus_client, client_golang v1+ and
+    /// prometheus-net — exposes only <c>foo_count</c> and <c>foo_sum</c>. Asking for buckets or
+    /// quantiles found neither, so its <c>_count</c> was summed as a gauge and charted as a line
+    /// that only ever grows. The <c>_sum</c>/<c>_count</c> pair is what every histogram and every
+    /// summary has in common, and what a gauge that merely ends in <c>_count</c>
+    /// (<c>agroal_active_count</c>) does not.</para>
     /// </summary>
     public static IReadOnlyList<string> FamilyMemberSelectors(
         string family, IReadOnlyList<string>? namespaces, string? podPattern, string? service)
@@ -77,14 +89,34 @@ public static class PromMetricsQueryBuilder
         List<List<string>> scopes = ScopeMatchers(namespaces, podPattern, service);
         if (scopes.Count == 0) scopes = [[]];
 
+        string f = Escape(family);
         List<string> selectors = [];
         foreach (List<string> scope in scopes)
         {
-            selectors.Add(Wrap([$"__name__=\"{Escape(family)}_bucket\"", .. scope]));
-            selectors.Add(Wrap([$"__name__=\"{Escape(family)}\"", "quantile!=\"\"", .. scope]));
+            selectors.Add(Wrap([$"__name__=\"{f}_bucket\"", .. scope]));
+            selectors.Add(Wrap([$"__name__=\"{f}\"", "quantile!=\"\"", .. scope]));
+            selectors.Add(Wrap([$"__name__=\"{f}_sum\"", .. scope]));
+            selectors.Add(Wrap([$"__name__=\"{f}_count\"", .. scope]));
         }
         return selectors;
     }
+
+    /// <summary>
+    /// Whether the metric names a <see cref="FamilyMemberSelectors"/> lookup returned prove
+    /// <paramref name="family"/> is a histogram or a summary — whose <c>_count</c> and <c>_sum</c>
+    /// are both cumulative counters: a <c>_bucket</c> series (histogram), the bare name (only the
+    /// <c>quantile</c> selector can return it: a summary with objectives), or <b>both</b>
+    /// <c>_sum</c> and <c>_count</c> (either kind, including a quantile-less summary).
+    ///
+    /// <para>The names are read, not counted: the lookup asks for the family's own <c>_count</c>
+    /// and <c>_sum</c>, so it always returns the very metric being charted, and "anything came
+    /// back" would rate every gauge ending in <c>_count</c>. One of the pair is not enough — that
+    /// one is the metric itself.</para>
+    /// </summary>
+    public static bool ProvesCumulativeFamily(string family, IReadOnlyCollection<string> names) =>
+        names.Contains($"{family}_bucket")
+        || names.Contains(family)
+        || (names.Contains($"{family}_sum") && names.Contains($"{family}_count"));
 
     public static string BreakdownLabel(string dimension) => BreakdownLabels(dimension).Otel;
 
