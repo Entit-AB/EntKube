@@ -1413,6 +1413,33 @@ public class PrometheusService(
     }
 
     /// <summary>
+    /// What Prometheus answers when asked which targets it is scraping, as the JSON it sent — or an
+    /// exception, when it did not answer.
+    ///
+    /// <para><see cref="GetScrapeTargetsAsync"/> is for showing, and turns an answer it cannot read
+    /// into an empty list. This is for deciding: the monitor reconcile creates a monitor for whatever
+    /// is in nobody's list, so an answer that did not arrive must not look like a list with nothing
+    /// in it. Reading the JSON is the caller's, for the same reason.</para>
+    /// </summary>
+    public async Task<string> ReadActiveTargetsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        if (info is null) throw new InvalidOperationException(error);
+
+        KubernetesOperationResult<string> answer = await WithServiceAsync<string>(
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            (http, baseUrl, token) => http.GetStringAsync($"{baseUrl}/api/v1/targets?state=active", token),
+            $"active targets for cluster {clusterId}", ct, probeHealthEndpoint: false);
+
+        ct.ThrowIfCancellationRequested();
+
+        return answer.IsSuccess
+            ? answer.Data!
+            : throw new InvalidOperationException($"Prometheus could not be asked what it scrapes: {answer.Error}");
+    }
+
+    /// <summary>
     /// Retrieves all alerting rules from Prometheus with their current evaluation state.
     /// </summary>
     public async Task<KubernetesOperationResult<List<AlertRule>>> GetAlertRulesAsync(
