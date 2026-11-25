@@ -217,11 +217,21 @@ public class RabbitMQMetricsSummary
     public string ClusterName { get; set; } = "";
 
     /// <summary>
-    /// False when Prometheus holds no rabbitmq_* series for this cluster at all — a broker that
-    /// is not being scraped, which the all-zeros card would otherwise render identically to a
-    /// perfectly healthy idle one.
+    /// False when Prometheus holds no <c>rabbitmq_identity_info</c> for this broker: it is not
+    /// being scraped, which the all-zeros card would otherwise render identically to a perfectly
+    /// healthy idle one. A scraped broker always exports its identity, idle or not.
+    ///
+    /// <para>Not "any query answered". The delivery and unroutable rates end in
+    /// <c>or vector(0)</c> and so answer for a broker Prometheus has never heard of: an unscraped
+    /// broker read as scraped, all zeros and "Healthy", and the way to fix it stayed hidden.</para>
     /// </summary>
     public bool HasData { get; set; }
+
+    /// <summary>
+    /// Why some of the figures are missing, or null when every query was answered. A query
+    /// Prometheus refused reads as zero below, so a broker with one of these is not "Healthy".
+    /// </summary>
+    public string? UnansweredQueries { get; set; }
 
     public int Nodes { get; set; }
 
@@ -293,6 +303,17 @@ public class RabbitMQMetricsSummary
 }
 
 /// <summary>
+/// Which broker's series to read: its name is unique only within its namespace.
+/// </summary>
+/// <param name="Name">The broker's name, matched against what RabbitMQ reports as <c>rabbitmq_cluster</c>.</param>
+/// <param name="Namespace">The namespace it runs in.</param>
+/// <param name="IsOperatorManaged">
+/// False for a broker adopted from a plain StatefulSet, which may be scraped by a job that adds no
+/// namespace label. See <see cref="PrometheusService.RabbitMQIdentity"/>.
+/// </param>
+public sealed record RabbitMQBrokerIdentity(string Name, string Namespace, bool IsOperatorManaged);
+
+/// <summary>
 /// One RabbitMQ node's resource usage against the limits that trigger its alarms.
 ///
 /// RabbitMQ blocks publishers when a node crosses its memory high watermark or drops below the
@@ -309,12 +330,23 @@ public class RabbitMQNodeMetrics
     public double DiskFreeLimitBytes { get; set; }
     public double OpenFds { get; set; }
     public double MaxFds { get; set; }
-    public double OpenSockets { get; set; }
-    public double MaxSockets { get; set; }
+
+    /// <summary>
+    /// TCP sockets in use and allowed. Null on RabbitMQ 4, which stopped exporting both gauges
+    /// (<c>rabbitmq_process_open_tcp_sockets</c>, <c>rabbitmq_process_max_tcp_sockets</c>). Read
+    /// as 0 they drew a meter at "0 / 0" that no amount of load would ever move.
+    /// </summary>
+    public double? OpenSockets { get; set; }
+
+    /// <inheritdoc cref="OpenSockets"/>
+    public double? MaxSockets { get; set; }
 
     public double MemoryUsedPercent => MemoryLimitBytes > 0 ? MemoryUsedBytes / MemoryLimitBytes * 100 : 0;
     public double FdUsedPercent     => MaxFds > 0 ? OpenFds / MaxFds * 100 : 0;
-    public double SocketUsedPercent => MaxSockets > 0 ? OpenSockets / MaxSockets * 100 : 0;
+    public double SocketUsedPercent => ReportsSockets && MaxSockets > 0 ? OpenSockets!.Value / MaxSockets!.Value * 100 : 0;
+
+    /// <summary>Whether this node exports its socket gauges at all. A cluster halfway from 3.13 to 4 has nodes of both kinds.</summary>
+    public bool ReportsSockets => OpenSockets is not null && MaxSockets is not null;
 
     /// <summary>Memory alarm: usage has reached the high watermark and publishers are blocked.</summary>
     public bool MemoryAlarm => MemoryLimitBytes > 0 && MemoryUsedBytes >= MemoryLimitBytes;
@@ -398,26 +430,6 @@ public class KeycloakMetricsSummary
 
     public bool DbPoolSaturated => DbAwaitingThreads > 0;
     public bool HeapPressure    => HeapUsedPercent >= 90 || GcPauseSecondsPerSec >= 0.1;
-}
-
-/// <summary>
-/// Why a workload's metrics are missing, told from what is actually in the cluster: whether a
-/// ServiceMonitor exists, and whether Prometheus's selector accepts it.
-/// </summary>
-public class ScrapeDiagnosis
-{
-    public bool MonitorExists { get; init; }
-
-    /// <summary>Labels on the ServiceMonitor — what Prometheus's selector is matched against.</summary>
-    public Dictionary<string, string> MonitorLabels { get; init; } = [];
-
-    /// <summary>matchLabels of the Prometheus resource's serviceMonitorSelector.</summary>
-    public Dictionary<string, string> PrometheusSelector { get; init; } = [];
-
-    public bool SelectorAcceptsMonitor { get; init; }
-
-    public List<string> Findings { get; init; } = [];
-    public string? Remedy { get; init; }
 }
 
 /// <summary>One row of the Keycloak failing-event breakdown.</summary>
@@ -1198,7 +1210,9 @@ public class PrometheusService(
         $"max({CnpgSelector("cnpg_pg_replication_lag", cnpgNamespace, cnpgClusterName)})",
         $"sum({CnpgSelector("cnpg_backends_total", cnpgNamespace, cnpgClusterName)})",
         $"sum({CnpgSelector("cnpg_backends_total", cnpgNamespace, cnpgClusterName, "state=\"active\"")})",
-        CnpgSelector("cnpg_pg_database_size_bytes", cnpgNamespace, cnpgClusterName, "datname!=\"\""));
+        // Every instance exports the size of every database, so the bare selector listed each
+        // database once per instance: three times in a three-instance cluster.
+        $"max by (datname) ({CnpgSelector("cnpg_pg_database_size_bytes", cnpgNamespace, cnpgClusterName, "datname!=\"\"")})");
 
     /// <summary>
     /// Builds the PromQL selector for one CNPG metric, scoped to a single database cluster.
@@ -1232,166 +1246,179 @@ public class PrometheusService(
     }
 
     /// <summary>
-    /// Works out why a CNPG database produces no metrics, by comparing the two halves that have
-    /// to line up: the PodMonitor CNPG creates for the database, and the selector the Prometheus
-    /// resource uses to decide which PodMonitors it will scrape.
-    ///
-    /// Both halves are read from the cluster, so this reports what is actually there rather than
-    /// what the configuration implies.
+    /// Works out why a CNPG database produces no metrics: whether a PodMonitor selects its
+    /// instance pods, and whether Prometheus reads that PodMonitor.
+    /// See <see cref="ScrapeDiagnostician"/> for what it says and why.
     /// </summary>
-    public async Task<KubernetesOperationResult<CnpgScrapeDiagnosis>> DiagnoseCnpgScrapeAsync(
+    public Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseCnpgScrapeAsync(
         Guid tenantId, Guid clusterId, string cnpgClusterName, string cnpgNamespace,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        DiagnoseScrapeAsync(tenantId, clusterId, MonitoredWorkload.Cnpg(cnpgClusterName, cnpgNamespace), ct);
+
+    private async Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseScrapeAsync(
+        Guid tenantId, Guid clusterId, MonitoredWorkload workload, CancellationToken ct)
     {
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
-        if (info is null) return KubernetesOperationResult<CnpgScrapeDiagnosis>.Failure(error!);
+        if (info is null) return KubernetesOperationResult<ScrapeDiagnosis>.Failure(error!);
 
         try
         {
-            Kubernetes k8s = info.Cluster.GetPooledSdkClient();
+            ScrapeEvidence seen = await ReadScrapeEvidenceAsync(
+                info.Cluster.GetPooledSdkClient(), info.Config, workload, ct);
 
-            JsonNode? podMonitor = await FindCnpgPodMonitorAsync(k8s, cnpgNamespace, cnpgClusterName, ct);
-            JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
-
-            Dictionary<string, string> pmLabels = ReadLabels(podMonitor?["metadata"]?["labels"]);
-            Dictionary<string, string> selector = ReadLabels(prometheus?["spec"]?["podMonitorSelector"]?["matchLabels"]);
-
-            // An empty (but present) podMonitorSelector means "every PodMonitor"; a selector with
-            // matchLabels means "only the ones carrying these labels", which is what the
-            // kube-prometheus-stack default produces via its release label.
-            bool selectorPresent = prometheus?["spec"]?["podMonitorSelector"] is not null;
-            bool selectsAll = !selectorPresent || selector.Count == 0;
-            bool matches = selectsAll || selector.All(kv =>
-                pmLabels.TryGetValue(kv.Key, out string? v) && v == kv.Value);
-
-            List<string> findings = [];
-            string? remedy = null;
-
-            if (podMonitor is null)
-            {
-                findings.Add(
-                    $"No PodMonitor for '{cnpgClusterName}' exists in namespace {cnpgNamespace}. " +
-                    "CNPG creates one only when the Cluster resource sets spec.monitoring.enablePodMonitor.");
-                remedy = "Use \"Enable metrics\" above, then give the operator a few seconds to reconcile.";
-            }
-            else if (!matches)
-            {
-                string want = string.Join(", ", selector.Select(kv => $"{kv.Key}={kv.Value}"));
-                string have = pmLabels.Count == 0 ? "(no labels)" : string.Join(", ", pmLabels.Select(kv => $"{kv.Key}={kv.Value}"));
-                findings.Add($"The PodMonitor exists but Prometheus does not select it: it scrapes only PodMonitors labelled {want}, and this one has {have}.");
-                remedy =
-                    "Add these to the kube-prometheus-stack component's values (Cluster → Components → " +
-                    "kube-prometheus-stack → Values), then Save & Apply:\n" +
-                    "prometheus:\n  prometheusSpec:\n    podMonitorSelectorNilUsesHelmValues: false\n" +
-                    "    serviceMonitorSelectorNilUsesHelmValues: false";
-            }
-            else
-            {
-                findings.Add("The PodMonitor exists and Prometheus's selector accepts it.");
-                remedy =
-                    "Scraping should be running. If metrics are still missing, check the CNPG pods' " +
-                    "metrics port in Prometheus → Targets — a target listed as down points at the database, not the wiring.";
-            }
-
-            // A namespace selector that is absent (rather than empty) confines Prometheus to its
-            // own namespace, which no database namespace would ever satisfy.
-            bool nsSelectorPresent = prometheus?["spec"]?["podMonitorNamespaceSelector"] is not null;
-            if (podMonitor is not null && !nsSelectorPresent)
-            {
-                findings.Add(
-                    "Prometheus has no podMonitorNamespaceSelector, so it only looks in its own namespace — " +
-                    $"it will not see anything in {cnpgNamespace}.");
-            }
-
-            return KubernetesOperationResult<CnpgScrapeDiagnosis>.Success(new CnpgScrapeDiagnosis
-            {
-                PodMonitorExists = podMonitor is not null,
-                PodMonitorLabels = pmLabels,
-                PrometheusSelector = selector,
-                SelectorAcceptsPodMonitor = podMonitor is not null && matches,
-                Findings = findings,
-                Remedy = remedy,
-            });
+            return KubernetesOperationResult<ScrapeDiagnosis>.Success(
+                ScrapeDiagnostician.Diagnose(workload, seen));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "CNPG scrape diagnosis failed for {Cluster}", cnpgClusterName);
-            return KubernetesOperationResult<CnpgScrapeDiagnosis>.Failure(DescribeK8sError(ex));
+            logger.LogWarning(ex, "Scrape diagnosis failed for {Workload} in {Namespace}",
+                workload.Title, workload.Namespace);
+            return KubernetesOperationResult<ScrapeDiagnosis>.Failure(
+                ex is ScrapeReadException ? ex.Message : DescribeK8sError(ex));
         }
     }
 
     /// <summary>
-    /// CNPG names the PodMonitor after the Cluster, but a hand-written or relabelled one may not
-    /// follow that, so a name miss falls back to the label CNPG stamps on everything it owns.
+    /// Reads everything the diagnosis decides over. Any read that fails throws, naming what could
+    /// not be read. They used to be caught into an empty list, and a 403 on the monitors became
+    /// the definite finding "No PodMonitor exists" — with advice to create one.
     /// </summary>
-    private static async Task<JsonNode?> FindCnpgPodMonitorAsync(
-        Kubernetes k8s, string ns, string cnpgClusterName, CancellationToken ct)
+    private static async Task<ScrapeEvidence> ReadScrapeEvidenceAsync(
+        Kubernetes k8s, PrometheusConfig config, MonitoredWorkload workload, CancellationToken ct)
     {
-        JsonArray items = await ListCustomObjectsAsync(
-            k8s, "monitoring.coreos.com", "v1", ns, "podmonitors", ct);
+        MonitorType type = workload.Type;
 
-        foreach (JsonNode? item in items)
+        Task<List<JsonNode>?> monitors = ListMonitoringResourcesAsync(k8s, type.Plural, $"the {type.Kind}s", ct);
+        Task<List<JsonNode>?> prometheuses = ListMonitoringResourcesAsync(k8s, "prometheuses", "the Prometheus resource", ct);
+        Task<List<Dictionary<string, string>>> live = type == MonitorType.Pod
+            ? ReadPodLabelsAsync(k8s, workload, ct)
+            : ReadServiceLabelsAsync(k8s, workload, ct);
+
+        await Task.WhenAll(monitors, prometheuses, live);
+
+        // Only a selector that asks for namespace labels needs them; a kubeconfig that may not
+        // list namespaces still gets its answer on every other cluster.
+        Dictionary<string, Dictionary<string, string>> namespaceLabels = [];
+        if ((await prometheuses)?.Any(p => p["spec"]?[type.NamespaceSelector] is JsonObject { Count: > 0 }) == true)
         {
-            if (item?["metadata"]?["name"]?.GetValue<string>() == cnpgClusterName)
-                return item;
+            V1NamespaceList namespaces = await ReadAsync("the namespaces",
+                () => k8s.CoreV1.ListNamespaceAsync(cancellationToken: ct), ct);
+            namespaceLabels = namespaces.Items.ToDictionary(
+                n => n.Metadata.Name, n => LabelsOf(n.Metadata), StringComparer.Ordinal);
         }
 
-        foreach (JsonNode? item in items)
+        return new ScrapeEvidence
         {
-            string? owned = item?["spec"]?["selector"]?["matchLabels"]?["cnpg.io/cluster"]?.GetValue<string>();
-            if (owned == cnpgClusterName) return item;
-        }
-
-        return null;
+            Monitors = await monitors,
+            Prometheuses = await prometheuses,
+            NamespaceLabels = namespaceLabels,
+            Live = await live,
+            PrometheusNamespace = config.Namespace,
+            PrometheusService = config.ServiceName,
+        };
     }
 
-    private static async Task<JsonNode?> FindPrometheusResourceAsync(Kubernetes k8s, CancellationToken ct)
+    /// <summary>
+    /// Every object of one monitoring.coreos.com type, in all namespaces: a monitor may select
+    /// across namespaces, so the one that scrapes a workload need not be beside it. Null when the
+    /// cluster has no such type — the one failure (404 on the collection) that is an answer.
+    /// </summary>
+    private static async Task<List<JsonNode>?> ListMonitoringResourcesAsync(
+        Kubernetes k8s, string plural, string what, CancellationToken ct) =>
+        await ReadAsync(what, async () =>
+        {
+            try
+            {
+                object raw = await k8s.CustomObjects.ListCustomObjectForAllNamespacesAsync(
+                    "monitoring.coreos.com", "v1", plural, cancellationToken: ct);
+
+                return JsonNode.Parse(JsonSerializer.Serialize(raw))?["items"] is JsonArray items
+                    ? items.OfType<JsonNode>().ToList()
+                    : throw new FormatException("the answer holds no list");
+            }
+            catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+        }, ct);
+
+    private static async Task<List<Dictionary<string, string>>> ReadPodLabelsAsync(
+        Kubernetes k8s, MonitoredWorkload workload, CancellationToken ct)
+    {
+        V1PodList pods = await ReadAsync($"the pods in {workload.Namespace}",
+            () => k8s.CoreV1.ListNamespacedPodAsync(
+                workload.Namespace,
+                labelSelector: string.Join(",", workload.Labels.Select(l => $"{l.Key}={l.Value}")),
+                cancellationToken: ct), ct);
+
+        return [.. pods.Items.Select(p => LabelsOf(p.Metadata))];
+    }
+
+    /// <summary>
+    /// The workload's Services: those carrying its labels, or — where only its own chart knows the
+    /// labels — those that send traffic to its StatefulSet's pods.
+    /// </summary>
+    private static async Task<List<Dictionary<string, string>>> ReadServiceLabelsAsync(
+        Kubernetes k8s, MonitoredWorkload workload, CancellationToken ct)
+    {
+        V1ServiceList services = await ReadAsync($"the Services in {workload.Namespace}",
+            () => k8s.CoreV1.ListNamespacedServiceAsync(workload.Namespace, cancellationToken: ct), ct);
+
+        if (workload.StatefulSet is not { } statefulSet)
+        {
+            return [.. services.Items
+                .Select(s => LabelsOf(s.Metadata))
+                .Where(labels => workload.Labels.All(l => labels.GetValueOrDefault(l.Key) == l.Value))];
+        }
+
+        Dictionary<string, string>? podLabels = await ReadAsync($"StatefulSet {statefulSet}", async () =>
+        {
+            try
+            {
+                V1StatefulSet set = await k8s.AppsV1.ReadNamespacedStatefulSetAsync(
+                    statefulSet, workload.Namespace, cancellationToken: ct);
+                return LabelsOf(set.Spec?.Template?.Metadata);
+            }
+            catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+        }, ct);
+
+        return podLabels is null
+            ? []
+            : [.. services.Items
+                .Where(s => s.Spec?.Selector is { Count: > 0 } selector
+                            && selector.All(l => podLabels.GetValueOrDefault(l.Key) == l.Value))
+                .Select(s => LabelsOf(s.Metadata))];
+    }
+
+    private static Dictionary<string, string> LabelsOf(V1ObjectMeta? metadata) =>
+        metadata?.Labels is { } labels ? new(labels, StringComparer.Ordinal) : [];
+
+    private static async Task<T> ReadAsync<T>(string what, Func<Task<T>> read, CancellationToken ct)
     {
         try
         {
-            object raw = await k8s.CustomObjects.ListCustomObjectForAllNamespacesAsync(
-                "monitoring.coreos.com", "v1", "prometheuses", cancellationToken: ct);
-            JsonNode? root = JsonNode.Parse(JsonSerializer.Serialize(raw));
-            return (root?["items"] as JsonArray)?.FirstOrDefault();
+            return await read();
         }
-        catch
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            return null;   // no prometheus-operator CRDs — the caller reports what it can
+            throw new ScrapeReadException($"Could not read {what}: {DescribeK8sError(ex)}", ex);
         }
     }
 
-    private static async Task<JsonArray> ListCustomObjectsAsync(
-        Kubernetes k8s, string group, string version, string ns, string plural, CancellationToken ct)
-    {
-        try
-        {
-            object raw = await k8s.CustomObjects.ListNamespacedCustomObjectAsync(
-                group, version, ns, plural, cancellationToken: ct);
-            JsonNode? root = JsonNode.Parse(JsonSerializer.Serialize(raw));
-            return root?["items"] as JsonArray ?? [];
-        }
-        catch
-        {
-            return [];
-        }
-    }
-
-    private static Dictionary<string, string> ReadLabels(JsonNode? node)
-    {
-        Dictionary<string, string> result = new(StringComparer.Ordinal);
-        if (node is not JsonObject obj) return result;
-        foreach (KeyValuePair<string, JsonNode?> kv in obj)
-        {
-            if (kv.Value?.GetValue<string>() is { } value)
-                result[kv.Key] = value;
-        }
-        return result;
-    }
+    /// <summary>A part of the scrape path that could not be read, named. Not a finding about it.</summary>
+    private sealed class ScrapeReadException(string message, Exception inner) : Exception(message, inner);
 
     private static string DescribeK8sError(Exception ex) =>
-        ex is k8s.Autorest.HttpOperationException http && http.Response is not null
-            ? $"{http.Response.StatusCode}: {http.Message}"
-            : ex.Message;
+        ex switch
+        {
+            k8s.Autorest.HttpOperationException { Response: not null } http => $"{http.Response.StatusCode}: {http.Message}",
+            // Not the caller giving up — that propagates — but the HTTP client's own timeout.
+            OperationCanceledException => "the cluster did not answer in time.",
+            _ => ex.Message,
+        };
 
     /// <summary>
     /// Retrieves all active scrape targets from Prometheus with their health (up/down).
@@ -1462,7 +1489,7 @@ public class PrometheusService(
     /// Retrieves RabbitMQ metrics from Prometheus (via RabbitMQ Prometheus plugin).
     /// </summary>
     public async Task<KubernetesOperationResult<RabbitMQMetricsSummary>> GetRabbitMQMetricsAsync(
-        Guid tenantId, Guid clusterId, string rabbitMQName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, RabbitMQBrokerIdentity broker, CancellationToken ct = default)
     {
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<RabbitMQMetricsSummary>.Failure(error!);
@@ -1471,8 +1498,19 @@ public class PrometheusService(
             info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
+                Dictionary<string, InstantQueryOutcome> answers =
+                    await QueryManyReportingAsync(http, baseUrl, BuildRabbitMQQueries(broker), token);
+
+                // Whether the broker is scraped at all rests on this one query, so a query that
+                // failed must not read as "it is not". The others still fold: one metric the
+                // running broker does not export must not blank the rest.
+                if (answers["nodes"].Error is { } identityError)
+                    throw new InvalidOperationException(
+                        $"Whether this broker is scraped could not be read: {identityError}");
+
                 Dictionary<string, List<PrometheusMetricResult>> r =
-                    await QueryManyAsync(http, baseUrl, BuildRabbitMQQueries(rabbitMQName), token);
+                    answers.ToDictionary(a => a.Key, a => a.Value.Results);
+                List<string> refused = [.. answers.Values.Select(a => a.Error).OfType<string>()];
 
                 Dictionary<string, RabbitMQNodeMetrics> nodes = [];
                 void PerNode(string key, Action<RabbitMQNodeMetrics, double> assign)
@@ -1503,8 +1541,11 @@ public class PrometheusService(
 
                 return new RabbitMQMetricsSummary
                 {
-                    ClusterName             = rabbitMQName,
-                    HasData                 = r.Values.Any(v => v.Count > 0),
+                    ClusterName             = broker.Name,
+                    HasData                 = r["nodes"].Count > 0,
+                    UnansweredQueries       = refused.Count == 0
+                        ? null
+                        : $"{refused.Count} of {answers.Count} queries were not answered: {refused[0]}",
                     Nodes                   = (int)Scalar(r["nodes"]),
                     TotalMessages           = (long)Scalar(r["total"]),
                     ReadyMessages           = (long)Scalar(r["ready"]),
@@ -1526,7 +1567,7 @@ public class PrometheusService(
                     NodeMetrics             = [.. nodes.Values.OrderBy(n => n.Node)],
                 };
             },
-            $"RabbitMQ metrics for {rabbitMQName}", ct);
+            $"RabbitMQ metrics for {broker.Namespace}/{broker.Name}", ct);
     }
 
     /// <summary>
@@ -1540,31 +1581,31 @@ public class PrometheusService(
     /// that the counters for delivery, acknowledgement and routing failures live on the
     /// <c>channel</c>, not the queue; only publishes are counted on both.
     /// </summary>
-    public static Dictionary<string, string> BuildRabbitMQQueries(string rabbitMQName)
+    public static Dictionary<string, string> BuildRabbitMQQueries(RabbitMQBrokerIdentity broker)
     {
         // Identity is the only family carrying the cluster name, so it doubles as the node count.
-        string identity = RabbitMQIdentity(rabbitMQName);
+        string identity = RabbitMQIdentity(broker);
 
         return new Dictionary<string, string>
         {
             ["nodes"]       = $"sum({identity})",
-            ["total"]       = Agg("rabbitmq_queue_messages", rabbitMQName),
-            ["ready"]       = Agg("rabbitmq_queue_messages_ready", rabbitMQName),
-            ["unacked"]     = Agg("rabbitmq_queue_messages_unacked", rabbitMQName),
-            ["bytes"]       = Agg("rabbitmq_queue_messages_bytes", rabbitMQName),
-            ["connections"] = Agg("rabbitmq_connections", rabbitMQName),
-            ["channels"]    = Agg("rabbitmq_channels", rabbitMQName),
-            ["consumers"]   = Agg("rabbitmq_consumers", rabbitMQName),
-            ["queues"]      = Agg("rabbitmq_queues", rabbitMQName),
+            ["total"]       = Agg("rabbitmq_queue_messages", broker),
+            ["ready"]       = Agg("rabbitmq_queue_messages_ready", broker),
+            ["unacked"]     = Agg("rabbitmq_queue_messages_unacked", broker),
+            ["bytes"]       = Agg("rabbitmq_queue_messages_bytes", broker),
+            ["connections"] = Agg("rabbitmq_connections", broker),
+            ["channels"]    = Agg("rabbitmq_channels", broker),
+            ["consumers"]   = Agg("rabbitmq_consumers", broker),
+            ["queues"]      = Agg("rabbitmq_queues", broker),
 
-            ["publish"]     = Rate("rabbitmq_channel_messages_published_total", rabbitMQName),
+            ["publish"]     = Rate("rabbitmq_channel_messages_published_total", broker),
 
             // Delivery is split by acknowledgement mode, and the two counters are disjoint:
             // "_delivered_total" counts only auto-ack deliveries, "_delivered_ack_total" only
             // manual-ack ones. Querying just the former reports zero for every manual-ack
             // consumer, which is the normal case. basic.get is included so polling consumers
             // are not invisible either.
-            ["deliver"]     = RateSum(rabbitMQName,
+            ["deliver"]     = RateSum(broker,
                                   "rabbitmq_channel_messages_delivered_ack_total",
                                   "rabbitmq_channel_messages_delivered_total",
                                   "rabbitmq_channel_get_ack_total",
@@ -1572,37 +1613,37 @@ public class PrometheusService(
 
             // Only manual-ack deliveries can be acknowledged, so this is the half that the ack
             // rate is comparable with — auto-ack traffic never produces an ack.
-            ["deliverAck"]  = RateSum(rabbitMQName,
+            ["deliverAck"]  = RateSum(broker,
                                   "rabbitmq_channel_messages_delivered_ack_total",
                                   "rabbitmq_channel_get_ack_total"),
 
-            ["ack"]         = Rate("rabbitmq_channel_messages_acked_total", rabbitMQName),
-            ["redeliver"]   = Rate("rabbitmq_channel_messages_redelivered_total", rabbitMQName),
+            ["ack"]         = Rate("rabbitmq_channel_messages_acked_total", broker),
+            ["redeliver"]   = Rate("rabbitmq_channel_messages_redelivered_total", broker),
             // Dropped (published non-mandatory) and returned (published mandatory) are two halves
             // of the same fault — a message that matched no binding — so they are one rate here.
-            ["unroutable"]  = RateSum(rabbitMQName,
+            ["unroutable"]  = RateSum(broker,
                                   "rabbitmq_channel_messages_unroutable_dropped_total",
                                   "rabbitmq_channel_messages_unroutable_returned_total"),
-            ["unconfirmed"] = Agg("rabbitmq_channel_messages_unconfirmed", rabbitMQName),
-            ["connClosed"]  = Rate("rabbitmq_connections_closed_total", rabbitMQName),
-            ["chanClosed"]  = Rate("rabbitmq_channels_closed_total", rabbitMQName),
+            ["unconfirmed"] = Agg("rabbitmq_channel_messages_unconfirmed", broker),
+            ["connClosed"]  = Rate("rabbitmq_connections_closed_total", broker),
+            ["chanClosed"]  = Rate("rabbitmq_channels_closed_total", broker),
 
             // Per-node, deliberately unaggregated: one node hitting its memory watermark blocks
             // publishers cluster-wide, and a sum across nodes would hide which one. The join also
             // supplies rabbitmq_node, since the node families themselves carry no labels at all.
-            ["mem"]         = PerNode("rabbitmq_process_resident_memory_bytes", rabbitMQName),
-            ["memLimit"]    = PerNode("rabbitmq_resident_memory_limit_bytes", rabbitMQName),
-            ["disk"]        = PerNode("rabbitmq_disk_space_available_bytes", rabbitMQName),
-            ["diskLimit"]   = PerNode("rabbitmq_disk_space_available_limit_bytes", rabbitMQName),
-            ["fds"]         = PerNode("rabbitmq_process_open_fds", rabbitMQName),
-            ["fdsMax"]      = PerNode("rabbitmq_process_max_fds", rabbitMQName),
-            ["sockets"]     = PerNode("rabbitmq_process_open_tcp_sockets", rabbitMQName),
-            ["socketsMax"]  = PerNode("rabbitmq_process_max_tcp_sockets", rabbitMQName),
+            ["mem"]         = PerNode("rabbitmq_process_resident_memory_bytes", broker),
+            ["memLimit"]    = PerNode("rabbitmq_resident_memory_limit_bytes", broker),
+            ["disk"]        = PerNode("rabbitmq_disk_space_available_bytes", broker),
+            ["diskLimit"]   = PerNode("rabbitmq_disk_space_available_limit_bytes", broker),
+            ["fds"]         = PerNode("rabbitmq_process_open_fds", broker),
+            ["fdsMax"]      = PerNode("rabbitmq_process_max_fds", broker),
+            ["sockets"]     = PerNode("rabbitmq_process_open_tcp_sockets", broker),
+            ["socketsMax"]  = PerNode("rabbitmq_process_max_tcp_sockets", broker),
         };
     }
 
     /// <summary>
-    /// The <c>rabbitmq_identity_info</c> series for one cluster — the join partner that carries
+    /// The <c>rabbitmq_identity_info</c> series of one broker — the join partner that carries
     /// the cluster name.
     ///
     /// The endpoint is pinned because the plugin emits identity info once per scrape path: a
@@ -1610,46 +1651,64 @@ public class PrometheusService(
     /// does) produces a second series per node, distinguished only by <c>rabbitmq_endpoint</c>.
     /// Left unpinned that doubles the node count and makes every join ambiguous, which Prometheus
     /// rejects outright with "multiple matches for labels".
+    ///
+    /// <para>The namespace is pinned because a broker's name is unique only within one: two
+    /// brokers called <c>orders</c> in two namespaces — two tenants', perhaps — were summed into
+    /// each other's panel.</para>
+    ///
+    /// <para>The label is added by whatever found the target: a ServiceMonitor, a PodMonitor and
+    /// the annotation job all add it. An external broker may instead be scraped by a hand-written
+    /// static job that adds none, so for those a series without the label still counts; one that
+    /// carries another namespace never does.</para>
     /// </summary>
-    public static string RabbitMQIdentity(string rabbitMQName) =>
-        $"rabbitmq_identity_info{{rabbitmq_cluster=\"{rabbitMQName}\",rabbitmq_endpoint=\"aggregated\"}}";
+    public static string RabbitMQIdentity(RabbitMQBrokerIdentity broker)
+    {
+        string ns = broker.IsOperatorManaged ? $"=\"{broker.Namespace}\"" : $"=~\"{broker.Namespace}|\"";
+        return $"rabbitmq_identity_info{{rabbitmq_cluster=\"{broker.Name}\",namespace{ns},rabbitmq_endpoint=\"aggregated\"}}";
+    }
 
     /// <summary>
-    /// Scopes a metric to one cluster.
+    /// Scopes a metric to one broker.
     ///
     /// The plugin labels almost nothing: every aggregated family is emitted with no labels at
     /// all, and <c>rabbitmq_cluster</c> exists only on <c>rabbitmq_identity_info</c> and
     /// <c>rabbitmq_build_info</c>. Writing <c>metric{rabbitmq_cluster="x"}</c> therefore matches
     /// no series and silently yields zero — so the cluster name has to be brought in by joining
     /// against identity info on the scrape target, which is what RabbitMQ's own dashboards do.
+    ///
+    /// <para>The namespace is part of "the scrape target": <c>instance</c> is a pod address, and
+    /// Kubernetes hands a gone pod's address to the next one. Both sides come from the same
+    /// scrape, so where one has no namespace neither does the other, and they still join.</para>
     /// </summary>
-    public static string RabbitMQScoped(string expr, string rabbitMQName, string? extraJoinLabels = null)
+    public static string RabbitMQScoped(string expr, RabbitMQBrokerIdentity broker, string? extraJoinLabels = null)
     {
         string labels = string.IsNullOrEmpty(extraJoinLabels)
             ? "rabbitmq_cluster"
             : $"rabbitmq_cluster,{extraJoinLabels}";
 
-        return $"{expr} * on(instance, job) group_left({labels}) {RabbitMQIdentity(rabbitMQName)}";
+        return $"{expr} * on(namespace, instance, job) group_left({labels}) {RabbitMQIdentity(broker)}";
     }
 
-    private static string Agg(string metric, string cluster) =>
-        $"sum({RabbitMQScoped(metric, cluster)})";
+    private static string Agg(string metric, RabbitMQBrokerIdentity broker) =>
+        $"sum({RabbitMQScoped(metric, broker)})";
 
-    private static string Rate(string metric, string cluster) =>
-        $"sum({RabbitMQScoped($"rate({metric}[5m])", cluster)})";
+    private static string Rate(string metric, RabbitMQBrokerIdentity broker) =>
+        $"sum({RabbitMQScoped($"rate({metric}[5m])", broker)})";
 
-    private static string PerNode(string metric, string cluster) =>
-        RabbitMQScoped(metric, cluster, "rabbitmq_node");
+    private static string PerNode(string metric, RabbitMQBrokerIdentity broker) =>
+        RabbitMQScoped(metric, broker, "rabbitmq_node");
 
     /// <summary>
     /// Adds several counters' rates into one figure.
     ///
     /// Each term is defaulted with <c>or vector(0)</c> because vector arithmetic drops to an
     /// empty result when either side has no series: one counter a broker happens not to export
-    /// would otherwise zero the whole sum and, with it, the warning that depends on it.
+    /// would otherwise zero the whole sum and, with it, the warning that depends on it. The price
+    /// is that these queries answer for a broker that does not exist, so they say nothing about
+    /// whether it is scraped — see <see cref="RabbitMQMetricsSummary.HasData"/>.
     /// </summary>
-    private static string RateSum(string cluster, params string[] metrics) =>
-        string.Join(" + ", metrics.Select(m => $"({Rate(m, cluster)} or vector(0))"));
+    private static string RateSum(RabbitMQBrokerIdentity broker, params string[] metrics) =>
+        string.Join(" + ", metrics.Select(m => $"({Rate(m, broker)} or vector(0))"));
 
     private async Task<KeycloakMetricsSummary> QueryKeycloakMetricsAsync(
         HttpClient http, string baseUrl, string instanceName, string ns, CancellationToken ct)
@@ -1780,110 +1839,13 @@ public class PrometheusService(
     }
 
     /// <summary>
-    /// Works out why a workload that should be exporting metrics produces none, by comparing the
-    /// two halves that have to line up: a ServiceMonitor in the workload's namespace, and the
-    /// selector the Prometheus resource uses to decide which ServiceMonitors it will scrape.
-    ///
-    /// Shared by RabbitMQ and Keycloak, which differ only in what the monitor is expected to be
-    /// called and what creates it. Both halves are read from the cluster, so this reports what is
-    /// actually there rather than what the configuration implies.
+    /// Works out why a workload that should be exporting metrics produces none: whether a monitor
+    /// selects it, and whether Prometheus reads that monitor. Shared by RabbitMQ and Keycloak.
+    /// See <see cref="ScrapeDiagnostician"/> for what it says and why.
     /// </summary>
-    /// <param name="workloadNamespace">Namespace the workload runs in.</param>
-    /// <param name="monitorNameHint">Substring identifying the workload's own ServiceMonitor.</param>
-    /// <param name="absentRemedy">What to tell the operator when no monitor exists at all.</param>
-    public async Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseServiceMonitorScrapeAsync(
-        Guid tenantId, Guid clusterId, string workloadNamespace, string monitorNameHint,
-        string absentRemedy, CancellationToken ct = default)
-    {
-        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
-        if (info is null) return KubernetesOperationResult<ScrapeDiagnosis>.Failure(error!);
-
-        try
-        {
-            Kubernetes k8s = info.Cluster.GetPooledSdkClient();
-
-            JsonArray monitors = await ListCustomObjectsAsync(
-                k8s, "monitoring.coreos.com", "v1", workloadNamespace, "servicemonitors", ct);
-
-            JsonNode? monitor = monitors.FirstOrDefault(m =>
-                m?["metadata"]?["name"]?.GetValue<string>() is { } n
-                && n.Contains(monitorNameHint, StringComparison.OrdinalIgnoreCase));
-
-            JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
-
-            Dictionary<string, string> smLabels = ReadLabels(monitor?["metadata"]?["labels"]);
-            Dictionary<string, string> selector =
-                ReadLabels(prometheus?["spec"]?["serviceMonitorSelector"]?["matchLabels"]);
-
-            // An empty (but present) serviceMonitorSelector means "every ServiceMonitor"; one with
-            // matchLabels means "only those carrying these labels", which is what an untouched
-            // kube-prometheus-stack produces via its release label.
-            bool selectorPresent = prometheus?["spec"]?["serviceMonitorSelector"] is not null;
-            bool selectsAll = !selectorPresent || selector.Count == 0;
-            bool matches = selectsAll || selector.All(kv =>
-                smLabels.TryGetValue(kv.Key, out string? v) && v == kv.Value);
-
-            List<string> findings = [];
-            string? remedy = null;
-
-            if (monitor is null)
-            {
-                findings.Add(
-                    $"No ServiceMonitor matching '{monitorNameHint}' exists in namespace "
-                    + $"{workloadNamespace}, so Prometheus was never told to scrape this workload.");
-                remedy = absentRemedy;
-            }
-            else if (!matches)
-            {
-                string want = string.Join(", ", selector.Select(kv => $"{kv.Key}={kv.Value}"));
-                string have = smLabels.Count == 0
-                    ? "(no labels)"
-                    : string.Join(", ", smLabels.Select(kv => $"{kv.Key}={kv.Value}"));
-
-                findings.Add(
-                    $"The ServiceMonitor exists but Prometheus does not select it: it scrapes only "
-                    + $"ServiceMonitors labelled {want}, and this one has {have}.");
-                remedy =
-                    "Add these to the kube-prometheus-stack component's values (Cluster → Components → "
-                    + "kube-prometheus-stack → Values), then Save & Apply:\n"
-                    + "prometheus:\n  prometheusSpec:\n    serviceMonitorSelectorNilUsesHelmValues: false\n"
-                    + "    podMonitorSelectorNilUsesHelmValues: false";
-            }
-            else
-            {
-                findings.Add("The ServiceMonitor exists and Prometheus's selector accepts it.");
-                remedy =
-                    "Scraping should be running. If metrics are still missing, check Prometheus → Targets — "
-                    + "a target listed as down points at the workload's metrics port, not the wiring.";
-            }
-
-            // A namespace selector that is absent (rather than empty) confines Prometheus to its
-            // own namespace, which the workload's namespace would never satisfy.
-            bool nsSelectorPresent = prometheus?["spec"]?["serviceMonitorNamespaceSelector"] is not null;
-            if (monitor is not null && !nsSelectorPresent)
-            {
-                findings.Add(
-                    "Prometheus has no serviceMonitorNamespaceSelector, so it only looks in its own "
-                    + $"namespace — it will not see anything in {workloadNamespace}.");
-            }
-
-            return KubernetesOperationResult<ScrapeDiagnosis>.Success(new ScrapeDiagnosis
-            {
-                MonitorExists          = monitor is not null,
-                MonitorLabels          = smLabels,
-                PrometheusSelector     = selector,
-                SelectorAcceptsMonitor = monitor is not null && matches,
-                Findings               = findings,
-                Remedy                 = remedy,
-            });
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Scrape diagnosis failed for {Hint} in {Namespace}",
-                monitorNameHint, workloadNamespace);
-            return KubernetesOperationResult<ScrapeDiagnosis>.Failure(DescribeK8sError(ex));
-        }
-    }
+    public Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseServiceMonitorScrapeAsync(
+        Guid tenantId, Guid clusterId, MonitoredWorkload workload, CancellationToken ct = default) =>
+        DiagnoseScrapeAsync(tenantId, clusterId, workload, ct);
 
     /// <summary>
     /// Runs several instant queries against one Prometheus concurrently.
@@ -1927,8 +1889,8 @@ public class PrometheusService(
 
     /// <summary>
     /// <see cref="QueryManyAsync"/> for callers to whom a failed query is not "no data": every
-    /// key's outcome carries either its results or why there are none. The RabbitMQ and Keycloak
-    /// panels keep the folding variant, where one unexported metric must not blank the rest.
+    /// key's outcome carries either its results or why there are none. The Keycloak panel keeps the
+    /// folding variant, where one unexported metric must not blank the rest.
     /// Cancellation by <paramref name="ct"/> propagates; it is the caller giving up, not an answer.
     /// </summary>
     public static async Task<Dictionary<string, InstantQueryOutcome>> QueryManyReportingAsync(
@@ -2742,27 +2704,40 @@ public class PrometheusService(
 
     /// <summary>
     /// Parses a Prometheus /api/v1/targets JSON response into ScrapeTarget objects.
+    ///
+    /// <para>Throws <see cref="UnreadableTargetListException"/> rather than answering with what it
+    /// managed to read. It used to swallow every error, so a proxy's HTML page was "no targets" and
+    /// one odd field cut the list short — and both then read as "nothing is down" and "nothing is
+    /// scraped twice".</para>
     /// </summary>
     public static List<ScrapeTarget> ParseScrapeTargets(string json)
     {
-        List<ScrapeTarget> results = [];
         try
         {
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
 
-            if (root.GetProperty("status").GetString() != "success") return results;
+            if (root.GetProperty("status").GetString() != "success")
+            {
+                throw new UnreadableTargetListException(
+                    root.TryGetProperty("error", out JsonElement error) && error.GetString() is { Length: > 0 } said
+                        ? said
+                        : "Prometheus did not answer with success.");
+            }
 
-            JsonElement activeTargets = root.GetProperty("data").GetProperty("activeTargets");
-            foreach (JsonElement t in activeTargets.EnumerateArray())
+            List<ScrapeTarget> results = [];
+            foreach (JsonElement t in root.GetProperty("data").GetProperty("activeTargets").EnumerateArray())
             {
                 ScrapeTarget target = new()
                 {
-                    Pool      = t.TryGetProperty("scrapePool",   out JsonElement pool) ? pool.GetString()   ?? "" : "",
-                    ScrapeUrl = t.TryGetProperty("scrapeUrl",    out JsonElement url)  ? url.GetString()    ?? "" : "",
-                    Health    = t.TryGetProperty("health",       out JsonElement h)    ? h.GetString()      ?? "" : "",
-                    LastError = t.TryGetProperty("lastError",    out JsonElement le)   ? le.GetString()     ?? "" : "",
-                    LastScrapeDurationSeconds = t.TryGetProperty("lastScrapeDuration", out JsonElement ld) ? ld.GetDouble() : 0
+                    // Without these two a target cannot be told apart from another one.
+                    Pool      = t.GetProperty("scrapePool").GetString() ?? "",
+                    ScrapeUrl = t.GetProperty("scrapeUrl").GetString() ?? "",
+                    Health    = t.TryGetProperty("health",    out JsonElement h)  ? h.GetString()  ?? "" : "",
+                    LastError = t.TryGetProperty("lastError", out JsonElement le) ? le.GetString() ?? "" : "",
+                    LastScrapeDurationSeconds =
+                        t.TryGetProperty("lastScrapeDuration", out JsonElement ld) && ld.ValueKind == JsonValueKind.Number
+                            ? ld.GetDouble() : 0
                 };
 
                 if (t.TryGetProperty("lastScrape", out JsonElement ls) && ls.ValueKind == JsonValueKind.String
@@ -2775,9 +2750,13 @@ public class PrometheusService(
 
                 results.Add(target);
             }
+            return results;
         }
-        catch { }
-        return results;
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException
+                                   or (InvalidOperationException and not UnreadableTargetListException))
+        {
+            throw new UnreadableTargetListException(ex.Message);
+        }
     }
 
     /// <summary>
@@ -2855,27 +2834,11 @@ public class PrometheusService(
 }
 
 /// <summary>
-/// Why a CNPG database's metrics are (or are not) reaching Prometheus. Read from the cluster:
-/// the PodMonitor CNPG created for the database, and the selector Prometheus filters with.
+/// Prometheus answered, and its answer is not a list of scrape targets. Never the same as an empty
+/// list: what is scraped is then unknown.
 /// </summary>
-public class CnpgScrapeDiagnosis
-{
-    public bool PodMonitorExists { get; init; }
-
-    /// <summary>Labels on the PodMonitor — what Prometheus's selector is matched against.</summary>
-    public Dictionary<string, string> PodMonitorLabels { get; init; } = [];
-
-    /// <summary>The Prometheus resource's podMonitorSelector.matchLabels. Empty means "select all".</summary>
-    public Dictionary<string, string> PrometheusSelector { get; init; } = [];
-
-    public bool SelectorAcceptsPodMonitor { get; init; }
-
-    /// <summary>What was found, in plain words, worst first.</summary>
-    public List<string> Findings { get; init; } = [];
-
-    /// <summary>The concrete next step, including any YAML to paste.</summary>
-    public string? Remedy { get; init; }
-}
+public sealed class UnreadableTargetListException(string why)
+    : InvalidOperationException($"The list of scrape targets could not be read: {why}");
 
 /// <summary>
 /// The endpoints lookup answered and no ready pod stands behind the service: nothing is serving

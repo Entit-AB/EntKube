@@ -10,7 +10,8 @@
     </select>
     <input class="form-control form-control-sm" style="width:220px" placeholder="Filter by pool or label…"
            value="@filterText" @oninput="OnSearchInput" />
-    <span class="ms-auto text-muted small">@filtered.Count of @targets.Count targets</span>
+    @* A list that could not be read has no count: "0 of 0 targets" beside the error says nothing is scraped. *@
+    <span class="ms-auto text-muted small">@(errorMessage is null ? $"{filtered.Count} of {targets.Count} targets" : "")</span>
     <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="30" Enabled="false"
                  LastRefreshed="_lastRefreshed" />
 </div>
@@ -29,6 +30,32 @@ else if (errorMessage is not null)
 }
 else
 {
+    @if (duplicates.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small mb-3" data-duplicates>
+            <div>
+                <span class="bi bi-exclamation-triangle me-1"></span>
+                <strong>@duplicates.Count endpoint@(duplicates.Count == 1 ? " is" : "s are") scraped by more than one job.</strong>
+                Every sum over @(duplicates.Count == 1 ? "its" : "their") series counts the same numbers once per job.
+            </div>
+            <ul class="mb-0 mt-1 ps-3">
+                @foreach (DuplicateScrape d in duplicates.Take(MaxDuplicatesListed))
+                {
+                    <li><span class="font-monospace">@d.Url</span> — @string.Join(", ", d.Pools)</li>
+                }
+                @if (duplicates.Count > MaxDuplicatesListed)
+                {
+                    <li>and @(duplicates.Count - MaxDuplicatesListed) more</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (targets.Count == 0)
+    {
+        <div class="text-muted small py-2" data-empty="targets">Prometheus has no active scrape targets.</div>
+    }
+
     @if (DownCount > 0)
     {
         <div class="alert alert-danger py-2 small mb-3 d-flex align-items-center gap-2">
@@ -110,6 +137,11 @@ else
 
     private List<ScrapeTarget> targets = [];
     private List<ScrapeTarget> filtered = [];
+
+    /// <summary>Over every target, never the filtered ones: a search must not hide a doubled endpoint.</summary>
+    private List<DuplicateScrape> duplicates = [];
+    private const int MaxDuplicatesListed = 10;
+
     private string filterHealth = "";
     private string filterText = "";
     private bool isLoading = true;
@@ -132,21 +164,24 @@ else
 
     private async Task FetchAsync()
     {
-        KubernetesOperationResult<List<ScrapeTarget>> result =
-            await PrometheusService.GetScrapeTargetsAsync(TenantId, ClusterId);
+        try
+        {
+            KubernetesOperationResult<List<ScrapeTarget>> result =
+                await PrometheusService.GetScrapeTargetsAsync(TenantId, ClusterId);
 
-        if (result.IsSuccess)
-        {
-            targets = result.Data ?? [];
-            errorMessage = null;
-            ApplyFilter();
+            targets = result.IsSuccess ? result.Data ?? [] : [];
+            errorMessage = result.IsSuccess ? null : result.Error ?? "The scrape targets could not be read.";
         }
-        else
+        catch (Exception ex)
         {
-            errorMessage = result.Error;
+            // Resolving the cluster decrypts its kubeconfig through the vault, so a database or
+            // vault failure throws here. Unhandled it would tear down the circuit.
             targets = [];
-            filtered = [];
+            errorMessage = ex.Message;
         }
+
+        duplicates = DuplicateScrapes.Find(targets);
+        ApplyFilter();
         _lastRefreshed = DateTime.UtcNow;
     }
 

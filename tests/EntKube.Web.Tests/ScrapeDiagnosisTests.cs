@@ -1,0 +1,479 @@
+using System.Net;
+using System.Text.Json.Nodes;
+using EntKube.Web.Services;
+using FluentAssertions;
+using static EntKube.Web.Tests.ScrapedClusterFake;
+
+namespace EntKube.Web.Tests;
+
+/// <summary>
+/// "Why is it empty?" — what the diagnosis says about a database, a broker or a Keycloak whose
+/// metrics are missing, over a cluster that answers the same calls a real one does.
+///
+/// <para>The rules come from the CRDs, not from what a Prometheus usually looks like: an absent
+/// selector selects nothing, an unreadable list is not an empty one, and a monitor is the
+/// workload's when it selects it, whatever it is called.</para>
+/// </summary>
+public sealed class ScrapeDiagnosisTests
+{
+    private const string ShopPods = """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/podRole":"instance"}}""";
+    private const string OrdersServices =
+        """{"matchLabels":{"app.kubernetes.io/name":"orders","app.kubernetes.io/component":"rabbitmq"}}""";
+
+    private readonly ScrapedClusterFake cluster = new();
+
+    public ScrapeDiagnosisTests()
+    {
+        cluster.ServeList(PrometheusesPath, ReadsEverything);
+        cluster.ServeList(PodMonitorsPath);
+        cluster.ServeList(ServiceMonitorsPath);
+        cluster.ServeDatabasePods("data", "shop", instances: 3);
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            Labelled("mq", "orders", "\"app.kubernetes.io/name\":\"orders\",\"app.kubernetes.io/component\":\"rabbitmq\""));
+    }
+
+    private Task<KubernetesOperationResult<ScrapeDiagnosis>> AskAboutShop() =>
+        cluster.Prometheus.DiagnoseCnpgScrapeAsync(cluster.TenantId, cluster.ClusterId, "shop", "data");
+
+    private async Task<ScrapeDiagnosis> DiagnoseShop() => Answered(await AskAboutShop());
+
+    private async Task<ScrapeDiagnosis> Diagnose(MonitoredWorkload workload) => Answered(
+        await cluster.Prometheus.DiagnoseServiceMonitorScrapeAsync(cluster.TenantId, cluster.ClusterId, workload));
+
+    private static ScrapeDiagnosis Answered(KubernetesOperationResult<ScrapeDiagnosis> result)
+    {
+        result.IsSuccess.Should().BeTrue(result.Error);
+        return result.Data!;
+    }
+
+    private static string Said(ScrapeDiagnosis d) => string.Join("\n", d.Findings);
+
+    // ──────── The ordinary answers ────────
+
+    [Fact]
+    public async Task EntKubes_own_monitor_that_prometheus_reads_is_reported_as_wired()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "entkube-cnpg-shop", ShopPods));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.WiringIsRight.Should().BeTrue();
+        d.Findings.Should().ContainSingle().Which.Should().Contain("data/entkube-cnpg-shop");
+        d.Remedy.Should().Contain("Targets");
+    }
+
+    [Fact]
+    public async Task A_database_without_a_monitor_is_told_to_apply_monitors()
+    {
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.MonitorExists.Should().BeFalse();
+        Said(d).Should().Contain("No PodMonitor");
+        d.Remedy.Should().Contain("Apply monitors now");
+    }
+
+    [Fact]
+    public async Task A_monitor_prometheus_does_not_select_is_told_to_apply_monitors_and_never_to_paste_helm_values()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            """ "podMonitorSelector":{"matchLabels":{"release":"prom"}},"podMonitorNamespaceSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods, labels: "\"team\":\"shop\""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.MonitorExists.Should().BeTrue();
+        d.SelectorAcceptsMonitor.Should().BeFalse();
+        Said(d).Should().Contain("release=prom").And.Contain("team=shop");
+        d.Remedy.Should().Contain("Apply monitors now");
+        d.Remedy.Should().NotContain("SelectorNilUsesHelmValues").And.NotContain("prometheusSpec");
+    }
+
+    // ──────── An absent selector selects nothing ────────
+
+    [Fact]
+    public async Task An_absent_pod_monitor_selector_selects_nothing()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus", """ "podMonitorNamespaceSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "entkube-cnpg-shop", ShopPods));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectorAcceptsMonitor.Should().BeFalse("the CRD: a null label selector matches no objects");
+        Said(d).Should().Contain("no podMonitorSelector");
+        d.Remedy.Should().Contain("cannot help", "no monitor counts while Prometheus reads none");
+    }
+
+    [Fact]
+    public async Task An_absent_service_monitor_selector_selects_nothing()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            """ "podMonitorSelector":{},"serviceMonitorNamespaceSelector":{} """));
+        cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("mq", "orders-metrics", OrdersServices));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectorAcceptsMonitor.Should().BeFalse();
+        Said(d).Should().Contain("no serviceMonitorSelector");
+    }
+
+    [Fact]
+    public async Task An_empty_selector_selects_every_monitor()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods));
+
+        (await DiagnoseShop()).SelectorAcceptsMonitor.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task An_absent_namespace_selector_confines_prometheus_to_its_own_namespace()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus", """ "podMonitorSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectorAcceptsMonitor.Should().BeFalse("a monitor Prometheus never looks at is not accepted, whatever its labels");
+        Said(d).Should().Contain("no podMonitorNamespaceSelector");
+    }
+
+    [Fact]
+    public async Task A_monitor_in_prometheus_own_namespace_is_read_without_a_namespace_selector()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus", """ "podMonitorSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor(PrometheusNamespace, "all-databases", ShopPods,
+            more: ""","namespaceSelector":{"any":true}"""));
+
+        (await DiagnoseShop()).WiringIsRight.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_namespace_selector_is_held_against_the_namespace_labels()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            """ "podMonitorSelector":{},"podMonitorNamespaceSelector":{"matchLabels":{"scrape":"yes"}} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods));
+        cluster.ServeList("/api/v1/namespaces", Labelled("", "data", "\"scrape\":\"no\""));
+
+        ScrapeDiagnosis no = await DiagnoseShop();
+        no.SelectorAcceptsMonitor.Should().BeFalse();
+        Said(no).Should().Contain("scrape=yes");
+
+        cluster.ServeList("/api/v1/namespaces", Labelled("", "data", "\"scrape\":\"yes\""));
+        (await DiagnoseShop()).SelectorAcceptsMonitor.Should().BeTrue();
+    }
+
+    // ──────── matchExpressions ────────
+
+    [Theory]
+    [InlineData("""{"key":"release","operator":"In","values":["prom","other"]}""", true)]
+    [InlineData("""{"key":"release","operator":"In","values":["other"]}""", false)]
+    [InlineData("""{"key":"release","operator":"NotIn","values":["prom"]}""", false)]
+    [InlineData("""{"key":"release","operator":"NotIn","values":["other"]}""", true)]
+    [InlineData("""{"key":"absent","operator":"NotIn","values":["x"]}""", true)]   // NotIn selects what lacks the key
+    [InlineData("""{"key":"release","operator":"Exists"}""", true)]
+    [InlineData("""{"key":"absent","operator":"Exists"}""", false)]
+    [InlineData("""{"key":"release","operator":"DoesNotExist"}""", false)]
+    [InlineData("""{"key":"absent","operator":"DoesNotExist"}""", true)]
+    public async Task Match_expressions_are_evaluated(string expression, bool selected)
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            $$""" "podMonitorSelector":{"matchExpressions":[{{expression}}]},"podMonitorNamespaceSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods, labels: "\"release\":\"prom\""));
+
+        (await DiagnoseShop()).SelectorAcceptsMonitor.Should().Be(selected);
+    }
+
+    [Theory]
+    [InlineData("""{"matchExpressions":[{"key":"release","operator":"Matches","values":["p.*"]}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"release","operator":"In"}]}""")]
+    public async Task A_selector_that_is_not_understood_is_neither_accepted_nor_refused(string selector)
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            $$""" "podMonitorSelector":{{selector}},"podMonitorNamespaceSelector":{} """));
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods, labels: "\"release\":\"prom\""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectorAcceptsMonitor.Should().BeFalse();
+        Said(d).Should().Contain("Cannot tell whether Prometheus reads").And.NotContain("does not select");
+    }
+
+    /// <summary>One requirement that is definitely unmet decides it, however odd the others are.</summary>
+    [Fact]
+    public void An_unmet_requirement_refuses_even_beside_one_that_is_not_understood()
+    {
+        JsonNode selector = JsonNode.Parse(
+            """{"matchLabels":{"release":"prom"},"matchExpressions":[{"key":"a","operator":"Matches"}]}""")!;
+
+        MonitorSelector.Selects(selector, new Dictionary<string, string> { ["release"] = "other" }).Should().BeFalse();
+        MonitorSelector.Selects(selector, new Dictionary<string, string> { ["release"] = "prom" }).Should().BeNull();
+    }
+
+    // ──────── A failed read is a failure ────────
+
+    /// <summary>⭐ A 403 on the monitors was "No PodMonitor exists", with advice to create one.</summary>
+    [Theory]
+    [InlineData(PodMonitorsPath, "the PodMonitors", HttpStatusCode.Forbidden)]
+    [InlineData(PodMonitorsPath, "the PodMonitors", HttpStatusCode.GatewayTimeout)]
+    [InlineData(PrometheusesPath, "the Prometheus resource", HttpStatusCode.Forbidden)]
+    [InlineData("/api/v1/namespaces/data/pods", "the pods in data", HttpStatusCode.Forbidden)]
+    public async Task A_read_the_cluster_refuses_is_a_failure_and_names_what_could_not_be_read(
+        string path, string what, HttpStatusCode status)
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods));
+        cluster.Refuse(path, status);
+
+        KubernetesOperationResult<ScrapeDiagnosis> result = await AskAboutShop();
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain($"Could not read {what}").And.Contain(status.ToString());
+    }
+
+    [Fact]
+    public async Task A_read_that_times_out_is_a_failure_that_says_so()
+    {
+        cluster.Hanging = PodMonitorsPath;
+
+        KubernetesOperationResult<ScrapeDiagnosis> result = await AskAboutShop();
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be("Could not read the PodMonitors: the cluster did not answer in time.");
+    }
+
+    [Fact]
+    public async Task An_answer_that_is_not_a_list_is_a_failure_too()
+    {
+        cluster.Serve(PodMonitorsPath, """{"kind":"Status"}""");
+
+        KubernetesOperationResult<ScrapeDiagnosis> result = await AskAboutShop();
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Could not read the PodMonitors");
+    }
+
+    /// <summary>The one 404 that is an answer: the cluster has no such type.</summary>
+    [Fact]
+    public async Task A_cluster_without_the_operators_types_is_told_so()
+    {
+        cluster.Refuse(PodMonitorsPath, HttpStatusCode.NotFound);
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        Said(d).Should().Contain("no PodMonitor resource type");
+        d.Remedy.Should().NotContain("Apply monitors now");
+    }
+
+    // ──────── Which Prometheus ────────
+
+    [Fact]
+    public async Task The_components_own_prometheus_is_asked_and_not_whichever_comes_first()
+    {
+        cluster.ServeList(PrometheusesPath,
+            Prom("other", """ "podMonitorSelector":{"matchLabels":{"x":"y"}},"podMonitorNamespaceSelector":{} """, ns: "elsewhere"),
+            ReadsEverything);
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "shop", ShopPods));
+
+        (await DiagnoseShop()).SelectorAcceptsMonitor.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Several_prometheuses_none_of_them_the_components_is_cannot_tell()
+    {
+        cluster.ServeList(PrometheusesPath,
+            Prom("a", """ "podMonitorSelector":{} """, ns: "one"), Prom("b", """ "podMonitorSelector":{} """, ns: "two"));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        Said(d).Should().Contain("Cannot tell which Prometheus").And.Contain("one/a").And.Contain("two/b");
+        d.SelectorAcceptsMonitor.Should().BeFalse();
+    }
+
+    // ──────── Whose monitor ────────
+
+    /// <summary>⭐ <c>app</c> is a substring of <c>my-app-metrics</c>, and that decided it.</summary>
+    [Fact]
+    public async Task The_monitor_of_my_app_is_not_the_monitor_of_app()
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            Labelled("mq", "app", "\"app.kubernetes.io/name\":\"app\",\"app.kubernetes.io/component\":\"rabbitmq\""),
+            Labelled("mq", "my-app", "\"app.kubernetes.io/name\":\"my-app\",\"app.kubernetes.io/component\":\"rabbitmq\""));
+        cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("mq", "my-app-metrics",
+            """{"matchLabels":{"app.kubernetes.io/name":"my-app","app.kubernetes.io/component":"rabbitmq"}}"""));
+
+        ScrapeDiagnosis app = await Diagnose(MonitoredWorkload.RabbitMQ("app", "mq"));
+        app.MonitorExists.Should().BeFalse();
+        app.Remedy.Should().Contain("Apply monitors now");
+
+        (await Diagnose(MonitoredWorkload.RabbitMQ("my-app", "mq"))).WiringIsRight.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_monitor_is_found_by_what_it_selects_whatever_it_is_called_and_wherever_it_is()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("ops", "every-postgres",
+            """{"matchExpressions":[{"key":"cnpg.io/cluster","operator":"Exists"}]}""",
+            more: ""","namespaceSelector":{"matchNames":["data"]}"""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.WiringIsRight.Should().BeTrue();
+        Said(d).Should().Contain("ops/every-postgres");
+    }
+
+    [Fact]
+    public async Task A_monitor_in_another_namespace_that_does_not_reach_this_one_is_not_the_databases()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("other", "shop", ShopPods));
+
+        (await DiagnoseShop()).MonitorExists.Should().BeFalse();
+    }
+
+    /// <summary>Judged by the labels the pods really carry, not only by the two every database has.</summary>
+    [Fact]
+    public async Task A_monitor_that_selects_by_a_label_of_the_users_own_is_found()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "team-shop", """{"matchLabels":{"team":"shop"}}"""));
+
+        (await DiagnoseShop()).WiringIsRight.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_monitor_of_another_port_is_not_a_monitor_of_the_metrics()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "status", ShopPods, endpoints: """{"port":"status"}"""));
+
+        (await DiagnoseShop()).MonitorExists.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task EntKubes_own_monitor_that_selects_something_else_is_said_to_exist()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "entkube-cnpg-shop", """{"matchLabels":{"cnpg.io/cluster":"old"}}"""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        Said(d).Should().Contain("entkube-cnpg-shop exists but does not select").And.Contain("cnpg.io/cluster=old");
+        d.Remedy.Should().Contain("Apply monitors now");
+    }
+
+    [Fact]
+    public async Task A_database_with_no_pods_is_judged_by_the_labels_its_pods_get_and_that_is_said()
+    {
+        cluster.ServeList("/api/v1/namespaces/data/pods");
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "entkube-cnpg-shop", ShopPods));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectorAcceptsMonitor.Should().BeTrue();
+        Said(d).Should().Contain("No pods of database 'shop'");
+    }
+
+    // ──────── Scraped twice ────────
+
+    /// <summary>
+    /// The doubling case: the operator's PodMonitor and EntKube's, both read. Every number on the
+    /// panel is then twice what it should be, and the old diagnosis called it wired.
+    /// </summary>
+    [Fact]
+    public async Task Two_monitors_that_select_the_same_database_are_said_to_double_it()
+    {
+        cluster.ServeList(PodMonitorsPath,
+            PodMonitor("data", "shop", ShopPods),
+            PodMonitor("data", "entkube-cnpg-shop", ShopPods, endpoints: """{"portNumber":9187}"""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectedTwice.Should().BeTrue();
+        d.WiringIsRight.Should().BeFalse();
+        d.Findings[0].Should().Contain("data/shop").And.Contain("data/entkube-cnpg-shop").And.Contain("2 PodMonitors");
+        d.Remedy.Should().Contain("Apply monitors now");
+    }
+
+    [Fact]
+    public async Task Two_monitors_of_which_prometheus_reads_one_do_not_double_anything()
+    {
+        cluster.ServeList(PrometheusesPath, Prom("prom-prometheus",
+            """ "podMonitorSelector":{"matchLabels":{"release":"prom"}},"podMonitorNamespaceSelector":{} """));
+        cluster.ServeList(PodMonitorsPath,
+            PodMonitor("data", "shop", ShopPods),
+            PodMonitor("data", "entkube-cnpg-shop", ShopPods, labels: "\"release\":\"prom\""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectedTwice.Should().BeFalse();
+        d.SelectorAcceptsMonitor.Should().BeTrue();
+        Said(d).Should().Contain("data/shop exists but Prometheus does not select it");
+    }
+
+    [Fact]
+    public async Task Two_monitors_on_two_paths_of_one_port_do_not_double_anything()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "orders-metrics", OrdersServices),
+            ServiceMonitor("mq", "detailed", OrdersServices, endpoints: """{"port":"prometheus","path":"/metrics/detailed"}"""));
+
+        (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).SelectedTwice.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Two_monitors_neither_of_them_entkubes_are_the_users_to_remove()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "one", OrdersServices), ServiceMonitor("mq", "two", OrdersServices));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeTrue();
+        d.Remedy.Should().Be("Delete all but one of them.");
+    }
+
+    // ──────── Keycloak, and a broker EntKube did not install ────────
+
+    [Fact]
+    public async Task Keycloak_is_found_by_the_service_of_its_own_release()
+    {
+        cluster.ServeList("/api/v1/namespaces/iam/services", Labelled("iam", "sso-keycloakx-http",
+            "\"app.kubernetes.io/name\":\"keycloakx\",\"app.kubernetes.io/instance\":\"sso\",\"app.kubernetes.io/component\":\"http\""));
+        cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("iam", "entkube-keycloak-sso",
+            """{"matchLabels":{"app.kubernetes.io/instance":"sso","app.kubernetes.io/component":"http"}}""",
+            endpoints: """{"port":"http-internal","path":"/auth/metrics"}"""));
+
+        (await Diagnose(MonitoredWorkload.Keycloak("sso", "iam"))).WiringIsRight.Should().BeTrue();
+
+        ScrapeDiagnosis other = await Diagnose(MonitoredWorkload.Keycloak("sso2", "iam"));
+        other.MonitorExists.Should().BeFalse("another release's monitor is not this one's");
+        other.Remedy.Should().Contain("Apply monitors now").And.NotContain("serviceMonitor.enabled");
+    }
+
+    [Fact]
+    public async Task An_external_broker_is_found_by_the_services_in_front_of_its_pods()
+    {
+        cluster.ServeList("/api/v1/namespaces/legacy/services",
+            """{"metadata":{"name":"rabbit","namespace":"legacy","labels":{"chart":"rabbitmq"}},"spec":{"selector":{"app":"rabbit"}}}""",
+            """{"metadata":{"name":"web","namespace":"legacy","labels":{"chart":"web"}},"spec":{"selector":{"app":"web"}}}""");
+        cluster.Serve("/apis/apps/v1/namespaces/legacy/statefulsets/rabbit",
+            """{"metadata":{"name":"rabbit"},"spec":{"selector":{},"serviceName":"rabbit","template":{"metadata":{"labels":{"app":"rabbit","x":"y"}}}}}""");
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("legacy", "unrelated-rabbit-web", """{"matchLabels":{"chart":"web"}}""", endpoints: """{"port":"metrics"}"""));
+
+        ScrapeDiagnosis none = await Diagnose(MonitoredWorkload.ExternalRabbitMQ("rabbit", "legacy"));
+        none.MonitorExists.Should().BeFalse("that monitor is the web server's");
+        none.Remedy.Should().Contain("did not install").And.NotContain("Press \"Apply monitors now\"");
+
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("legacy", "mq", """{"matchLabels":{"chart":"rabbitmq"}}""", endpoints: """{"port":"metrics"}"""));
+        (await Diagnose(MonitoredWorkload.ExternalRabbitMQ("rabbit", "legacy"))).WiringIsRight.Should().BeTrue();
+    }
+
+    /// <summary>Without its Services nothing is known about which monitor is its own, so nothing is claimed.</summary>
+    [Fact]
+    public async Task An_external_broker_whose_stateful_set_is_gone_is_cannot_tell_and_not_unmonitored()
+    {
+        cluster.ServeList("/api/v1/namespaces/legacy/services");
+        cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("legacy", "mq", """{"matchLabels":{"chart":"rabbitmq"}}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.ExternalRabbitMQ("rabbit", "legacy"));
+
+        Said(d).Should().Contain("cannot be told").And.NotContain("No ServiceMonitor on this cluster");
+    }
+}

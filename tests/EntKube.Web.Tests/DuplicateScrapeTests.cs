@@ -1,0 +1,175 @@
+using Bunit;
+using EntKube.Web.Components.Pages.Tenants;
+using EntKube.Web.Services;
+using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace EntKube.Web.Tests;
+
+/// <summary>
+/// Endpoints more than one job scrapes, and what the scrape-targets panel says about them — and
+/// about a target list it could not read, which is neither "no duplicates" nor "no targets".
+/// </summary>
+public sealed class DuplicateScrapeTests : BunitContext
+{
+    private static ScrapeTarget Target(string pool, string url) => new() { Pool = pool, ScrapeUrl = url, Health = "up" };
+
+    // ──────── The detector ────────
+
+    [Fact]
+    public void One_endpoint_in_two_pools_is_a_duplicate()
+    {
+        DuplicateScrape d = DuplicateScrapes.Find(
+        [
+            Target("podMonitor/data/shop/0", "http://10.0.0.5:9187/metrics"),
+            Target("podMonitor/data/entkube-cnpg-shop/0", "http://10.0.0.5:9187/metrics"),
+            Target("podMonitor/data/shop/0", "http://10.0.0.6:9187/metrics"),
+        ]).Should().ContainSingle().Subject;
+
+        d.Url.Should().Be("http://10.0.0.5:9187/metrics");
+        d.Pools.Should().Equal("podMonitor/data/entkube-cnpg-shop/0", "podMonitor/data/shop/0");
+    }
+
+    [Fact]
+    public void Two_ports_of_one_pod_and_two_paths_of_one_port_are_different_endpoints()
+    {
+        DuplicateScrapes.Find(
+        [
+            Target("a", "http://10.0.0.5:9187/metrics"),
+            Target("b", "http://10.0.0.5:8080/metrics"),
+            Target("c", "http://10.0.0.5:9187/metrics/detailed"),
+        ]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void The_same_endpoint_by_another_scheme_is_still_the_same_endpoint()
+    {
+        DuplicateScrapes.Find(
+            [Target("a", "http://10.0.0.5:9187/metrics"), Target("b", "https://10.0.0.5:9187/metrics")])
+            .Should().ContainSingle();
+    }
+
+    /// <summary>A blackbox exporter serves every probe on one path; the target is in the query string.</summary>
+    [Fact]
+    public void Two_probes_through_one_exporter_are_not_duplicates()
+    {
+        DuplicateScrapes.Find(
+        [
+            Target("probe/a", "http://blackbox:9115/probe?module=http&target=https%3A%2F%2Fa.example"),
+            Target("probe/b", "http://blackbox:9115/probe?module=http&target=https%3A%2F%2Fb.example"),
+        ]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void One_pool_is_never_a_duplicate_of_itself()
+    {
+        DuplicateScrapes.Find([Target("a", "http://10.0.0.5:9187/metrics"), Target("a", "http://10.0.0.5:9187/metrics")])
+            .Should().BeEmpty();
+    }
+
+    // ──────── Reading the list ────────
+
+    [Theory]
+    [InlineData("<html>Bad gateway</html>")]
+    [InlineData("""{"status":"error","error":"too busy"}""")]
+    [InlineData("""{"status":"success","data":{}}""")]
+    [InlineData("""{"status":"success","data":null}""")]
+    [InlineData("""{"status":"success","data":{"activeTargets":[{"scrapePool":"a","scrapeUrl":"http://a/metrics"},{"scrapePool":"b"}]}}""")]
+    public void A_target_list_that_cannot_be_read_is_an_error_and_never_a_shorter_list(string body)
+    {
+        Action read = () => PrometheusService.ParseScrapeTargets(body);
+
+        read.Should().Throw<UnreadableTargetListException>().WithMessage("The list of scrape targets could not be read*");
+    }
+
+    [Fact]
+    public void A_target_list_is_read_whole_even_when_a_field_nobody_decides_by_is_odd()
+    {
+        PrometheusService.ParseScrapeTargets("""
+            {"status":"success","data":{"activeTargets":[
+              {"scrapePool":"a","scrapeUrl":"http://a/metrics","health":"up","lastScrapeDuration":"soon"},
+              {"scrapePool":"b","scrapeUrl":"http://b/metrics","health":"down","lastScrapeDuration":0.5,"labels":{"job":"b"}}]}}
+            """).Select(t => (t.Pool, t.Health)).Should().Equal(("a", "up"), ("b", "down"));
+    }
+
+    // ──────── The panel ────────
+
+    private readonly ScrapedClusterFake cluster = new();
+
+    private IRenderedComponent<ScrapeTargetsPanel> Panel()
+    {
+        Services.AddSingleton(cluster.Prometheus);
+        IRenderedComponent<ScrapeTargetsPanel> cut = Render<ScrapeTargetsPanel>(ps => ps
+            .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId));
+        cut.WaitForAssertion(() => cut.Markup.Should().NotContain("Loading scrape targets"));
+        return cut;
+    }
+
+    private static string Active(params (string Pool, string Url)[] targets) =>
+        "{\"status\":\"success\",\"data\":{\"activeTargets\":["
+        + string.Join(",", targets.Select(t => $"{{\"scrapePool\":\"{t.Pool}\",\"scrapeUrl\":\"{t.Url}\",\"health\":\"up\",\"labels\":{{}}}}"))
+        + "]}}";
+
+    [Fact]
+    public void The_panel_names_the_doubled_endpoint_and_both_jobs()
+    {
+        cluster.Targets = Active(
+            ("serviceMonitor/mq/orders-metrics/0", "http://10.0.0.7:15692/metrics"),
+            ("kubernetes-pods-annotated", "http://10.0.0.7:15692/metrics"));
+
+        string banner = Panel().Find("[data-duplicates]").TextContent;
+
+        banner.Should().Contain("1 endpoint is scraped by more than one job")
+            .And.Contain("http://10.0.0.7:15692/metrics")
+            .And.Contain("serviceMonitor/mq/orders-metrics/0").And.Contain("kubernetes-pods-annotated");
+    }
+
+    [Fact]
+    public void The_panel_shows_no_banner_when_every_endpoint_has_one_job()
+    {
+        cluster.Targets = Active(("a", "http://10.0.0.7:15692/metrics"), ("b", "http://10.0.0.8:15692/metrics"));
+
+        IRenderedComponent<ScrapeTargetsPanel> cut = Panel();
+
+        cut.FindAll("[data-duplicates]").Should().BeEmpty();
+        cut.Markup.Should().Contain("2 of 2 targets", "the list was read, so the missing banner means something");
+    }
+
+    [Fact]
+    public void Searching_for_one_job_does_not_hide_the_banner()
+    {
+        cluster.Targets = Active(("a", "http://10.0.0.7:15692/metrics"), ("b", "http://10.0.0.7:15692/metrics"));
+        IRenderedComponent<ScrapeTargetsPanel> cut = Panel();
+
+        cut.Find("input.form-control").Input("a");
+
+        cut.FindAll("[data-duplicates]").Should().ContainSingle();
+    }
+
+    /// <summary>⭐ The list that could not be read: an error, and no word about duplicates or counts.</summary>
+    [Fact]
+    public void A_list_the_panel_cannot_read_is_shown_as_an_error_and_not_as_no_targets()
+    {
+        cluster.Targets = "<html>Bad gateway</html>";
+
+        IRenderedComponent<ScrapeTargetsPanel> cut = Panel();
+
+        cut.Find(".alert-warning").TextContent.Should().Contain("could not be read");
+        cut.Markup.Should().NotContain("0 of 0 targets").And.NotContain("no active scrape targets");
+    }
+
+    /// <summary>Unhandled, this reaches the Blazor dispatcher and takes the whole page down.</summary>
+    [Fact]
+    public void A_cluster_that_cannot_even_be_resolved_is_shown_as_an_error()
+    {
+        cluster.VaultIsDown = true;
+
+        Panel().Find(".alert-warning").TextContent.Should().Contain("the vault is sealed");
+    }
+
+    [Fact]
+    public void A_list_that_is_really_empty_says_so()
+    {
+        Panel().Find("[data-empty='targets']").TextContent.Should().Contain("no active scrape targets");
+    }
+}
