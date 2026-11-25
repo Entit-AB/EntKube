@@ -53,6 +53,18 @@ public sealed class AppWorkloadQueriesTests
         => Q[key].Should().Be(
             $"max by (namespace, persistentvolumeclaim) ({metric}{{namespace=~\"billing|billing-jobs\"}})");
 
+    /// <summary>
+    /// Mounted is read from the pod spec, joined to Running pods: kube-state-metrics keeps a
+    /// Pending or finished pod's spec, and the kubelet's volume stats exist only for storage that
+    /// measures itself. Run as written against kube-prometheus-stack 93.9.0 on kind, it named the
+    /// mounted claim and not the unmounted one.
+    /// </summary>
+    [Fact]
+    public void Mounted_IsThePodSpecOfRunningPods()
+        => Q[AppWorkloadQueries.PvcMounted].Should().Be(
+            "max by (namespace, persistentvolumeclaim) (kube_pod_spec_volumes_persistentvolumeclaims_info{namespace=~\"billing|billing-jobs\"}"
+            + " * on (namespace, pod) group_left () (kube_pod_status_phase{namespace=~\"billing|billing-jobs\",phase=\"Running\"} == 1))");
+
     [Fact]
     public void Http_ComesFromObisDurationHistogram()
     {
@@ -114,7 +126,8 @@ public sealed class AppWorkloadQueriesTests
             used: [Claim("billing", "data", 25)],
             capacity: [Claim("billing", "data", 100)],
             available: [Claim("billing", "data", 75)],
-            requested: [Claim("billing", "data", 100)]);
+            requested: [Claim("billing", "data", 100)],
+            mountedBy: [Claim("billing", "data", 1)]);
 
         rows.Should().ContainSingle();
         PvcUsageRow r = rows[0];
@@ -123,8 +136,8 @@ public sealed class AppWorkloadQueriesTests
     }
 
     /// <summary>
-    /// The kubelet reports a volume only while a pod mounts it. A claim kube-state-metrics knows and
-    /// the kubelet does not is unmounted: it keeps its requested size, and nothing about it is 0.
+    /// A claim no running pod mounts and the kubelet does not report is unmounted: it keeps its
+    /// requested size, and nothing about it is 0.
     /// </summary>
     [Fact]
     public void PvcRows_AnUnmountedClaim_KeepsItsRequestedSize_AndNoUsage()
@@ -133,7 +146,8 @@ public sealed class AppWorkloadQueriesTests
             used: [Claim("billing", "data", 25)],
             capacity: [Claim("billing", "data", 100)],
             available: [Claim("billing", "data", 75)],
-            requested: [Claim("billing", "data", 100), Claim("billing", "archive", 500)]);
+            requested: [Claim("billing", "data", 100), Claim("billing", "archive", 500)],
+            mountedBy: [Claim("billing", "data", 1)]);
 
         PvcUsageRow archive = rows.Single(r => r.Claim == "archive");
         archive.Mounted.Should().BeFalse();
@@ -144,11 +158,38 @@ public sealed class AppWorkloadQueriesTests
         rows.Single(r => r.Claim == "data").Mounted.Should().BeTrue();
     }
 
+    /// <summary>
+    /// Seen on a live cluster: kind's local-path volumes are hostPath, and the kubelet publishes
+    /// no volume stats for them at all. A claim a running pod mounts is mounted whatever the
+    /// kubelet says; when it was inferred from the stats, every such claim read "not mounted".
+    /// </summary>
+    [Fact]
+    public void PvcRows_AMountedClaimWithoutVolumeStats_IsMounted_WithUsageUnknown()
+    {
+        List<PvcUsageRow> rows = AppWorkloadQueries.PvcRows(
+            used: [], capacity: [], available: [],
+            requested: [Claim("shop", "shop-data", 1024), Claim("shop", "shop-unmounted", 2048)],
+            mountedBy: [Claim("shop", "shop-data", 1)]);
+
+        PvcUsageRow data = rows.Single(r => r.Claim == "shop-data");
+        data.Mounted.Should().BeTrue();
+        data.UsageReported.Should().BeFalse();
+        data.UsedBytes.Should().BeNull("unknown usage is not zero usage");
+
+        rows.Single(r => r.Claim == "shop-unmounted").Mounted.Should().BeFalse();
+    }
+
+    /// <summary>The stats alone still prove a mount, should the kube-state-metrics series be missing.</summary>
+    [Fact]
+    public void PvcRows_VolumeStatsAlone_MeanMounted()
+        => AppWorkloadQueries.PvcRows([Claim("a", "data", 1)], [], [], [], [])
+            .Single().Should().Match<PvcUsageRow>(r => r.Mounted && r.UsageReported);
+
     [Fact]
     public void PvcRows_SameClaimNameInTwoNamespaces_IsTwoRows()
     {
         List<PvcUsageRow> rows = AppWorkloadQueries.PvcRows(
-            [Claim("a", "data", 1), Claim("b", "data", 2)], [], [], []);
+            [Claim("a", "data", 1), Claim("b", "data", 2)], [], [], [], []);
 
         rows.Select(r => (r.Namespace, r.Claim)).Should().Equal(("a", "data"), ("b", "data"));
     }

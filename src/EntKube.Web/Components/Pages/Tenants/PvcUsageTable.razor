@@ -2,9 +2,12 @@
 
 @* ═══════════════════════════════════════════════════════════════════════════
    PvcUsageTable — an app's volume claims: used, capacity, free and % for each
-   mounted claim. An unmounted claim has no volume stats (the kubelet reports a
-   volume only while a pod mounts it), so it shows its requested size and says
-   "not mounted" rather than a 0 that would read as an empty disk.
+   mounted claim. Three states, none of which may render as a 0 that reads as
+   an empty disk:
+   - mounted, usage reported: the kubelet's numbers;
+   - mounted, usage not reported: the storage driver does not measure itself
+     (hostPath-backed ones such as local-path); requested size and a badge;
+   - not mounted: no running pod mounts it; requested size and a badge.
    ═══════════════════════════════════════════════════════════════════════════ *@
 
 @if (Rows.Count == 0)
@@ -35,7 +38,7 @@ else
                                 <span class="text-muted ms-1">@r.Namespace</span>
                             }
                         </td>
-                        @if (r.Mounted)
+                        @if (r.Mounted && r.UsageReported)
                         {
                             <td class="text-end small">@Bytes(r.UsedBytes)</td>
                             <td class="text-end small">@Bytes(r.CapacityBytes ?? r.RequestedBytes)</td>
@@ -61,7 +64,14 @@ else
                             <td class="text-end small text-muted">—</td>
                             <td class="text-end small" title="Requested size">@Bytes(r.RequestedBytes)</td>
                             <td class="text-end small text-muted">—</td>
-                            <td><span class="badge text-bg-secondary">not mounted</span></td>
+                            @if (r.Mounted)
+                            {
+                                <td><span class="badge text-bg-light border" title="A running pod mounts this claim, but its storage driver does not report how full it is.">usage not reported</span></td>
+                            }
+                            else
+                            {
+                                <td><span class="badge text-bg-secondary">not mounted</span></td>
+                            }
                         }
                     </tr>
                 }

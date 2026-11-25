@@ -34,6 +34,23 @@ public sealed class AppWorkloadMetricsComponentTests : BunitContext
         data.TextContent.Should().NotContain("not mounted");
     }
 
+    /// <summary>
+    /// A mounted claim whose storage does not measure itself: requested size, a badge saying usage
+    /// is not reported, and neither "not mounted" nor a 0 that reads as an empty disk.
+    /// </summary>
+    [Fact]
+    public void PvcTable_MountedClaimWithoutUsage_SaysUsageNotReported()
+    {
+        IRenderedComponent<PvcUsageTable> cut = Render<PvcUsageTable>(ps => ps.Add(p => p.Rows,
+        [
+            new PvcUsageRow("shop", "shop-data", null, null, null, 1024d * 1024 * 1024, Mounted: true),
+        ]));
+
+        string text = cut.Find("tr[data-claim='shop-data']").TextContent;
+        text.Should().Contain("usage not reported").And.Contain("1 GiB");
+        text.Should().NotContain("not mounted").And.NotContain("0 B").And.NotContain("%");
+    }
+
     [Fact]
     public void PvcTable_NoClaims_SaysSo()
         => Render<PvcUsageTable>(ps => ps.Add(p => p.Rows, []))

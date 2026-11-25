@@ -11,8 +11,10 @@ public sealed record AppMetricsScope(Guid ClusterId, string ClusterName, string 
 
 /// <summary>One persistent volume claim of an app, as the PVC table shows it.</summary>
 /// <param name="Mounted">
-/// Whether the kubelet reports the volume. Volume stats exist only while a pod mounts the claim;
-/// an unmounted claim has a requested size and nothing else.
+/// Whether a running pod mounts the claim, from kube-state-metrics' pod spec — not from the
+/// kubelet's volume stats. The kubelet reports usage only for volumes whose driver measures it
+/// (CSI drivers do; hostPath-backed ones such as local-path do not), so "no stats" is not "not
+/// mounted". An unmounted claim has a requested size and nothing else.
 /// </param>
 public sealed record PvcUsageRow(
     string Namespace,
@@ -26,6 +28,12 @@ public sealed record PvcUsageRow(
     /// <summary>Used as a share of capacity, or null when either is unknown.</summary>
     public double? UsedPercent =>
         UsedBytes is double used && CapacityBytes is double cap && cap > 0 ? used / cap * 100 : null;
+
+    /// <summary>
+    /// Whether the kubelet reported any usage for the claim. A mounted claim without it sits on
+    /// storage that does not measure itself — its usage is unknown, which is not zero.
+    /// </summary>
+    public bool UsageReported => UsedBytes is not null || CapacityBytes is not null || AvailableBytes is not null;
 }
 
 /// <summary>
@@ -43,10 +51,13 @@ public sealed record PvcUsageRow(
 /// rules filter them with <c>image!=""</c> as these do. <c>container!=""</c> drops the pod-level
 /// cgroup series, which would otherwise count every container twice.</item>
 /// <item><c>kube_pod_container_status_restarts_total</c>,
-/// <c>kube_persistentvolumeclaim_resource_requests_storage_bytes</c> — kube-state-metrics 2.20.0,
-/// the version that chart bundles.</item>
+/// <c>kube_persistentvolumeclaim_resource_requests_storage_bytes</c>,
+/// <c>kube_pod_spec_volumes_persistentvolumeclaims_info</c>, <c>kube_pod_status_phase</c> —
+/// kube-state-metrics 2.20.0, the version that chart bundles.</item>
 /// <item><c>kubelet_volume_stats_{used,capacity,available}_bytes</c> — the kubelet's own
-/// <c>/metrics</c>, used by the chart's KubePersistentVolumeFillingUp alerts.</item>
+/// <c>/metrics</c>, used by the chart's KubePersistentVolumeFillingUp alerts. Present only for
+/// volumes whose driver measures usage: on kind's local-path (hostPath) volumes there are none
+/// at all, verified on a live cluster.</item>
 /// <item><c>http_server_request_duration_seconds</c> (<c>_count</c>, <c>_bucket</c>) with
 /// <c>http_response_status_code</c> — OBI v1.0.0, the eBPF agent: the OTel
 /// <c>http.server.request.duration</c> histogram translated with unit suffixes. Its series carry
@@ -68,12 +79,13 @@ public static class AppWorkloadQueries
     public const string PvcCapacity = "pvcCapacity";
     public const string PvcAvailable = "pvcAvailable";
     public const string PvcRequested = "pvcRequested";
+    public const string PvcMounted = "pvcMounted";
     public const string HttpRate = "httpRate";
     public const string HttpErrors = "httpErrors";
     public const string HttpP95 = "httpP95";
 
     /// <summary>The volume queries: instant, per claim, for the table rather than a chart.</summary>
-    public static readonly IReadOnlyList<string> PvcKeys = [PvcUsed, PvcCapacity, PvcAvailable, PvcRequested];
+    public static readonly IReadOnlyList<string> PvcKeys = [PvcUsed, PvcCapacity, PvcAvailable, PvcRequested, PvcMounted];
 
     /// <summary>
     /// Every query for one cluster's namespaces.
@@ -117,6 +129,11 @@ public static class AppWorkloadQueries
             // Known for every bound or pending claim, mounted or not — the only size an
             // unmounted claim has.
             [PvcRequested] = PerClaim("kube_persistentvolumeclaim_resource_requests_storage_bytes", nsOnly),
+            // Claims a Running pod mounts. kube-state-metrics keeps reporting the spec of a Pending
+            // or finished pod, so the phase join is what makes this "mounted" and not "named".
+            [PvcMounted]   = "max by (namespace, persistentvolumeclaim) ("
+                           + $"kube_pod_spec_volumes_persistentvolumeclaims_info{nsOnly}"
+                           + $" * on (namespace, pod) group_left () (kube_pod_status_phase{{{ns},phase=\"Running\"}} == 1))",
 
             [HttpRate]     = $"sum(rate(http_server_request_duration_seconds_count{nsOnly}[{W}]))",
             [HttpErrors]   = $"sum(rate(http_server_request_duration_seconds_count{{{ns},http_response_status_code=~\"5..\"}}[{W}]))",
@@ -125,29 +142,30 @@ public static class AppWorkloadQueries
     }
 
     /// <summary>
-    /// Joins the four per-claim vectors into table rows, one per claim.
+    /// Joins the five per-claim vectors into table rows, one per claim.
     ///
-    /// <para>The claim set is the union: the kubelet knows only mounted claims and
-    /// kube-state-metrics knows every claim, so a claim with a requested size and no volume stats
-    /// is an unmounted one — shown with its requested size rather than dropped, or worse, shown as
-    /// 0 bytes used.</para>
+    /// <para>The claim set is the union: the kubelet knows only mounted claims whose storage
+    /// measures itself, and kube-state-metrics knows every claim. A claim is mounted when a running
+    /// pod mounts it, or when the kubelet reports it at all; one with neither is unmounted — shown
+    /// with its requested size rather than dropped, or worse, shown as 0 bytes used.</para>
     /// </summary>
     public static List<PvcUsageRow> PvcRows(
         IReadOnlyList<PrometheusMetricResult> used,
         IReadOnlyList<PrometheusMetricResult> capacity,
         IReadOnlyList<PrometheusMetricResult> available,
-        IReadOnlyList<PrometheusMetricResult> requested)
+        IReadOnlyList<PrometheusMetricResult> requested,
+        IReadOnlyList<PrometheusMetricResult> mountedBy)
     {
         Dictionary<(string, string), double> u = ByClaim(used), c = ByClaim(capacity),
-            a = ByClaim(available), r = ByClaim(requested);
+            a = ByClaim(available), r = ByClaim(requested), m = ByClaim(mountedBy);
 
-        return [.. u.Keys.Concat(c.Keys).Concat(a.Keys).Concat(r.Keys)
+        return [.. u.Keys.Concat(c.Keys).Concat(a.Keys).Concat(r.Keys).Concat(m.Keys)
             .Distinct()
             .OrderBy(k => k.Item1, StringComparer.Ordinal)
             .ThenBy(k => k.Item2, StringComparer.Ordinal)
             .Select(k =>
             {
-                bool mounted = u.ContainsKey(k) || c.ContainsKey(k) || a.ContainsKey(k);
+                bool mounted = m.ContainsKey(k) || u.ContainsKey(k) || c.ContainsKey(k) || a.ContainsKey(k);
                 return new PvcUsageRow(
                     k.Item1, k.Item2,
                     UsedBytes:      u.TryGetValue(k, out double uv) ? uv : null,

@@ -1062,7 +1062,8 @@ public class PrometheusService(
                 Dictionary<string, List<PrometheusMetricResult>> r = await QueryManyAsync(http, baseUrl, queries, token);
                 return AppWorkloadQueries.PvcRows(
                     r[AppWorkloadQueries.PvcUsed], r[AppWorkloadQueries.PvcCapacity],
-                    r[AppWorkloadQueries.PvcAvailable], r[AppWorkloadQueries.PvcRequested]);
+                    r[AppWorkloadQueries.PvcAvailable], r[AppWorkloadQueries.PvcRequested],
+                    r[AppWorkloadQueries.PvcMounted]);
             },
             $"volume usage for {clusterId}", ct, probeHealthEndpoint: false);
     }
