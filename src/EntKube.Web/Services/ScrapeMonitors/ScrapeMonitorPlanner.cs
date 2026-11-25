@@ -127,7 +127,7 @@ public static class ScrapeMonitorPlanner
 
             // From here on it is a question of who scrapes these endpoints. What Prometheus itself
             // says comes first: an active target is evidence, whatever any selector reads like.
-            if (OtherPoolOn(resolved) is { } pool)
+            if (OtherPoolOn(monitor, resolved) is { } pool)
             {
                 return Yield(target, monitor, MonitorState.CoveredElsewhere, existingIsOurs, resolved,
                     $"Prometheus already scrapes it through {pool}. EntKube adds no monitor of its own, because two "
@@ -256,14 +256,21 @@ public static class ScrapeMonitorPlanner
 
         // ── Who scrapes it already ────────────────────────────────────────────
 
-        /// <summary>A scrape job, not one of ours, with an active target on one of these endpoints.</summary>
-        private string? OtherPoolOn(ResolvedTargets resolved)
+        /// <summary>
+        /// A scrape job, not one of ours, with an active target on one of these endpoints.
+        ///
+        /// <para>The job of the monitor being decided is ours when nothing of that name is live: it
+        /// is what Prometheus keeps of one of ours that was just removed, until its next reload. The
+        /// same name is the same job, so writing the monitor again scrapes nothing twice.</para>
+        /// </summary>
+        private string? OtherPoolOn(MonitorSpec wanted, ResolvedTargets resolved)
         {
             HashSet<(string, int, string)> endpoints = [.. resolved.Endpoints.Select(e => (e.PodIp, e.Port, e.Path))];
 
             return live.Monitoring.Targets
                 .FirstOrDefault(t => endpoints.Contains((t.Host, t.Port, t.Path))
-                    && (t.Monitor is not { } monitor || !ours.Contains(monitor)))
+                    && (t.Monitor is not { } monitor
+                        || !(ours.Contains(monitor) || (monitor == wanted.Identity && !liveMonitors.ContainsKey(monitor)))))
                 ?.Pool;
         }
 

@@ -669,6 +669,59 @@ public class ScrapeMonitorPlannerTests
         world.Plan().HasChanges.Should().BeFalse();
     }
 
+    /// <summary>
+    /// Prometheus lets go of a pool when it next reloads, about a minute after the monitor is
+    /// deleted. Until then the pool of a monitor of ours that was just removed (pruned while its
+    /// row was briefly missing, or deleted by hand) is still in the target list, and it is the pool
+    /// of the very monitor about to be written: the same name is the same job, so writing it again
+    /// scrapes nothing twice. Seen on kind, where it held the monitor back for a whole pass.
+    /// </summary>
+    [Fact]
+    public void The_pool_our_removed_monitor_left_behind_does_not_keep_it_from_being_made_again()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Scraped("podMonitor/databases/entkube-cnpg-orders/0", pod, 9187);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.Create);
+        plan.Apply.Should().ContainSingle().Which.Identity.Should().Be(Pods("databases", "entkube-cnpg-orders"));
+    }
+
+    /// <summary>Only our own name: the pool another deleted monitor left behind still scrapes the pod.</summary>
+    [Fact]
+    public void The_pool_somebody_elses_removed_monitor_left_behind_still_covers_it()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Scraped("podMonitor/databases/orders/0", pod, 9187);
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.CoveredElsewhere);
+        world.Plan().HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Only while nothing of our name is live: a live one that is somebody else's owns its pool,
+    /// and Prometheus saying it scrapes the pod outweighs a selector that reads as if it did not.
+    /// </summary>
+    [Fact]
+    public void The_pool_of_somebody_elses_live_monitor_under_our_name_is_theirs()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Monitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders", "{}",
+            (ScrapeMonitorManifest.OwnershipLabel, Guid.NewGuid().ToString()));
+        world.Scraped("podMonitor/databases/entkube-cnpg-orders/0", pod, 9187);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere);
+        OnlyRow(plan).Detail.Should().Contain("podMonitor/databases/entkube-cnpg-orders/0");
+        plan.HasChanges.Should().BeFalse();
+    }
+
     [Fact]
     public void A_monitor_somebody_made_under_our_name_is_not_overwritten()
     {
