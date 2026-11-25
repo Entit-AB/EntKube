@@ -122,8 +122,11 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
 
     /// <summary>
     /// Whether to rate <paramref name="name"/>. The name decides for <c>_total</c> and
-    /// <c>_bucket</c>; a <c>_count</c> or <c>_sum</c> is a counter only when Prometheus holds its
-    /// family's <c>_bucket</c> series (histogram) or quantiles (summary) within the same scope.
+    /// <c>_bucket</c>; a <c>_count</c> or <c>_sum</c> is a counter only when Prometheus holds, within
+    /// the same scope, its family's <c>_bucket</c> series (histogram), quantiles (summary), or its
+    /// sibling — <c>_sum</c> for a <c>_count</c>, <c>_count</c> for a <c>_sum</c> — which is all a
+    /// summary without quantile objectives exposes (see
+    /// <see cref="PromMetricsQueryBuilder.FamilyMemberSelectors"/>). One lookup asks for all of them.
     /// A lookup that fails answers "gauge", which is what every name got before.
     /// </summary>
     /// <param name="lookupNames">
@@ -142,6 +145,7 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
         KubernetesOperationResult<List<string>> found = await lookupNames(
             PromMetricsQueryBuilder.FamilyMemberSelectors(family, namespaces, podPattern, service));
 
-        return found.IsSuccess && found.Data is { Count: > 0 };
+        return found.IsSuccess && found.Data is not null
+            && PromMetricsQueryBuilder.ProvesCumulativeFamily(family, found.Data);
     }
 }
