@@ -11,6 +11,35 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class YamlFormMergerTests
 {
+    /// <summary>
+    /// The written-out document used to lose every <c>---</c> that ended a line, so saving any form field of
+    /// a component with a certificate in its values broke the certificate.
+    /// </summary>
+    [Fact]
+    public void Saving_a_form_field_leaves_a_certificate_and_a_manifest_separator_whole()
+    {
+        string baseYaml = """
+            replicas: 1
+            ca: |
+              -----BEGIN CERTIFICATE-----
+              MIIBszCCAVmgAwIBAgIU
+              -----END CERTIFICATE-----
+            extraManifests: |
+              kind: ConfigMap
+              ---
+              kind: Secret
+            tail: done
+            """;
+
+        string result = YamlFormMerger.MergeFormValues(baseYaml, new Dictionary<string, string> { ["replicas"] = "2" });
+
+        YamlFormMerger.ExtractValue(result, "replicas").Should().Be("2");
+        YamlFormMerger.ExtractValue(result, "ca").Should().Be(
+            "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n");
+        YamlFormMerger.ExtractValue(result, "extraManifests").Should().Be("kind: ConfigMap\n---\nkind: Secret\n");
+        result.Should().NotStartWith("---").And.NotEndWith("...");
+    }
+
     // ──────── Simple top-level paths ────────
 
     [Fact]

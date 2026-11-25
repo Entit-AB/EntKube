@@ -46,8 +46,8 @@ else if (metrics is null || !metrics.HasData)
             Prometheus holds no metrics for this Keycloak instance.
         </div>
         <div class="text-muted">
-            Keycloak serves metrics on its management port (9000), but the Helm chart leaves its
-            ServiceMonitor switched off, so nothing scrapes them.
+            Keycloak serves metrics on its management port (9000). Where kube-prometheus-stack is
+            installed on the cluster, EntKube creates the ServiceMonitor that scrapes them.
         </div>
         <div class="mt-2">
             <button class="btn btn-sm btn-outline-secondary" @onclick="DiagnoseAsync" disabled="@busy">
@@ -314,8 +314,8 @@ else
             KubernetesOperationResult<ScrapeDiagnosis> result =
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
                     TenantId, ClusterId, Namespace, "keycloak",
-                    "Set serviceMonitor.enabled to true in the component's values "
-                    + "(Cluster → Components → keycloak → Values), then Save & Apply.");
+                    "EntKube creates this ServiceMonitor itself, a few minutes after Keycloak is running. "
+                    + "Cluster → Monitoring → Monitors says why it has not.");
 
             if (result.IsSuccess) diagnosis = result.Data;
             else error = result.Error;

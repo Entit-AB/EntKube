@@ -908,6 +908,18 @@ public class ComponentLifecycleService(
             }
         }
 
+        // Keycloak: the chart's own ServiceMonitor goes where the catalog put it there; EntKube makes the
+        // monitor. Not asked of the cluster first — with no Prometheus it fails the install, with one it is
+        // a second scrape of the same pods.
+        //
+        // ⚠️ BEFORE the theme fragments below. They are joined on as text, so a component with extraVolumes
+        // of its own gets that key twice: helm takes the last, and the YAML parser refuses the document —
+        // after them, this step would read such a Keycloak as empty and leave its monitor on.
+        if (component.HelmChartName == "keycloakx" && valuesYaml is not null)
+        {
+            valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
+        }
+
         // Keycloak: render any named-theme volumes / copier init container / login mount into
         // the chart's extra* values so Helm manages them alongside the StatefulSet. Without
         // this, `helm upgrade` resets the chart-managed volumes (dropping the out-of-band theme
@@ -969,6 +981,20 @@ public class ComponentLifecycleService(
         if (component.HelmChartName == "kube-prometheus-stack")
         {
             valuesYaml = YamlFormMerger.EnsurePrometheusScrapeDefaults(valuesYaml ?? "", valuesCatalog?.DefaultValues);
+        }
+
+        // SeaweedFS: its NetworkPolicies close the metrics port to everyone but its own pods, so the cluster's
+        // Prometheus is let in by name. Asked of Catalog's one answer at every apply, like OBI above.
+        //
+        // ⚠️ AFTER FillMissingCatalogDefaults: an install with no networkPolicy key gets the catalog's, enabled,
+        // from that step. Run before it, this would find no policy to add to, and the port would then be closed.
+        if (component.HelmChartName == "seaweedfs" && valuesYaml is not null)
+        {
+            EntKube.Contracts.Catalog.InstalledComponent? prometheus =
+                await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
+                    db.ClusterComponents, tenantId, component.ClusterId, ct);
+
+            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(valuesYaml, prometheus?.Namespace);
         }
 
         string releaseName = component.ReleaseName ?? component.Name;
