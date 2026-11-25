@@ -52,6 +52,7 @@ public class UnattendedDeclarationTests
         "RedisUserReconcileService:redis-per-app-users",
         "ResourceUsageCollectorService:resource-usage-collector",
         "RolloutWatcherService:rollout-watcher",
+        "ScrapeMonitorReconcileService:scrape-monitor-reconcile",
         "SearchStatusPollingService:search-status-polling",
         "SecretExpiryNotificationService:secret-expiry-notification",
         "SupplyChainScanService:supply-chain-scan",

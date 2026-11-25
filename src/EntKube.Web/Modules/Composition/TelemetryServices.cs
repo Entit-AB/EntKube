@@ -5,6 +5,7 @@ using EntKube.Web.Components;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Data;
 using EntKube.Web.Services.Agents;
+using EntKube.Web.Services.ScrapeMonitors;
 using EntKube.Web.Services.Telemetry;
 using EntKube.Web.Services.Tickets.Bridge;
 using EntKube.Web.Services.Tickets;
@@ -87,6 +88,9 @@ internal static class TelemetryServices
         services.AddSingletonWork<AlertSyncService>();
         services.AddSingletonWork<AlertEscalationService>();
         services.AddSingletonWork<UptimeTrackingService>();
+        services.AddScoped<ILiveScrapeStateReader, LiveScrapeStateReader>();
+        services.AddScoped<ScrapeMonitorService>();
+        services.AddSingletonWork<ScrapeMonitorReconcileService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.Telemetry.ITelemetryApi,
