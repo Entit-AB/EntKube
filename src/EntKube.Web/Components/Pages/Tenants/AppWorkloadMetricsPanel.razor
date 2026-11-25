@@ -148,7 +148,8 @@ else
         Task<RangeOutcome> errT    = RangeAsync(q[AppWorkloadQueries.HttpErrors], window);
         Task<RangeOutcome> p95T    = RangeAsync($"({q[AppWorkloadQueries.HttpP95]}) * 1000", window);
         Task<KubernetesOperationResult<List<PvcUsageRow>>> pvcT =
-            PrometheusService.GetPvcUsageAsync(TenantId, Scope.ClusterId, Scope.NsRegex, ct);
+            PrometheusService.GetPvcUsageAsync(TenantId, Scope.ClusterId, Scope.NsRegex, ct,
+                requireComponent: !Scope.ViaDefaultService);
 
         await Task.WhenAll(cpuT, cpuPodT, memT, memPodT, rstT, rateT, errT, p95T, pvcT);
 
@@ -187,7 +188,8 @@ else
     /// take the token.
     /// </summary>
     private async Task<RangeOutcome> RangeAsync(string query, TimeSpan window) =>
-        RangeOutcome.From(await PrometheusService.GetMetricRangeAsync(TenantId, Scope.ClusterId, query, window));
+        RangeOutcome.From(await PrometheusService.GetMetricRangeAsync(TenantId, Scope.ClusterId, query, window,
+            requireComponent: !Scope.ViaDefaultService));
 
     /// <summary>
     /// Per-pod lines for MultiSeriesChart, which places points by timestamp, so dropping the

@@ -7,7 +7,13 @@ namespace EntKube.Web.Services;
 /// about. <paramref name="NsRegex"/> is an escaped alternation (<c>billing|billing\-jobs</c>), never
 /// empty — an empty one is refused before a query is built, see <see cref="AppWorkloadQueries.Build"/>.
 /// </summary>
-public sealed record AppMetricsScope(Guid ClusterId, string ClusterName, string NsRegex);
+/// <param name="ViaDefaultService">
+/// The cluster answered on the default Prometheus service with no EntKube component behind it (a
+/// hand-installed release). The per-scope chart and volume calls must then resolve the same way:
+/// asked with the component required, they answered "No prometheus component found" for a scope
+/// whose totals were on screen right above them.
+/// </param>
+public sealed record AppMetricsScope(Guid ClusterId, string ClusterName, string NsRegex, bool ViaDefaultService = false);
 
 /// <summary>One persistent volume claim of an app, as the PVC table shows it.</summary>
 /// <param name="Mounted">
@@ -95,7 +101,8 @@ public sealed record HttpMetricsView(
 /// cgroup series, which would otherwise count every container twice.</item>
 /// <item><c>kube_pod_container_status_restarts_total</c>,
 /// <c>kube_persistentvolumeclaim_resource_requests_storage_bytes</c>,
-/// <c>kube_pod_spec_volumes_persistentvolumeclaims_info</c>, <c>kube_pod_status_phase</c> —
+/// <c>kube_pod_spec_volumes_persistentvolumeclaims_info</c>, and the Running-pod vector from
+/// <see cref="ClusterHealthQueries.RunningPodsWhere"/> —
 /// kube-state-metrics 2.20.0, the version that chart bundles.</item>
 /// <item><c>kubelet_volume_stats_{used,capacity,available}_bytes</c> — the kubelet's own
 /// <c>/metrics</c>, used by the chart's KubePersistentVolumeFillingUp alerts. Present only for
@@ -176,7 +183,7 @@ public static class AppWorkloadQueries
             // or finished pod, so the phase join is what makes this "mounted" and not "named".
             [PvcMounted]   = "max by (namespace, persistentvolumeclaim) ("
                            + $"kube_pod_spec_volumes_persistentvolumeclaims_info{nsOnly}"
-                           + $" * on (namespace, pod) group_left () (kube_pod_status_phase{{{ns},phase=\"Running\"}} == 1))",
+                           + $" * on (namespace, pod) group_left () {ClusterHealthQueries.RunningPodsWhere(ns)})",
 
             [HttpRate]     = $"sum(rate(http_server_request_duration_seconds_count{nsOnly}[{W}]))",
             [HttpErrors]   = $"sum(rate(http_server_request_duration_seconds_count{{{ns},http_response_status_code=~\"5..\"}}[{W}]))",

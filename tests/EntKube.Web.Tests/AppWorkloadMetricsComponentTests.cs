@@ -121,4 +121,21 @@ public sealed class AppWorkloadMetricsComponentTests : BunitContext
         cut.FindAll("svg").Should().HaveCount(2, "Requests and p95 still chart");
         cut.Markup.Should().NotContain("Insufficient data");
     }
+
+    /// <summary>The p95 query alone failing: its own column says so, and the other two still chart.</summary>
+    [Fact]
+    public void HttpCharts_OnlyP95Failed_ChartsTheRest_AndSaysWhichOneFailed()
+    {
+        DateTime t = new(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+        List<TimeSeriesDataPoint> pts = [new() { Timestamp = t, Value = 1 }, new() { Timestamp = t.AddMinutes(1), Value = 2 }];
+
+        IRenderedComponent<AppHttpMetricsCharts> cut = Render<AppHttpMetricsCharts>(ps => ps
+            .Add(p => p.Available, true).Add(p => p.Rate, pts).Add(p => p.Errors, pts)
+            .Add(p => p.P95LoadError, "query timed out"));
+
+        cut.Find("[data-failed='p95 latency']").TextContent.Should()
+            .Contain("Could not be loaded").And.Contain("query timed out");
+        cut.FindAll("svg").Should().HaveCount(2, "Requests and 5xx still chart");
+        cut.Markup.Should().NotContain("Insufficient data");
+    }
 }

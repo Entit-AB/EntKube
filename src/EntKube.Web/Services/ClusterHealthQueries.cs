@@ -92,6 +92,17 @@ public static class ClusterHealthQueries
     public const string RunningPods = "sum(kube_pod_status_phase{phase=\"Running\"})";
 
     /// <summary>
+    /// The Running pods matching <paramref name="matchers"/>, as a 1-valued vector per pod — the
+    /// right-hand side of a join (<c>… * on (namespace, pod) group_left () RunningPodsWhere(…)</c>).
+    /// The same definition of "running" as <see cref="RunningPods"/>, spelled here so a per-app
+    /// query that needs it does not keep a second one. <c>== 1</c> because kube-state-metrics
+    /// emits every phase for every pod, with 0 for the phases it is not in.
+    /// </summary>
+    /// <param name="matchers">Label matchers without braces, e.g. <c>namespace=~"shop"</c>.</param>
+    public static string RunningPodsWhere(string matchers) =>
+        $"(kube_pod_status_phase{{{matchers},phase=\"Running\"}} == 1)";
+
+    /// <summary>
     /// Pods that are not running <em>and that is a problem</em>.
     ///
     /// <para>⚠️ This was <c>sum(kube_pod_status_phase{phase!="Running"})</c>, labelled "Pods not

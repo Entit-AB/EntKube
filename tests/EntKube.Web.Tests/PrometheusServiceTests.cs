@@ -1393,6 +1393,50 @@ public class PrometheusServiceTests : IDisposable
     }
 
     /// <summary>
+    /// Only "the lookup answered and no ready pod is there" means not installed. A cluster whose API
+    /// refuses the lookup (403 here; equally an API server that does not answer, or a timeout) has
+    /// told us nothing about Prometheus — calling it "not installed" sent the operator to install
+    /// one rather than to the credentials.
+    /// </summary>
+    [Fact]
+    public async Task A_cluster_without_a_component_whose_api_refuses_the_probe_is_a_problem_not_without_prometheus()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+        apiServer.Forbid();
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeFalse("the only cluster asked could not be asked");
+        result.Error.Should().Contain("prod-cluster: ")
+            .And.NotContain("Prometheus is not installed on prod-cluster");
+    }
+
+    /// <summary>
+    /// A scope found on the default service is charted on the default service. Asked with the
+    /// component required, the panel's range and volume calls answered "No prometheus component
+    /// found" directly beneath the totals that scope had just produced.
+    /// </summary>
+    [Fact]
+    public async Task A_scope_found_on_the_default_service_is_charted_there_too()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+        apiServer.Serve(DefaultNs, DefaultService, 9090, scalar: "2");
+
+        AppMetricsScope scope = (await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId)).Data!.Scopes.Single();
+        scope.ViaDefaultService.Should().BeTrue();
+
+        KubernetesOperationResult<List<PrometheusTimeSeries>> range = await sut.GetMetricRangeAsync(
+            tenantId, scope.ClusterId, "up", TimeSpan.FromMinutes(30), requireComponent: !scope.ViaDefaultService);
+        range.IsSuccess.Should().BeTrue(range.Error);
+        range.Data!.Should().ContainSingle();
+
+        // The guard the flag lifts is still there for everyone else.
+        (await sut.GetMetricRangeAsync(tenantId, scope.ClusterId, "up", TimeSpan.FromMinutes(30)))
+            .Error.Should().Contain("No prometheus component found");
+    }
+
+    /// <summary>
     /// Once the default service has passed its health check there IS a Prometheus there, so a query
     /// that then fails is a problem with it — calling it "not installed" would send the operator to
     /// install something that is already running.
@@ -1446,6 +1490,7 @@ public class PrometheusServiceTests : IDisposable
     {
         private const string Pod = "prom-0";
         private (string Ns, string Service, int Port, string Scalar, bool QueriesFail)? served;
+        private bool forbidden;
 
         /// <summary>Every path asked, in order, without the query string.</summary>
         public List<string> Requests { get; } = [];
@@ -1453,10 +1498,20 @@ public class PrometheusServiceTests : IDisposable
         public void Serve(string ns, string service, int port, string scalar, bool queriesFail = false)
             => served = (ns, service, port, scalar, queriesFail);
 
+        /// <summary>Every request refused with 403, as for a kubeconfig without endpoints access.</summary>
+        public void Forbid() => forbidden = true;
+
         public HttpResponseMessage Answer(HttpRequestMessage request)
         {
             string path = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath);
             Requests.Add(path);
+
+            if (forbidden) return new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent(
+                    """{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403}""",
+                    System.Text.Encoding.UTF8, "application/json"),
+            };
 
             if (path.EndsWith("/endpoints", StringComparison.Ordinal))
                 return Json("""{"apiVersion":"v1","kind":"EndpointsList","metadata":{},"items":[]}""");

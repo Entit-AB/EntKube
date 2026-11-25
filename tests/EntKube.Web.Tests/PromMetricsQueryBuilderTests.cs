@@ -306,6 +306,17 @@ public sealed class PromMetricsQueryBuilderTests
     }
 
     /// <summary>
+    /// The mirror of the gauge above: a gauge that ends in <c>_sum</c> has itself in scope, which
+    /// the lookup always finds. Only the pair proves a family, so one side alone must not.
+    /// </summary>
+    [Fact]
+    public async Task IsCounterAsync_GaugeEndingInSum_WithNoCountBeside_IsNotRated()
+        => (await PromMetricsService.IsCounterAsync(
+                "cache_entries_sum", ["cust-a"], null, null,
+                Prometheus([], S("cache_entries_sum", "cust-a"))))
+            .Should().BeFalse("no _bucket, no quantiles, no _count: a gauge that happens to end in _sum");
+
+    /// <summary>
     /// The pair has to be in the explorer's scope: another customer's summary of the same name
     /// says nothing about this customer's gauge.
     /// </summary>

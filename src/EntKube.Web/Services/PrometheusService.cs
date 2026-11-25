@@ -647,10 +647,15 @@ public class PrometheusService(
     /// <summary>
     /// Queries a Prometheus range query over the given duration and returns time-series data.
     /// </summary>
+    /// <param name="requireComponent">
+    /// False only for a scope the aggregate already found answering on the default service
+    /// (<see cref="AppMetricsScope.ViaDefaultService"/>); see <see cref="ResolveReachableAsync"/>.
+    /// </param>
     public async Task<KubernetesOperationResult<List<PrometheusTimeSeries>>> GetMetricRangeAsync(
-        Guid tenantId, Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default,
+        bool requireComponent = true)
     {
-        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent);
         if (info is null) return KubernetesOperationResult<List<PrometheusTimeSeries>>.Failure(error!);
 
         long end   = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -1057,14 +1062,16 @@ public class PrometheusService(
     ///
     /// <para>Fails when any of the five volume queries failed — see <see cref="ReadPvcUsageAsync"/>.</para>
     /// </summary>
+    /// <param name="requireComponent">As on <see cref="GetMetricRangeAsync"/>.</param>
     public async Task<KubernetesOperationResult<List<PvcUsageRow>>> GetPvcUsageAsync(
-        Guid tenantId, Guid clusterId, string nsRegex, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string nsRegex, CancellationToken ct = default,
+        bool requireComponent = true)
     {
         if (string.IsNullOrWhiteSpace(nsRegex))
             return KubernetesOperationResult<List<PvcUsageRow>>.Failure(
                 "No namespace to look for volume claims in.");
 
-        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent);
         if (info is null) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(error!);
 
         KubernetesOperationResult<KubernetesOperationResult<List<PvcUsageRow>>> asked =
@@ -2329,7 +2336,8 @@ public class PrometheusService(
     /// (<see cref="PrometheusConfig"/>: <c>prometheus-kube-prometheus-prometheus:9090</c> in
     /// <c>monitoring</c>) answers — a hand-installed release EntKube never tracked.</item>
     /// <item><b>Without Prometheus</b> — it resolves, has no component, and nothing answers the
-    /// probe of the default service (no ready pod behind it, or <c>/-/healthy</c> refuses):
+    /// probe of the default service — the endpoints lookup answers and no ready pod stands behind
+    /// it (<see cref="NoReadyPodException"/>):
     /// <see cref="AppMetricsOverview.ClustersWithoutPrometheus"/>, the honest empty state.</item>
     /// <item><b>A problem</b> — it does not resolve for this tenant (or has no kubeconfig), its
     /// deployments carry no namespace, its registered Prometheus fails, or the default service
@@ -2341,9 +2349,10 @@ public class PrometheusService(
     /// nobody had installed. Then the query was dropped (<c>requireComponent: true</c>), and the
     /// customer tab and <see cref="GetAppMetricsAsync"/> stopped reading every cluster running a
     /// Prometheus EntKube did not install — those read as "not installed". The probe decides
-    /// between the two, and only a failure <em>before</em> the queries ran (no ready pod, unhealthy)
-    /// means "not installed": once Prometheus has passed its health check, a failing query is a
-    /// problem with a Prometheus that exists.</para>
+    /// between the two, and only "no ready pod" means "not installed". A lookup that could not be
+    /// made (403, an API server that does not answer, a timeout), an unhealthy pod, or a query
+    /// that failed is a problem — reported as "not installed" it sent operators to install a
+    /// Prometheus that may well be there.</para>
     ///
     /// <para>⚠️ <b>A successful zero is still impossible.</b> A group whose deployments have no
     /// namespace is refused rather than queried with <c>namespace=~""</c>, which matches no
@@ -2385,18 +2394,18 @@ public class PrometheusService(
             PrometheusConfig cfg = reachable.Config;
             string nsRegex = q.NsRegex;
 
-            // Set when the action starts, which WithServiceAsync reaches only after finding a ready
-            // pod behind the service and its /-/healthy answering. That is the probe: a failure
-            // before this point on a component-less cluster means nothing is serving there.
-            bool probePassed = false;
+            // The probe's one "not installed" answer: the cluster's API answered the endpoints
+            // lookup and no ready pod stands behind the default service (an absent namespace lists
+            // as empty, so it lands here too). Any other failure — 403 on the lookup, an API server
+            // that does not answer, a timeout, an unhealthy pod — is a problem with this cluster,
+            // and reporting it as "Prometheus is not installed" sent operators to install one.
+            bool nothingServing = false;
 
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
                     cluster, cfg.Namespace, cfg.ServiceName, cfg.ServicePort,
                     async (http, baseUrl, token) =>
                     {
-                        probePassed = true;
-
                         string cpuQ = Q($"sum(rate(container_cpu_usage_seconds_total{{namespace=~\"{nsRegex}\",container!=\"\"}}[5m]))");
                         string memQ = Q($"sum(container_memory_working_set_bytes{{namespace=~\"{nsRegex}\",container!=\"\"}})");
                         string podQ = Q($"count(count by (pod, namespace) (container_cpu_usage_seconds_total{{namespace=~\"{nsRegex}\",container!=\"\"}}))");
@@ -2409,17 +2418,19 @@ public class PrometheusService(
 
                         return (cpu, mem, pods, rst);
                     },
-                    logContext, ct);
+                    logContext, ct,
+                    onFailure: ex => nothingServing = ex is NoReadyPodException);
 
             if (result.IsSuccess)
             {
-                answered.Add(new AppMetricsScope(q.ClusterId, q.ClusterName, q.NsRegex));
+                answered.Add(new AppMetricsScope(q.ClusterId, q.ClusterName, q.NsRegex,
+                    ViaDefaultService: !reachable.Registered));
                 totalCpu      += result.Data.Item1;
                 totalMemBytes += result.Data.Item2;
                 totalPods     += result.Data.Item3;
                 totalRestarts += result.Data.Item4;
             }
-            else if (!reachable.Registered && !probePassed)
+            else if (!reachable.Registered && nothingServing)
             {
                 // No component, and nothing answers where one would be: not installed. Not a
                 // problem carrying a proxy error about a service nobody installed.
@@ -2537,10 +2548,11 @@ public class PrometheusService(
         Func<HttpClient, string, CancellationToken, Task<T>> action,
         string logContext,
         CancellationToken ct,
-        bool probeHealthEndpoint = true)
+        bool probeHealthEndpoint = true,
+        Action<Exception>? onFailure = null)
         => await WithServiceCoreAsync(
             cluster.GetPooledSdkClient(), ns, svcName, svcPort, action, logContext, ct,
-            probeHealthEndpoint);
+            probeHealthEndpoint, onFailure);
 
     private async Task<KubernetesOperationResult<T>> WithServiceCoreAsync<T>(
         Kubernetes k8s,
@@ -2550,13 +2562,14 @@ public class PrometheusService(
         Func<HttpClient, string, CancellationToken, Task<T>> action,
         string logContext,
         CancellationToken ct,
-        bool probeHealthEndpoint)
+        bool probeHealthEndpoint,
+        Action<Exception>? onFailure = null)
     {
         try
         {
             V1EndpointAddress? addr = await FindEndpointAddressAsync(k8s, ns, svcName, svcPort, ct);
             if (addr?.TargetRef is null)
-                throw new InvalidOperationException(
+                throw new NoReadyPodException(
                     $"No ready pods found for service {svcName}:{svcPort} in {ns}. " +
                     "Check the component's ReleaseName and Namespace, or set an explicit Configuration JSON.");
 
@@ -2586,6 +2599,9 @@ public class PrometheusService(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Prometheus query failed ({Context})", logContext);
+            // The failure's kind, for the one caller that must tell "nothing serving here" from
+            // "could not ask" — the message alone is the only thing the result carries.
+            onFailure?.Invoke(ex);
             return KubernetesOperationResult<T>.Failure(ex.Message);
         }
     }
@@ -2809,3 +2825,10 @@ public class CnpgScrapeDiagnosis
     /// <summary>The concrete next step, including any YAML to paste.</summary>
     public string? Remedy { get; init; }
 }
+
+/// <summary>
+/// The endpoints lookup answered and no ready pod stands behind the service: nothing is serving
+/// there. Its own type so the aggregate can tell this — "not installed" — apart from a lookup that
+/// could not be made at all (403, network, timeout), which is a problem with the cluster.
+/// </summary>
+internal sealed class NoReadyPodException(string message) : InvalidOperationException(message);
