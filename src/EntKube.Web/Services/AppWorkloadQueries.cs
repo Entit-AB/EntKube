@@ -37,6 +37,49 @@ public sealed record PvcUsageRow(
 }
 
 /// <summary>
+/// One range query's answer with its failure kept: <paramref name="Error"/> is null when
+/// Prometheus answered, and only then does an empty <paramref name="Series"/> mean "no series".
+/// </summary>
+public sealed record RangeOutcome(IReadOnlyList<PrometheusTimeSeries> Series, string? Error)
+{
+    public bool Succeeded => Error is null;
+
+    /// <summary>The first series' points, every step kept; empty when there is no series.</summary>
+    public List<TimeSeriesDataPoint> FirstSeries => Series.Count > 0 ? Series[0].DataPoints : [];
+
+    public static RangeOutcome From(KubernetesOperationResult<List<PrometheusTimeSeries>> result) =>
+        result.IsSuccess
+            ? new RangeOutcome(result.Data ?? [], null)
+            : new RangeOutcome([], string.IsNullOrWhiteSpace(result.Error) ? "The query failed." : result.Error);
+}
+
+/// <summary>What the app panel's HTTP section is showing. See <see cref="AppWorkloadQueries.HttpMetrics"/>.</summary>
+public enum HttpMetricsState
+{
+    /// <summary>Prometheus answered with request series: chart them.</summary>
+    Charted,
+
+    /// <summary>Prometheus answered, and holds no HTTP series for these namespaces: the install advice.</summary>
+    NoSeries,
+
+    /// <summary>The request query failed: nothing is known, and nothing is advised.</summary>
+    Failed,
+}
+
+/// <summary>The HTTP section's content, decided by <see cref="AppWorkloadQueries.HttpMetrics"/>.</summary>
+/// <param name="Error">Why the section could not be loaded, for <see cref="HttpMetricsState.Failed"/>.</param>
+/// <param name="ErrorsError">Why the 5xx chart alone could not be loaded, when the rest could.</param>
+/// <param name="P95Error">Why the p95 chart alone could not be loaded, when the rest could.</param>
+public sealed record HttpMetricsView(
+    HttpMetricsState State,
+    string? Error,
+    List<TimeSeriesDataPoint> Rate,
+    List<TimeSeriesDataPoint> Errors,
+    List<TimeSeriesDataPoint> P95Ms,
+    string? ErrorsError,
+    string? P95Error);
+
+/// <summary>
 /// The PromQL behind every app's basic metrics: CPU, memory, restarts, volume usage and HTTP
 /// traffic — what an app gets with nothing to configure on a cluster that runs Prometheus.
 ///
@@ -177,8 +220,56 @@ public static class AppWorkloadQueries
     }
 
     /// <summary>
-    /// The points a chart can draw. <c>histogram_quantile</c> answers NaN for a step with no
-    /// requests, and a NaN in an SVG coordinate breaks the whole line rather than leaving a gap.
+    /// The volume table from the five volume queries' outcomes, or a failure naming the ones that
+    /// did not answer. All or nothing, because the rows are a join: without the mounted query a
+    /// claim on storage that reports no kubelet stats reads "not mounted", without the requested
+    /// sizes an unmounted claim reads "—", and without all of them there are "no claims". See
+    /// <see cref="PrometheusService.ReadPvcUsageAsync"/>.
+    /// </summary>
+    public static KubernetesOperationResult<List<PvcUsageRow>> PvcUsage(
+        IReadOnlyDictionary<string, InstantQueryOutcome> outcomes)
+    {
+        List<(string Key, string Error)> failed =
+            [.. PvcKeys
+                .Select(k => (Key: k, Error: outcomes.TryGetValue(k, out InstantQueryOutcome? o)
+                    ? o.Error
+                    : "the query was not sent"))
+                .Where(f => f.Error is not null)
+                .Select(f => (f.Key, f.Error!))];
+
+        if (failed.Count > 0)
+        {
+            string which = string.Join(", ", failed.Select(f => PvcQueryNames[f.Key]));
+            string why = string.Join("; ", failed.Select(f => f.Error).Distinct());
+            return KubernetesOperationResult<List<PvcUsageRow>>.Failure(
+                $"Prometheus did not answer the volume queries for {which} ({why}). "
+                + "The table is not shown, because without them it would mislabel the claims.");
+        }
+
+        return KubernetesOperationResult<List<PvcUsageRow>>.Success(PvcRows(
+            outcomes[PvcUsed].Results, outcomes[PvcCapacity].Results, outcomes[PvcAvailable].Results,
+            outcomes[PvcRequested].Results, outcomes[PvcMounted].Results));
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> PvcQueryNames = new Dictionary<string, string>
+    {
+        [PvcUsed] = "used space",
+        [PvcCapacity] = "capacity",
+        [PvcAvailable] = "free space",
+        [PvcRequested] = "requested size",
+        [PvcMounted] = "which claims are mounted",
+    };
+
+    /// <summary>
+    /// The points a chart can draw, for <c>MultiSeriesChart</c>, which places points by their
+    /// timestamp — so dropping a step leaves a straight join across it, not a shifted time axis.
+    /// <c>histogram_quantile</c> answers NaN for a step with no requests, and a NaN in an SVG
+    /// coordinate breaks the whole line rather than leaving a gap.
+    ///
+    /// <para>⚠️ Not for <c>MetricChart</c>: that one places points by list index, so a dropped
+    /// step squeezed every later point leftwards and the p95 chart stopped lining up with the
+    /// Requests and 5xx charts beside it. MetricChart draws non-finite steps as gaps itself; see
+    /// <see cref="HttpMetrics"/>, which hands it the p95 series with every step.</para>
     /// </summary>
     public static List<TimeSeriesDataPoint> Drawable(IEnumerable<TimeSeriesDataPoint> points) =>
         [.. points.Where(p => double.IsFinite(p.Value))];
@@ -186,13 +277,69 @@ public static class AppWorkloadQueries
     /// <summary>
     /// The 5xx series, or zeros on the request series' timestamps when there is none. A status
     /// code's series exists only once that code has been answered, so with requests flowing and no
-    /// 5xx series the true rate is zero — not "insufficient data".
+    /// 5xx series the true rate is zero — not "insufficient data". Only for a 5xx query that
+    /// <b>answered</b>; see <see cref="HttpMetrics"/>.
     /// </summary>
     public static List<TimeSeriesDataPoint> ErrorsOrZeros(
         List<TimeSeriesDataPoint> errors, List<TimeSeriesDataPoint> requests) =>
         errors.Count > 0 || requests.Count == 0
             ? errors
             : [.. requests.Select(p => new TimeSeriesDataPoint { Timestamp = p.Timestamp, Value = 0 })];
+
+    /// <summary>
+    /// What the HTTP section shows, from the outcomes of its three range queries.
+    ///
+    /// <para>⚠️ The panel used to fold a failed range query into an empty list, so a failure and
+    /// an absence were the same value by the time they reached this decision. A failed 5xx query
+    /// beside a working request query then became <see cref="ErrorsOrZeros"/>' measured flat
+    /// 0/s line — "no errors" from a query that never answered; and a failed request query
+    /// became "no HTTP series", whose advice is to install Prometheus and re-apply the eBPF agent,
+    /// on a cluster where both are installed and Prometheus merely did not answer.</para>
+    ///
+    /// <list type="bullet">
+    /// <item>The request query failed: <see cref="HttpMetricsState.Failed"/> with its reason —
+    /// whether there is HTTP traffic at all is unknown.</item>
+    /// <item>It answered with no series: <see cref="HttpMetricsState.NoSeries"/>, the install
+    /// advice, whatever the other two did.</item>
+    /// <item>Otherwise charted. The 5xx series is zero-filled only when its query answered; when
+    /// it failed it is empty and <see cref="HttpMetricsView.ErrorsError"/> says why. The p95
+    /// series keeps every step, NaN included — MetricChart draws those as gaps.</item>
+    /// </list>
+    /// </summary>
+    public static HttpMetricsView HttpMetrics(RangeOutcome rate, RangeOutcome errors, RangeOutcome p95)
+    {
+        if (!rate.Succeeded)
+            return new HttpMetricsView(HttpMetricsState.Failed, rate.Error, [], [], [], null, null);
+
+        List<TimeSeriesDataPoint> requests = rate.FirstSeries;
+        if (rate.Series.Count == 0)
+            return new HttpMetricsView(HttpMetricsState.NoSeries, null, [], [], [], null, null);
+
+        return new HttpMetricsView(
+            HttpMetricsState.Charted, null,
+            requests,
+            errors.Succeeded ? ErrorsOrZeros(errors.FirstSeries, requests) : [],
+            p95.Succeeded ? p95.FirstSeries : [],
+            errors.Error,
+            p95.Error);
+    }
+
+    /// <summary>
+    /// The panel's warning banner: which charts could not be loaded, grouped by reason —
+    /// "CPU total, Memory total: Prometheus did not answer in time." — or null when all answered.
+    /// It used to keep only the first failure's reason and name no chart, so the reader could
+    /// not tell an empty chart that failed from one that is truly empty.
+    /// </summary>
+    public static string? FailedCharts(IEnumerable<(string Chart, RangeOutcome Outcome)> charts)
+    {
+        List<string> groups =
+            [.. charts
+                .Where(c => !c.Outcome.Succeeded)
+                .GroupBy(c => c.Outcome.Error!, StringComparer.Ordinal)
+                .Select(g => $"{string.Join(", ", g.Select(c => c.Chart))}: {g.Key}")];
+
+        return groups.Count == 0 ? null : string.Join("; ", groups);
+    }
 
     /// <summary>A byte count for the volume table, in binary units: <c>512 MiB</c>, <c>1.5 GiB</c>.</summary>
     public static string FormatBytes(double bytes)
