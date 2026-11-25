@@ -90,6 +90,8 @@ internal static class TelemetryServices
         services.AddSingletonWork<UptimeTrackingService>();
         services.AddScoped<ILiveScrapeStateReader, LiveScrapeStateReader>();
         services.AddScoped<ScrapeMonitorService>();
+        // The Monitors panel's seam. A second instance per scope, which is harmless: it holds nothing.
+        services.AddScoped<IScrapeMonitors, ScrapeMonitorService>();
         services.AddSingletonWork<ScrapeMonitorReconcileService>();
 
         // The module's contract — what everyone else is allowed to know about it.
