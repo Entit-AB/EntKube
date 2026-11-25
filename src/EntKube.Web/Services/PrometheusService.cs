@@ -34,6 +34,15 @@ public class PrometheusMetricResult
 }
 
 /// <summary>
+/// One instant query's answer with its failure kept: <paramref name="Error"/> is null when
+/// Prometheus answered, and then an empty <paramref name="Results"/> really is "no series".
+/// </summary>
+public sealed record InstantQueryOutcome(List<PrometheusMetricResult> Results, string? Error)
+{
+    public bool Succeeded => Error is null;
+}
+
+/// <summary>
 /// A time-series result from a Prometheus range query — a set of data points over time.
 /// </summary>
 public class PrometheusTimeSeries
@@ -1041,6 +1050,8 @@ public class PrometheusService(
     /// The volume claims of one app's namespaces on one cluster: used, capacity and free for each
     /// mounted claim, and the requested size of each unmounted one. See
     /// <see cref="AppWorkloadQueries.PvcRows"/>.
+    ///
+    /// <para>Fails when any of the five volume queries failed — see <see cref="ReadPvcUsageAsync"/>.</para>
     /// </summary>
     public async Task<KubernetesOperationResult<List<PvcUsageRow>>> GetPvcUsageAsync(
         Guid tenantId, Guid clusterId, string nsRegex, CancellationToken ct = default)
@@ -1052,20 +1063,39 @@ public class PrometheusService(
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(error!);
 
+        KubernetesOperationResult<KubernetesOperationResult<List<PvcUsageRow>>> asked =
+            await WithServiceAsync<KubernetesOperationResult<List<PvcUsageRow>>>(
+                info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                (http, baseUrl, token) => ReadPvcUsageAsync(http, baseUrl, nsRegex, token),
+                $"volume usage for {clusterId}", ct, probeHealthEndpoint: false);
+
+        if (!asked.IsSuccess) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(asked.Error!);
+        if (!asked.Data!.IsSuccess)
+            logger.LogWarning("Volume usage for {ClusterId} not shown: {Error}", clusterId, asked.Data.Error);
+        return asked.Data;
+    }
+
+    /// <summary>
+    /// The five volume queries against one Prometheus, joined into rows — or a failure naming the
+    /// queries that did not answer.
+    ///
+    /// <para>⚠️ This used to go through <see cref="QueryManyAsync"/>, which turns a failed query
+    /// into an empty vector so one metric a broker does not export cannot blank a whole panel.
+    /// For this table that is the wrong trade: the rows are a <i>join</i> of the five vectors, and
+    /// with the health probe skipped (<c>probeHealthEndpoint: false</c>) nothing else notices a
+    /// Prometheus answering 503 or timing out. All five failing read as "No persistent volume
+    /// claims"; only the mounted query failing turned every claim on local-path storage (which
+    /// reports no kubelet stats) into "not mounted"; only the requested-size query failing showed
+    /// every unmounted claim's size as "—". Each of those is a confident statement about the app's
+    /// storage that nobody measured, so a partial table is not shown at all.</para>
+    /// </summary>
+    public static async Task<KubernetesOperationResult<List<PvcUsageRow>>> ReadPvcUsageAsync(
+        HttpClient http, string baseUrl, string nsRegex, CancellationToken ct)
+    {
         IReadOnlyDictionary<string, string> all = AppWorkloadQueries.Build(nsRegex);
         Dictionary<string, string> queries = AppWorkloadQueries.PvcKeys.ToDictionary(k => k, k => all[k]);
 
-        return await WithServiceAsync<List<PvcUsageRow>>(
-            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
-            async (http, baseUrl, token) =>
-            {
-                Dictionary<string, List<PrometheusMetricResult>> r = await QueryManyAsync(http, baseUrl, queries, token);
-                return AppWorkloadQueries.PvcRows(
-                    r[AppWorkloadQueries.PvcUsed], r[AppWorkloadQueries.PvcCapacity],
-                    r[AppWorkloadQueries.PvcAvailable], r[AppWorkloadQueries.PvcRequested],
-                    r[AppWorkloadQueries.PvcMounted]);
-            },
-            $"volume usage for {clusterId}", ct, probeHealthEndpoint: false);
+        return AppWorkloadQueries.PvcUsage(await QueryManyReportingAsync(http, baseUrl, queries, ct));
     }
 
     /// <summary>
@@ -1830,6 +1860,78 @@ public class PrometheusService(
         {
             logger.LogDebug(ex, "Instant query failed, treating as no data: {Query}", query);
             return [];
+        }
+    }
+
+    /// <summary>
+    /// <see cref="QueryManyAsync"/> for callers to whom a failed query is not "no data": every
+    /// key's outcome carries either its results or why there are none. The RabbitMQ and Keycloak
+    /// panels keep the folding variant, where one unexported metric must not blank the rest.
+    /// Cancellation by <paramref name="ct"/> propagates; it is the caller giving up, not an answer.
+    /// </summary>
+    public static async Task<Dictionary<string, InstantQueryOutcome>> QueryManyReportingAsync(
+        HttpClient http, string baseUrl, IReadOnlyDictionary<string, string> queries, CancellationToken ct)
+    {
+        KeyValuePair<string, string>[] pairs = [.. queries];
+
+        InstantQueryOutcome[] outcomes = await Task.WhenAll(
+            pairs.Select(kv => InstantReportingAsync(http, baseUrl, kv.Value, ct)));
+
+        Dictionary<string, InstantQueryOutcome> byKey = [];
+        for (int i = 0; i < pairs.Length; i++)
+            byKey[pairs[i].Key] = outcomes[i];
+
+        return byKey;
+    }
+
+    private static async Task<InstantQueryOutcome> InstantReportingAsync(
+        HttpClient http, string baseUrl, string query, CancellationToken ct)
+    {
+        try
+        {
+            string json = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(query)}", ct);
+            string? refused = PrometheusRefusal(json);
+            return refused is null
+                ? new InstantQueryOutcome(ParseInstantQueryResult(json), null)
+                : new InstantQueryOutcome([], refused);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TaskCanceledException)
+        {
+            // Not our token: HttpClient's own timeout, which surfaces as a cancellation.
+            return new InstantQueryOutcome([], "Prometheus did not answer in time.");
+        }
+        catch (Exception ex)
+        {
+            return new InstantQueryOutcome([], ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Why a 2xx body is not a result, or null when it is one. <see cref="ParseInstantQueryResult"/>
+    /// answers an empty list for both <c>"status":"error"</c> and a body that is not JSON at all
+    /// (a proxy's HTML page), which is exactly the confusion the reporting path exists to avoid.
+    /// </summary>
+    private static string? PrometheusRefusal(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("status", out JsonElement status))
+                return "Prometheus answered with something that is not a query result.";
+            if (status.GetString() == "success") return null;
+            return root.TryGetProperty("error", out JsonElement error) && error.GetString() is { Length: > 0 } message
+                ? message
+                : $"Prometheus answered with status \"{status.GetString()}\".";
+        }
+        catch (JsonException)
+        {
+            return "Prometheus answered with something that is not a query result.";
         }
     }
 

@@ -1208,6 +1208,100 @@ public class PrometheusServiceTests : IDisposable
         result.Error.Should().Contain("No namespace");
     }
 
+    // ── The volume queries, through a real HttpClient ───────────────
+    //
+    // GetPvcUsageAsync reaches Prometheus through the API server's pod proxy on a concrete
+    // Kubernetes client, so these drive ReadPvcUsageAsync — what it runs once there — with a
+    // stub handler standing in for Prometheus. The remaining one-line wiring (that
+    // GetPvcUsageAsync hands its proxy HttpClient to ReadPvcUsageAsync and passes a failure
+    // through) is not covered here.
+
+    private const string VolumeOk = """
+        {"status":"success","data":{"resultType":"vector","result":[
+          {"metric":{"namespace":"shop","persistentvolumeclaim":"local"},"value":[1732449600,"2048"]}]}}
+        """;
+
+    /// <summary>Answers each query by the metric it names: a status and a body, or a 200 with a result.</summary>
+    private sealed class StubPrometheus(Func<string, (System.Net.HttpStatusCode Status, string Body)> answer) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            string query = Uri.UnescapeDataString(request.RequestUri!.Query);
+            (System.Net.HttpStatusCode status, string body) = answer(query);
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
+        }
+    }
+
+    private static Task<KubernetesOperationResult<List<PvcUsageRow>>> ReadVolumes(
+        Func<string, (System.Net.HttpStatusCode, string)> answer, CancellationToken ct = default)
+        => PrometheusService.ReadPvcUsageAsync(
+            new HttpClient(new StubPrometheus(answer)), "http://prometheus.test", "shop", ct);
+
+    [Fact]
+    public async Task Volume_usage_is_read_when_every_volume_query_answers()
+    {
+        KubernetesOperationResult<List<PvcUsageRow>> result =
+            await ReadVolumes(_ => (System.Net.HttpStatusCode.OK, VolumeOk));
+
+        result.IsSuccess.Should().BeTrue();
+        result.Data!.Should().ContainSingle(r => r.Claim == "local" && r.Mounted);
+    }
+
+    /// <summary>
+    /// ⚠️ With the health probe skipped, a Prometheus answering 503 to the mounted query alone
+    /// used to be a successful table in which a claim on local-path storage — no kubelet stats —
+    /// read "not mounted". The shared helper turned the 503 into an empty vector.
+    /// </summary>
+    [Fact]
+    public async Task A_volume_query_answering_503_fails_the_volume_table_and_is_named()
+    {
+        KubernetesOperationResult<List<PvcUsageRow>> result = await ReadVolumes(q =>
+            q.Contains("kube_pod_spec_volumes_persistentvolumeclaims_info")
+                ? (System.Net.HttpStatusCode.ServiceUnavailable, "upstream unavailable")
+                : (System.Net.HttpStatusCode.OK, VolumeOk));
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("which claims are mounted").And.Contain("503");
+    }
+
+    [Fact]
+    public async Task Every_volume_query_failing_is_a_failure_not_an_app_without_claims()
+    {
+        KubernetesOperationResult<List<PvcUsageRow>> result =
+            await ReadVolumes(_ => (System.Net.HttpStatusCode.GatewayTimeout, ""));
+
+        result.IsSuccess.Should().BeFalse(
+            "the table's empty state says \"No persistent volume claims\", which nobody measured");
+    }
+
+    /// <summary>A 200 whose body is a Prometheus error, or not a query result at all, is not "no series".</summary>
+    [Theory]
+    [InlineData("""{"status":"error","errorType":"execution","error":"query processing would load too many samples"}""", "too many samples")]
+    [InlineData("<html>Bad gateway</html>", "not a query result")]
+    public async Task A_volume_query_answered_with_an_error_body_is_a_failure(string body, string reason)
+    {
+        KubernetesOperationResult<List<PvcUsageRow>> result = await ReadVolumes(q =>
+            q.Contains("kube_persistentvolumeclaim_resource_requests_storage_bytes")
+                ? (System.Net.HttpStatusCode.OK, body)
+                : (System.Net.HttpStatusCode.OK, VolumeOk));
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("requested size").And.Contain(reason);
+    }
+
+    [Fact]
+    public async Task Cancelling_the_volume_read_cancels_it_rather_than_reporting_failed_queries()
+    {
+        using CancellationTokenSource cts = new();
+        cts.Cancel();
+
+        Func<Task> read = () => ReadVolumes(_ => (System.Net.HttpStatusCode.OK, VolumeOk), cts.Token);
+
+        await read.Should().ThrowAsync<OperationCanceledException>(
+            "the caller gave up; that is not five queries Prometheus failed to answer");
+    }
+
     /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>
     private async Task<(Guid TenantId, Guid ClusterId)> SeedReachableClusterAsync()
     {

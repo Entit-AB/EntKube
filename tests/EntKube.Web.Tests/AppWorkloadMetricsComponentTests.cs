@@ -81,4 +81,44 @@ public sealed class AppWorkloadMetricsComponentTests : BunitContext
         cut.Markup.Should().Contain("Requests").And.Contain("5xx errors").And.Contain("p95 latency");
         cut.FindAll("svg").Should().HaveCount(3);
     }
+
+    /// <summary>
+    /// ⚠️ A failed request query used to arrive here as "no series", and the reader was told to
+    /// install Prometheus and apply the eBPF agent again — on a cluster running both, whose
+    /// Prometheus had merely not answered. A failure says so, and advises nothing.
+    /// </summary>
+    [Fact]
+    public void HttpCharts_QueriesFailed_SayCouldNotBeLoaded_AndGiveNoInstallAdvice()
+    {
+        IRenderedComponent<AppHttpMetricsCharts> cut = Render<AppHttpMetricsCharts>(ps => ps
+            .Add(p => p.Available, false)
+            .Add(p => p.LoadError, "Response status code does not indicate success: 503 (Service Unavailable)."));
+
+        string text = cut.Find("[data-failed='http']").TextContent;
+        text.Should().Contain("could not be loaded").And.Contain("503 (Service Unavailable)");
+        cut.Markup.Should().NotContain("No HTTP metrics yet")
+            .And.NotContain("apply the agent again")
+            .And.NotContain("installing Prometheus");
+        cut.FindAll("[data-empty='http']").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The 5xx query alone failing: the Requests chart still draws, and the 5xx column says it
+    /// could not be loaded — not a chart, which would be a line of zeros or "Insufficient data".
+    /// </summary>
+    [Fact]
+    public void HttpCharts_Only5xxFailed_ChartsTheRest_AndSaysWhichOneFailed()
+    {
+        DateTime t = new(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+        List<TimeSeriesDataPoint> pts = [new() { Timestamp = t, Value = 1 }, new() { Timestamp = t.AddMinutes(1), Value = 2 }];
+
+        IRenderedComponent<AppHttpMetricsCharts> cut = Render<AppHttpMetricsCharts>(ps => ps
+            .Add(p => p.Available, true).Add(p => p.Rate, pts).Add(p => p.P95Ms, pts)
+            .Add(p => p.ErrorsLoadError, "query timed out"));
+
+        cut.Find("[data-failed='5xx errors']").TextContent.Should()
+            .Contain("Could not be loaded").And.Contain("query timed out");
+        cut.FindAll("svg").Should().HaveCount(2, "Requests and p95 still chart");
+        cut.Markup.Should().NotContain("Insufficient data");
+    }
 }

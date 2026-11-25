@@ -5,10 +5,18 @@
    HTTP servers, as the eBPF agent (OBI) measures them from outside the
    process. Nothing to instrument; but the agent only publishes once both it
    and Prometheus are installed, so an absent series is said plainly rather
-   than drawn as a flat line at zero.
+   than drawn as a flat line at zero — and a query that failed is said as a
+   failure, not as an absent series with advice to install what is installed.
    ═══════════════════════════════════════════════════════════════════════════ *@
 
-@if (!Available)
+@if (LoadError is not null)
+{
+    <div class="alert alert-warning py-2 small mb-0" data-failed="http">
+        <span class="bi bi-exclamation-triangle me-1"></span>
+        HTTP metrics could not be loaded: @LoadError
+    </div>
+}
+else if (!Available)
 {
     <div class="alert alert-secondary py-2 small mb-0" data-empty="http">
         <span class="bi bi-info-circle me-1"></span>
@@ -23,10 +31,24 @@ else
             <MetricChart Title="Requests" DataPoints="Rate" Color="#0d6efd" Unit="/s" HeightPx="90" ShowAxes="true" />
         </div>
         <div class="col-md-4">
-            <MetricChart Title="5xx errors" DataPoints="Errors" Color="#dc3545" Unit="/s" HeightPx="90" ShowAxes="true" />
+            @if (ErrorsLoadError is not null)
+            {
+                @ChartFailed("5xx errors", ErrorsLoadError)
+            }
+            else
+            {
+                <MetricChart Title="5xx errors" DataPoints="Errors" Color="#dc3545" Unit="/s" HeightPx="90" ShowAxes="true" />
+            }
         </div>
         <div class="col-md-4">
-            <MetricChart Title="p95 latency" DataPoints="P95Ms" Color="#fd7e14" Unit="ms" HeightPx="90" ShowAxes="true" />
+            @if (P95LoadError is not null)
+            {
+                @ChartFailed("p95 latency", P95LoadError)
+            }
+            else
+            {
+                <MetricChart Title="p95 latency" DataPoints="P95Ms" Color="#fd7e14" Unit="ms" HeightPx="90" ShowAxes="true" />
+            }
         </div>
     </div>
 }
@@ -38,9 +60,35 @@ else
     /// </summary>
     [Parameter] public bool Available { get; set; }
 
+    /// <summary>
+    /// Why the HTTP queries could not be answered, when they could not. Wins over
+    /// <see cref="Available"/>: a failed query knows nothing about whether the agent is installed,
+    /// so it must not say "No HTTP metrics yet … apply the agent again".
+    /// </summary>
+    [Parameter] public string? LoadError { get; set; }
+
     [Parameter] public List<TimeSeriesDataPoint> Rate { get; set; } = [];
     [Parameter] public List<TimeSeriesDataPoint> Errors { get; set; } = [];
 
-    /// <summary>p95 latency in milliseconds, already free of the NaN steps that had no requests.</summary>
+    /// <summary>Why the 5xx query alone failed; its chart says so instead of drawing a zero line.</summary>
+    [Parameter] public string? ErrorsLoadError { get; set; }
+
+    /// <summary>
+    /// p95 latency in milliseconds, every step kept: the NaN of a step with no requests is drawn
+    /// as a gap by MetricChart, so this chart stays aligned with the two beside it.
+    /// </summary>
     [Parameter] public List<TimeSeriesDataPoint> P95Ms { get; set; } = [];
+
+    /// <summary>Why the p95 query alone failed.</summary>
+    [Parameter] public string? P95LoadError { get; set; }
+
+    // In the chart's own column and under its own title, so the row keeps its shape and the
+    // reader sees which of the three it is — an empty MetricChart would say "Insufficient data".
+    private static RenderFragment ChartFailed(string title, string reason) =>
+        @<div class="metric-chart-container" data-failed="@title">
+            <small class="text-muted fw-medium">@title</small>
+            <div class="text-warning small py-2">
+                <span class="bi bi-exclamation-triangle me-1"></span>Could not be loaded: @reason
+            </div>
+        </div>;
 }
