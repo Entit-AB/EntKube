@@ -246,6 +246,20 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         cluster.Queries.Should().Contain(q => q.Contains("namespace=~\"legacy|\""));
     }
 
+    [Fact]
+    public void A_broker_diagnosis_that_could_not_read_the_monitors_says_so_and_does_not_blame_prometheus()
+    {
+        cluster.Query = q => q.Contains("or vector(0)") ? Series("0") : NoSeries;
+        cluster.Refuse(ServiceMonitorsPath, System.Net.HttpStatusCode.Forbidden);
+        IRenderedComponent<RabbitMQMonitoringPanel> cut = Brokers(Broker("mq", "orders"));
+
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-diagnosis-error]").TextContent
+            .Should().Contain("Could not read the ServiceMonitors"));
+        cut.Markup.Should().NotContain("Prometheus query failed").And.NotContain("No ServiceMonitor");
+    }
+
     // ──────── Keycloak ────────
 
     [Fact]
@@ -263,5 +277,21 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("No ServiceMonitor"));
         cut.Markup.Should().Contain("Apply monitors now")
             .And.NotContain("serviceMonitor.enabled").And.NotContain("switched off");
+    }
+
+    [Fact]
+    public void A_keycloak_diagnosis_that_could_not_read_the_monitors_keeps_the_panel_and_says_so()
+    {
+        cluster.Refuse(ServiceMonitorsPath, System.Net.HttpStatusCode.Forbidden);
+
+        IRenderedComponent<KeycloakMonitoringPanel> cut = Render<KeycloakMonitoringPanel>(ps => ps
+            .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId)
+            .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso"));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Why is this empty?"));
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-diagnosis-error]").TextContent
+            .Should().Contain("Could not read the ServiceMonitors"));
+        cut.Markup.Should().Contain("Why is this empty?").And.NotContain("Prometheus query failed");
     }
 }

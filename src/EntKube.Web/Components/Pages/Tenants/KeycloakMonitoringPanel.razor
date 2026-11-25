@@ -55,6 +55,13 @@ else if (metrics is null || !metrics.HasData)
             </button>
         </div>
 
+        @if (diagnosisError is not null)
+        {
+            <div class="text-danger mt-2" data-diagnosis-error>
+                <span class="bi bi-x-circle me-1"></span>@diagnosisError
+            </div>
+        }
+
         @if (diagnosis is not null)
         {
             <ul class="mt-2 mb-1 ps-3">
@@ -228,6 +235,12 @@ else
     private KeycloakMetricsSummary? metrics;
     private string? error;
     private ScrapeDiagnosis? diagnosis;
+
+    /// <summary>
+    /// Why the diagnosis has no answer. Not <c>error</c>: that one replaces the whole panel with
+    /// "Prometheus query failed", which is about the metrics and would hide the button to try again.
+    /// </summary>
+    private string? diagnosisError;
     private List<ChartView> charts = [];
     private bool isLoading = true;
     private bool busy;
@@ -318,15 +331,15 @@ else
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
                     TenantId, ClusterId, MonitoredWorkload.Keycloak(ReleaseName, Namespace));
 
-            if (result.IsSuccess) diagnosis = result.Data;
-            else error = result.Error;
+            diagnosis = result.IsSuccess ? result.Data : null;
+            diagnosisError = result.IsSuccess ? null : result.Error;
         }
         catch (Exception ex)
         {
             // The diagnosis resolves the cluster's kubeconfig through the vault before its own
             // error handling begins, so a database or vault failure surfaces here. Unhandled, it
             // would reach the Blazor dispatcher and tear down the circuit.
-            error = ex.Message;
+            diagnosisError = ex.Message;
         }
         finally
         {
