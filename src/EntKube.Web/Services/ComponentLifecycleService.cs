@@ -920,6 +920,14 @@ public class ComponentLifecycleService(
             valuesYaml = YamlFormMerger.EnsureObiResourceBounds(valuesYaml ?? "");
         }
 
+        // kube-prometheus-stack: the monitor-selector flags and the annotation scrape job live under
+        // prometheus.prometheusSpec, and every install has a `prometheus` key — so, like OBI's bounds, they
+        // reached new installs only. Older ones kept selecting nothing other operators create.
+        if (component.HelmChartName == "kube-prometheus-stack")
+        {
+            valuesYaml = YamlFormMerger.EnsurePrometheusScrapeDefaults(valuesYaml ?? "", valuesCatalog?.DefaultValues);
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"

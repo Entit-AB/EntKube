@@ -679,6 +679,65 @@ public static class YamlFormMerger
         return changed ? SerializeToYaml(root) : yaml;
     }
 
+    /// <summary>
+    /// The keys under <c>prometheus.prometheusSpec</c> that an existing kube-prometheus-stack install is
+    /// given from the catalog when it has none of its own: the five monitor-selector flags, and the
+    /// annotation scrape job.
+    ///
+    /// <para>⚠️ <c>storageSpec</c> is deliberately not among them. Adding it to a running Prometheus
+    /// changes the StatefulSet's volume claim templates, and the metrics history kept on the pod so far
+    /// does not move to the new volume — a change an operator makes on purpose (the storage field on the
+    /// component form), never one an apply makes on the side.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> PrometheusSpecFillIns =
+    [
+        "podMonitorSelectorNilUsesHelmValues",
+        "serviceMonitorSelectorNilUsesHelmValues",
+        "probeSelectorNilUsesHelmValues",
+        "scrapeConfigSelectorNilUsesHelmValues",
+        "ruleSelectorNilUsesHelmValues",
+        "additionalScrapeConfigs",
+    ];
+
+    /// <summary>
+    /// Carries the catalog's scrape defaults to a kube-prometheus-stack installed before they existed.
+    ///
+    /// <para><b>Why this is needed.</b> <c>FillMissingCatalogDefaults</c> fills top-level keys only, and
+    /// every install already has a <c>prometheus:</c> key — so the selector flags that let Prometheus see
+    /// monitors other operators create (CNPG, Strimzi, RabbitMQ) reached new installs only, and the CNPG
+    /// panel had to tell operators to paste them in by hand. The annotation scrape job would have met the
+    /// same fate.</para>
+    ///
+    /// <para><b>Strictly additive.</b> Each key in <see cref="PrometheusSpecFillIns"/> is copied from the
+    /// catalog only when the stored values do not have it. A key the operator set — to anything, including
+    /// <c>true</c> or an <c>additionalScrapeConfigs</c> of their own — is left exactly as it is. The values
+    /// come from the catalog document itself, so this cannot drift from what a new install gets.</para>
+    /// </summary>
+    public static string EnsurePrometheusScrapeDefaults(string yaml, string? catalogDefaults)
+    {
+        if (string.IsNullOrWhiteSpace(yaml) || string.IsNullOrWhiteSpace(catalogDefaults)) return yaml;
+
+        YamlMappingNode catalog = ParseOrCreateRoot(catalogDefaults);
+        if (!TryGetMapping(catalog, "prometheus", out YamlMappingNode? catalogPrometheus)
+            || !TryGetMapping(catalogPrometheus!, "prometheusSpec", out YamlMappingNode? catalogSpec))
+        {
+            return yaml;
+        }
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        YamlMappingNode spec = GetOrCreateMapping(GetOrCreateMapping(root, "prometheus"), "prometheusSpec");
+
+        bool changed = false;
+        foreach (string key in PrometheusSpecFillIns)
+        {
+            if (TryGetValue(spec, key, out _) || !TryGetValue(catalogSpec!, key, out YamlNode? wanted)) continue;
+            spec.Children[new YamlScalarNode(key)] = wanted!;
+            changed = true;
+        }
+
+        return changed ? SerializeToYaml(root) : yaml;
+    }
+
     private static bool TryGetMapping(YamlMappingNode parent, string key, out YamlMappingNode? mapping)
     {
         mapping = TryGetValue(parent, key, out YamlNode? value) ? value as YamlMappingNode : null;
