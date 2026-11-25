@@ -211,6 +211,16 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_pass_that_only_removes_makes_no_apply()
+    {
+        AnOrphan();
+
+        await ReconcileAsync();
+
+        log.Skip(4).Should().Equal("delete");
+    }
+
+    [Fact]
     public async Task Only_the_monitor_that_differs_is_applied()
     {
         ADatabaseWithoutAMonitor();
