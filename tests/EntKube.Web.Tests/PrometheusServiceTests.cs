@@ -1,3 +1,4 @@
+using System.Net;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Telemetry;
@@ -23,6 +24,7 @@ public class PrometheusServiceTests : IDisposable
     private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
     private readonly VaultService vaultService;
+    private readonly FakeApiServer apiServer = new();
     private readonly PrometheusService sut;
 
     public PrometheusServiceTests()
@@ -32,9 +34,16 @@ public class PrometheusServiceTests : IDisposable
         db = testDb.CreateContext();
         vaultService = testDb.CreateVaultService();
 
+        // The real factory still decides whether a cluster resolves (tenant, kubeconfig); only the
+        // SDK client it hands out talks to `apiServer` instead of https://k8s.example.com. The
+        // aggregate now probes component-less clusters, and without this every such test would make
+        // a real request — and by default this server serves nothing, which is what a cluster
+        // without Prometheus looks like.
         sut = new PrometheusService(
             new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
-            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+            new SdkClientsAnsweredBy(
+                new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+                apiServer),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),
             NullLogger<PrometheusService>.Instance);
@@ -1228,5 +1237,219 @@ public class PrometheusServiceTests : IDisposable
         await testDb.SeedKubeconfigAsync(vaultService, tenant.Id, cluster.Id, TestKubeconfig.Valid);
 
         return (tenant.Id, cluster.Id);
+    }
+
+    // ──────── A Prometheus EntKube did not install ────────
+
+    /// <summary>Where <see cref="PrometheusConfig"/> looks when the cluster has no component.</summary>
+    private const string DefaultNs = "monitoring";
+    private const string DefaultService = "prometheus-kube-prometheus-prometheus";
+
+    /// <summary>
+    /// A hand-installed <c>prometheus</c> release in <c>monitoring</c> serves
+    /// <c>prometheus-kube-prometheus-prometheus:9090</c> and has no EntKube component. The
+    /// aggregate used to read it; when it started requiring a component, the customer tab and
+    /// <c>GetAppMetricsAsync</c> called every such cluster "Prometheus is not installed".
+    /// </summary>
+    [Fact]
+    public async Task A_cluster_without_a_component_whose_default_service_answers_contributes_like_any_other()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+        apiServer.Serve(DefaultNs, DefaultService, 9090, scalar: "2");
+
+        KubernetesOperationResult<AppMetricsOverview> env =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        env.IsSuccess.Should().BeTrue(env.Error);
+        env.Data!.ClustersWithoutPrometheus.Should().BeEmpty("something answered there");
+        env.Data.Problems.Should().BeEmpty();
+        env.Data.Scopes.Select(s => s.ClusterName).Should().Equal(["prod-cluster"]);
+        env.Data.Totals.Should().NotBeNull();
+        env.Data.Totals!.CpuCores.Should().Be(2);
+        env.Data.Totals.PodCount.Should().Be(2);
+
+        // The single-number path the customer tab shares: both clusters, summed.
+        KubernetesOperationResult<DeploymentMetricsSummary> app = await sut.GetAppMetricsAsync(tenantId, appId);
+
+        app.IsSuccess.Should().BeTrue(app.Error);
+        app.Data!.CpuCores.Should().Be(4, "prod-cluster and staging-cluster each answered 2");
+        app.Data.RestartCount.Should().Be(4);
+    }
+
+    /// <summary>
+    /// The honest empty state: no component and nothing serving on the default service. Decided by
+    /// asking the cluster — not assumed from the missing component, and not reported as a proxy
+    /// error about a service nobody installed.
+    /// </summary>
+    [Fact]
+    public async Task A_cluster_without_a_component_whose_default_service_does_not_answer_is_without_prometheus_not_a_problem()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        apiServer.Requests.Should().Contain(
+            $"/api/v1/namespaces/{DefaultNs}/endpoints/{DefaultService}",
+            "the default service is probed before the cluster is called one without Prometheus");
+        result.IsSuccess.Should().BeTrue("'Prometheus is not installed' is an answer, not a failure");
+        result.Data!.ClustersWithoutPrometheus.Should().Equal(["prod-cluster"]);
+        result.Data.Problems.Should().BeEmpty("a failed probe is the empty state, not a proxy error");
+        result.Data.Totals.Should().BeNull("nothing answered, so there is nothing to sum — not a zero");
+    }
+
+    /// <summary>
+    /// Once the default service has passed its health check there IS a Prometheus there, so a query
+    /// that then fails is a problem with it — calling it "not installed" would send the operator to
+    /// install something that is already running.
+    /// </summary>
+    [Fact]
+    public async Task A_cluster_without_a_component_whose_default_service_is_healthy_but_fails_the_query_is_a_problem()
+    {
+        (Guid tenantId, Guid appId, Guid prodEnvId, _) = await SeedAppInTwoEnvironmentsAsync();
+        apiServer.Serve(DefaultNs, DefaultService, 9090, scalar: "2", queriesFail: true);
+
+        KubernetesOperationResult<AppMetricsOverview> result =
+            await sut.GetEnvironmentMetricsAsync(tenantId, appId, prodEnvId);
+
+        result.IsSuccess.Should().BeFalse("the only cluster asked did not answer");
+        result.Error.Should().Contain("prod-cluster: ")
+            .And.NotContain("Prometheus is not installed on prod-cluster");
+    }
+
+    /// <summary>
+    /// A helm upgrade of a running kube-prometheus-stack holds the component at Installing for the
+    /// whole <c>--wait</c>, while the previous revision keeps serving. Every single-cluster view
+    /// said "No prometheus component found on this cluster." for the length of every upgrade.
+    /// </summary>
+    [Fact]
+    public async Task A_single_cluster_query_during_a_prometheus_upgrade_still_reaches_prometheus()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = "kube-prometheus-stack", ComponentType = "HelmChart",
+            HelmChartName = "kube-prometheus-stack", ReleaseName = "prom", Namespace = "monitoring",
+            Status = ComponentStatus.Installing,
+            InstalledAt = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc),
+        });
+        await db.SaveChangesAsync();
+        apiServer.Serve("monitoring", "prom-prometheus", 9090, scalar: "1");
+
+        KubernetesOperationResult<List<PrometheusTimeSeries>> result =
+            await sut.GetMetricRangeAsync(tenantId, clusterId, "up", TimeSpan.FromMinutes(5));
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        result.Data.Should().ContainSingle("the range came from the release's own service, prom-prometheus");
+    }
+
+    /// <summary>
+    /// The API server, in process. Serves at most one Prometheus — a Service with one ready pod,
+    /// its <c>/-/healthy</c>, and instant/range queries through the pod proxy — and answers 404 to
+    /// everything else, which is what a cluster without that Service says.
+    /// </summary>
+    private sealed class FakeApiServer
+    {
+        private const string Pod = "prom-0";
+        private (string Ns, string Service, int Port, string Scalar, bool QueriesFail)? served;
+
+        /// <summary>Every path asked, in order, without the query string.</summary>
+        public List<string> Requests { get; } = [];
+
+        public void Serve(string ns, string service, int port, string scalar, bool queriesFail = false)
+            => served = (ns, service, port, scalar, queriesFail);
+
+        public HttpResponseMessage Answer(HttpRequestMessage request)
+        {
+            string path = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath);
+            Requests.Add(path);
+
+            if (path.EndsWith("/endpoints", StringComparison.Ordinal))
+                return Json("""{"apiVersion":"v1","kind":"EndpointsList","metadata":{},"items":[]}""");
+
+            if (served is not { } s) return NotFound();
+
+            if (path == $"/api/v1/namespaces/{s.Ns}/endpoints/{s.Service}")
+            {
+                return Json($$$"""
+                    {"apiVersion":"v1","kind":"Endpoints","metadata":{"name":"{{{s.Service}}}","namespace":"{{{s.Ns}}}"},
+                     "subsets":[{"addresses":[{"ip":"10.0.0.9","targetRef":{"kind":"Pod","name":"{{{Pod}}}","namespace":"{{{s.Ns}}}"}}],
+                                 "ports":[{"port":{{{s.Port}}},"protocol":"TCP"}]}]}
+                    """);
+            }
+
+            string proxy = $"/api/v1/namespaces/{s.Ns}/pods/{Pod}:{s.Port}/proxy";
+            if (path == $"{proxy}/-/healthy") return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("Prometheus Server is Healthy."),
+            };
+
+            if (path == $"{proxy}/api/v1/query" || path == $"{proxy}/api/v1/query_range")
+            {
+                if (s.QueriesFail) return new HttpResponseMessage(HttpStatusCode.InternalServerError);
+
+                return Json(path.EndsWith("_range", StringComparison.Ordinal)
+                    ? $$$"""{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"up"},"values":[[1764000000,"{{{s.Scalar}}}"]]}]}}"""
+                    : $$$"""{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1764000000,"{{{s.Scalar}}}"]}]}}""");
+            }
+
+            return NotFound();
+        }
+
+        private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        private static HttpResponseMessage NotFound() => new(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent(
+                """{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}""",
+                System.Text.Encoding.UTF8, "application/json"),
+        };
+    }
+
+    /// <summary>
+    /// The last handler in an SDK client's chain: answers from <see cref="FakeApiServer"/> and never
+    /// calls through, so nothing leaves the process. One per client, because a handler's inner
+    /// handler cannot be set again once it has been used.
+    /// </summary>
+    private sealed class AnsweredBy(FakeApiServer server) : DelegatingHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            HttpResponseMessage response = server.Answer(request);
+
+            // The SDK builds its result (and its HttpOperationException) from the response's
+            // request; a real handler always sets it, and without it every call failed with
+            // "Value cannot be null (Parameter 'httpRequest')".
+            response.RequestMessage = request;
+            return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>
+    /// The real factory's resolution — so tenant scoping and the kubeconfig gate are the
+    /// production ones — with only the SDK client swapped for one that talks to
+    /// <see cref="FakeApiServer"/>. That is the one member PrometheusService uses.
+    /// </summary>
+    private sealed class SdkClientsAnsweredBy(
+        EntKube.Web.Services.Clusters.IClusterClientFactory real, FakeApiServer server)
+        : EntKube.Web.Services.Clusters.IClusterClientFactory
+    {
+        public async Task<EntKube.Web.Services.Clusters.IClusterClient?> ForAsync(
+            Guid tenantId, Guid clusterId, CancellationToken ct = default)
+        {
+            EntKube.Web.Services.Clusters.IClusterClient? resolved = await real.ForAsync(tenantId, clusterId, ct);
+            if (resolved is null) return null;
+
+            Mock<EntKube.Web.Services.Clusters.IClusterClient> client = new(MockBehavior.Strict);
+            client.SetupGet(c => c.ClusterId).Returns(resolved.ClusterId);
+            client.SetupGet(c => c.ClusterName).Returns(resolved.ClusterName);
+            client.Setup(c => c.GetPooledSdkClient()).Returns(() => new k8s.Kubernetes(
+                new k8s.KubernetesClientConfiguration { Host = "https://k8s.example.com" },
+                new AnsweredBy(server)));
+            return client.Object;
+        }
     }
 }

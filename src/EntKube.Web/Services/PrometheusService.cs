@@ -141,7 +141,11 @@ public sealed class AppMetricsOverview
     /// <summary>The clusters that answered, with their namespaces — what the charts query.</summary>
     public List<AppMetricsScope> Scopes { get; init; } = [];
 
-    /// <summary>Clusters EntKube reached that have no Prometheus component: an empty state, not an error.</summary>
+    /// <summary>
+    /// Clusters EntKube reached that have no Prometheus component and where nothing answered on
+    /// the default service either: an empty state, not an error. A component-less cluster whose
+    /// default service does answer is not here — it contributes like any other.
+    /// </summary>
     public List<string> ClustersWithoutPrometheus { get; init; } = [];
 
     /// <summary>Every other cluster that did not answer, as "cluster: why".</summary>
@@ -2215,14 +2219,34 @@ public class PrometheusService(
     /// tenant does not own is skipped rather than queried — the tuple used to carry a kubeconfig,
     /// which made every producer of it a custodian.</para>
     ///
-    /// <para>⚠️ <b>Two ways this used to answer a successful zero.</b> A cluster without a
-    /// Prometheus component was queried anyway on the default service name
-    /// (<c>requireComponent: false</c>), so "Prometheus is not installed here" surfaced, if at
-    /// all, as a proxy error about a service nobody had installed. And a group whose deployments
-    /// had no namespace was queried with <c>namespace=~""</c>, which matches only series without a
-    /// namespace label — no container series, so 0 cores and 0 pods, reported as success. Both are
-    /// now reasons in <see cref="AppMetricsOverview"/>, and <see cref="AppMetricsOverview.Totals"/>
-    /// is null unless at least one cluster actually answered.</para>
+    /// <para><b>Each cluster ends in exactly one of three places.</b></para>
+    /// <list type="bullet">
+    /// <item><b>Answered</b> — its Prometheus answered all four queries: summed into
+    /// <see cref="AppMetricsOverview.Totals"/> and listed in <see cref="AppMetricsOverview.Scopes"/>.
+    /// That includes a cluster with <em>no</em> EntKube component whose default service
+    /// (<see cref="PrometheusConfig"/>: <c>prometheus-kube-prometheus-prometheus:9090</c> in
+    /// <c>monitoring</c>) answers — a hand-installed release EntKube never tracked.</item>
+    /// <item><b>Without Prometheus</b> — it resolves, has no component, and nothing answers the
+    /// probe of the default service (no ready pod behind it, or <c>/-/healthy</c> refuses):
+    /// <see cref="AppMetricsOverview.ClustersWithoutPrometheus"/>, the honest empty state.</item>
+    /// <item><b>A problem</b> — it does not resolve for this tenant (or has no kubeconfig), its
+    /// deployments carry no namespace, its registered Prometheus fails, or the default service
+    /// passed the probe and then a query failed.</item>
+    /// </list>
+    ///
+    /// <para>⚠️ <b>The component-less probe is load-bearing both ways.</b> Originally every
+    /// component-less cluster was queried and a failure surfaced as a proxy error about a service
+    /// nobody had installed. Then the query was dropped (<c>requireComponent: true</c>), and the
+    /// customer tab and <see cref="GetAppMetricsAsync"/> stopped reading every cluster running a
+    /// Prometheus EntKube did not install — those read as "not installed". The probe decides
+    /// between the two, and only a failure <em>before</em> the queries ran (no ready pod, unhealthy)
+    /// means "not installed": once Prometheus has passed its health check, a failing query is a
+    /// problem with a Prometheus that exists.</para>
+    ///
+    /// <para>⚠️ <b>A successful zero is still impossible.</b> A group whose deployments have no
+    /// namespace is refused rather than queried with <c>namespace=~""</c>, which matches no
+    /// container series and answered 0 cores, 0 pods as success; and
+    /// <see cref="AppMetricsOverview.Totals"/> is null unless at least one cluster answered.</para>
     /// </summary>
     private async Task<AppMetricsOverview> AggregateMetricsAsync(
         Guid tenantId,
@@ -2243,19 +2267,15 @@ public class PrometheusService(
                 continue;
             }
 
+            // Without the component requirement: a cluster that resolves but has no component is
+            // probed on the default service below rather than written off here. Null now means
+            // only that the cluster itself did not resolve — not this tenant's, or no kubeconfig.
             (ReachablePrometheus? reachable, string? error) =
-                await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: true);
+                await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: false);
 
             if (reachable is null)
             {
-                // Which refusal was it? Asked again without the component requirement: if the
-                // cluster resolves then, the only thing missing was Prometheus. Decided by the
-                // resolver's own contract rather than by matching its wording.
-                (ReachablePrometheus? clusterOnly, string? clusterError) =
-                    await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: false);
-
-                if (clusterOnly is not null) withoutPrometheus.Add(q.ClusterName);
-                else problems.Add($"{q.ClusterName}: {clusterError ?? error}");
+                problems.Add($"{q.ClusterName}: {error}");
                 continue;
             }
 
@@ -2263,11 +2283,18 @@ public class PrometheusService(
             PrometheusConfig cfg = reachable.Config;
             string nsRegex = q.NsRegex;
 
+            // Set when the action starts, which WithServiceAsync reaches only after finding a ready
+            // pod behind the service and its /-/healthy answering. That is the probe: a failure
+            // before this point on a component-less cluster means nothing is serving there.
+            bool probePassed = false;
+
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
                     cluster, cfg.Namespace, cfg.ServiceName, cfg.ServicePort,
                     async (http, baseUrl, token) =>
                     {
+                        probePassed = true;
+
                         string cpuQ = Q($"sum(rate(container_cpu_usage_seconds_total{{namespace=~\"{nsRegex}\",container!=\"\"}}[5m]))");
                         string memQ = Q($"sum(container_memory_working_set_bytes{{namespace=~\"{nsRegex}\",container!=\"\"}})");
                         string podQ = Q($"count(count by (pod, namespace) (container_cpu_usage_seconds_total{{namespace=~\"{nsRegex}\",container!=\"\"}}))");
@@ -2289,6 +2316,12 @@ public class PrometheusService(
                 totalMemBytes += result.Data.Item2;
                 totalPods     += result.Data.Item3;
                 totalRestarts += result.Data.Item4;
+            }
+            else if (!reachable.Registered && !probePassed)
+            {
+                // No component, and nothing answers where one would be: not installed. Not a
+                // problem carrying a proxy error about a service nobody installed.
+                withoutPrometheus.Add(q.ClusterName);
             }
             else
             {
@@ -2327,18 +2360,30 @@ public class PrometheusService(
     /// side by side instead and the methods moved across in six steps, each compiling and tested.
     /// This is what is left.</para>
     /// </summary>
-    private sealed record ReachablePrometheus(EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config);
+    /// <param name="Cluster">The cluster, as a seam client.</param>
+    /// <param name="Config">Where on it Prometheus is, or would be.</param>
+    /// <param name="Registered">
+    /// Whether <paramref name="Config"/> came from a Prometheus component Catalog knows of. False
+    /// only from <c>requireComponent: false</c> on a cluster without one, where the config is the
+    /// default service name — a guess the caller has to probe before it means anything.
+    /// </param>
+    private sealed record ReachablePrometheus(
+        EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config, bool Registered);
 
     /// <summary>
     /// The tenant-scoped resolution. The old one is <c>c.Id == clusterId</c> with no tenant
     /// predicate, which is why a cluster id alone answered about any cluster in the installation.
     /// </summary>
     /// <param name="requireComponent">
-    /// Whether a registered prometheus component is required. The single-cluster callers say yes:
-    /// they are answering a question about one cluster, and "there is no Prometheus here" is the
-    /// answer rather than an empty graph. The aggregate paths say no, because they query several
-    /// clusters and one that runs a Prometheus EntKube did not install still answers on the
-    /// default service name — which is the behaviour they had before the lookup moved here.
+    /// Whether a registered prometheus component is required — "registered" meaning what
+    /// <c>ICatalogApi.FindPrometheusAsync</c> answers, which includes a stack mid-upgrade or whose
+    /// upgrade failed. The single-cluster callers say yes (the default): they answer a question
+    /// about one cluster, and "No prometheus component found on this cluster." is the answer
+    /// rather than an empty graph. Only <see cref="AggregateMetricsAsync"/> says no: a cluster
+    /// without a component then resolves with the default <see cref="PrometheusConfig"/> and
+    /// <c>Registered: false</c>, and the aggregate probes that service — it answers for a
+    /// hand-installed release, and a failed probe is "not installed". Either way, a cluster that
+    /// is not this tenant's, or has no kubeconfig, does not resolve.
     /// </param>
     private async Task<(ReachablePrometheus? Info, string? Error)> ResolveReachableAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct, bool requireComponent = true)
@@ -2359,10 +2404,10 @@ public class PrometheusService(
         {
             return requireComponent
                 ? (null, "No prometheus component found on this cluster.")
-                : (new ReachablePrometheus(cluster, new PrometheusConfig()), null);
+                : (new ReachablePrometheus(cluster, new PrometheusConfig(), Registered: false), null);
         }
 
-        return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent)), null);
+        return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent), Registered: true), null);
     }
 
     /// <summary>
