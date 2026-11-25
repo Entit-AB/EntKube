@@ -134,6 +134,133 @@ public class PrometheusScrapeDefaultsTests
 
     }
 
+    private static List<YamlMappingNode> AnnotationJobRules(string yaml) =>
+        ((YamlSequenceNode)((YamlMappingNode)((YamlSequenceNode)Spec(yaml)["additionalScrapeConfigs"])
+            .Cast<YamlMappingNode>().Single(j => ((YamlScalarNode)j["job_name"]).Value == "kubernetes-pods-annotated"))
+            ["relabel_configs"]).Cast<YamlMappingNode>().ToList();
+
+    private static List<string?> Sources(YamlMappingNode rule) =>
+        rule.Children.TryGetValue(new YamlScalarNode("source_labels"), out YamlNode? s)
+            ? ((YamlSequenceNode)s).Select(l => ((YamlScalarNode)l).Value).ToList()
+            : [];
+
+    /// <summary>
+    /// Prometheus discovers a pod once per container, and the port annotation points every one of them at
+    /// the same address. They are one target only while nothing distinguishes them; a label taken from the
+    /// container scraped a pod with a sidecar twice and doubled every sum over it.
+    /// </summary>
+    [Fact]
+    public void Nothing_from_the_container_becomes_a_label_so_a_pod_is_one_target()
+    {
+        List<YamlMappingNode> writesLabel = AnnotationJobRules(CatalogDefaults)
+            .Where(r => Target(r) is { } t && !t.StartsWith("__", StringComparison.Ordinal)).ToList();
+
+        writesLabel.Should().NotBeEmpty("the namespace and pod labels are what every query selects on");
+        writesLabel.SelectMany(Sources).Should().NotContain(l => l!.Contains("container"));
+
+        // labelmap copies by pattern, so it has no source_labels to look at.
+        AnnotationJobRules(CatalogDefaults)
+            .Where(r => r.Children.TryGetValue(new YamlScalarNode("action"), out YamlNode? a) && ((YamlScalarNode)a).Value == "labelmap")
+            .Select(r => ((YamlScalarNode)r["regex"]).Value).Should().OnlyContain(regex => !regex!.Contains("container"));
+    }
+
+    /// <summary>
+    /// A container with no port, in a pod that names none, has only the pod's port 80 for an address. It was
+    /// a target that could never answer, and kube-prometheus-stack alerts on those.
+    /// </summary>
+    [Fact]
+    public void A_container_with_no_port_is_dropped_unless_the_pod_names_one()
+    {
+        YamlMappingNode drop = AnnotationJobRules(CatalogDefaults)
+            .Single(r => Sources(r).Contains("__meta_kubernetes_pod_container_port_number"));
+
+        ((YamlScalarNode)drop["action"]).Value.Should().Be("drop");
+        Sources(drop).Should().Equal(
+            "__meta_kubernetes_pod_annotation_prometheus_io_port", "__meta_kubernetes_pod_container_port_number");
+        // Joined with ';' — a bare separator is "both empty", and either one alone keeps the target.
+        ((YamlScalarNode)drop["regex"]).Value.Should().Be(";");
+    }
+
+    /// <summary>The job as first shipped — what an install from #490 has stored.</summary>
+    private static string InstallWithFirstJob(string extraRule = "", string extraJob = "") => $$"""
+        prometheus:
+          prometheusSpec:
+            retention: 30d
+            additionalScrapeConfigs:
+            {{extraJob}}
+            - relabel_configs:
+              - source_labels: ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+                action: keep
+                regex: 'true'
+              - source_labels: [__meta_kubernetes_pod_phase]
+                action: drop
+                regex: Pending|Succeeded|Failed|Unknown
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+                action: replace
+                regex: (https?)
+                target_label: __scheme__
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                action: replace
+                regex: (.+)
+                target_label: __metrics_path__
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+                action: replace
+                regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+                replacement: '[$2]:$1'
+                target_label: __address__
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+                action: replace
+                regex: (\d+);((([0-9]+?)(\.|$)){4})
+                replacement: $2:$1
+                target_label: __address__
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_name]
+                target_label: pod
+              - source_labels: [__meta_kubernetes_pod_container_name]
+                target_label: container
+              - action: labelmap
+                regex: __meta_kubernetes_pod_label_(app_kubernetes_io_name|app_kubernetes_io_instance)
+              {{extraRule}}
+              job_name: kubernetes-pods-annotated
+              kubernetes_sd_configs:
+              - role: pod
+        """;
+
+    /// <summary>
+    /// The fix has to reach the installs that have the bug. Keys in another order and quotes in another style
+    /// on purpose: saving the component form rewrites both, and neither makes the job the operator's.
+    /// </summary>
+    [Fact]
+    public void The_first_shipped_job_is_replaced_by_the_corrected_one()
+    {
+        string repaired = YamlFormMerger.EnsurePrometheusScrapeDefaults(
+            InstallWithFirstJob(extraJob: "- job_name: their-own"), CatalogDefaults);
+
+        AnnotationJobRules(repaired).Select(Text).Should().Equal(AnnotationJobRules(CatalogDefaults).Select(Text));
+        ((YamlSequenceNode)Spec(repaired)["additionalScrapeConfigs"]).Cast<YamlMappingNode>()
+            .Select(j => ((YamlScalarNode)j["job_name"]).Value).Should().Equal("their-own", "kubernetes-pods-annotated");
+        Scalar(Spec(repaired), "retention").Should().Be("30d");
+
+        YamlFormMerger.EnsurePrometheusScrapeDefaults(repaired, CatalogDefaults).Should().Be(repaired, "once is enough");
+    }
+
+    [Fact]
+    public void A_job_the_operator_edited_is_theirs()
+    {
+        string edited = InstallWithFirstJob(extraRule: "- {action: labeldrop, regex: pod_template_hash}");
+        string after = YamlFormMerger.EnsurePrometheusScrapeDefaults(edited, CatalogDefaults);
+
+        AnnotationJobRules(after).Select(Target).Should().Contain("container", "an edited job is left exactly as it is");
+        AnnotationJobRules(after).Should().HaveCount(11);
+    }
+
+    /// <summary>One rule as text. Not <c>BeEquivalentTo</c> on the nodes: it walks their graph and does not finish.</summary>
+    private static string Text(YamlMappingNode rule) => string.Join(" | ", rule.Children
+        .OrderBy(kv => ((YamlScalarNode)kv.Key).Value, StringComparer.Ordinal)
+        .Select(kv => $"{((YamlScalarNode)kv.Key).Value}={(kv.Value is YamlSequenceNode list
+            ? string.Join(",", list.Select(n => ((YamlScalarNode)n).Value)) : ((YamlScalarNode)kv.Value).Value)}"));
+
     private static string? Target(YamlMappingNode r) =>
         r.Children.TryGetValue(new YamlScalarNode("target_label"), out YamlNode? t) ? ((YamlScalarNode)t).Value : null;
 

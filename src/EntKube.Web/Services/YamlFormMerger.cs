@@ -994,10 +994,11 @@ public static class YamlFormMerger
     /// panel had to tell operators to paste them in by hand. The annotation scrape job would have met the
     /// same fate.</para>
     ///
-    /// <para><b>Strictly additive.</b> Each key in <see cref="PrometheusSpecFillIns"/> is copied from the
-    /// catalog only when the stored values do not have it. A key the operator set — to anything, including
-    /// <c>true</c> or an <c>additionalScrapeConfigs</c> of their own — is left exactly as it is. The values
-    /// come from the catalog document itself, so this cannot drift from what a new install gets.</para>
+    /// <para><b>Additive, with one correction.</b> Each key in <see cref="PrometheusSpecFillIns"/> is copied
+    /// from the catalog only when the stored values do not have it. A key the operator set — to anything,
+    /// including <c>true</c> or an <c>additionalScrapeConfigs</c> of their own — is left exactly as it is. The
+    /// values come from the catalog document itself, so this cannot drift from what a new install gets. The
+    /// exception is <see cref="ReplaceSupersededScrapeJobs"/>: a scrape job EntKube itself wrote, unedited.</para>
     /// </summary>
     public static string EnsurePrometheusScrapeDefaults(string yaml, string? catalogDefaults)
     {
@@ -1021,8 +1022,107 @@ public static class YamlFormMerger
             changed = true;
         }
 
+        changed |= ReplaceSupersededScrapeJobs(spec, catalogSpec!);
+
         return changed ? SerializeToYaml(root) : yaml;
     }
+
+    /// <summary>
+    /// The annotation scrape job as the catalog first shipped it. Kept so an install that stored it can be
+    /// given the corrected one.
+    ///
+    /// <para><b>What was wrong with it.</b> It put the container's name on every target. Prometheus discovers
+    /// a pod once per container, the port annotation points all of them at one address, and the name kept
+    /// them apart — so a pod with a sidecar was scraped twice, one injected by Istio three times, and every
+    /// sum over them was multiplied (measured: a gauge of 1 summed to 3). And a container without a port
+    /// became a target on the pod's port 80 that could never answer.</para>
+    /// </summary>
+    private const string SupersededAnnotationScrapeJob = """
+        job_name: kubernetes-pods-annotated
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: Pending|Succeeded|Failed|Unknown
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            regex: (.+)
+            target_label: __metrics_path__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+            replacement: "[$2]:$1"
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\d+);((([0-9]+?)(\.|$)){4})
+            replacement: "$2:$1"
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(app_kubernetes_io_name|app_kubernetes_io_instance)
+        """;
+
+    /// <summary>
+    /// Swaps a stored scrape job that is exactly <see cref="SupersededAnnotationScrapeJob"/> for the
+    /// catalog's current job of the same name. Only that one, and only when it is unedited: any difference
+    /// means an operator made it theirs, and the other jobs in the list are never touched.
+    /// </summary>
+    private static bool ReplaceSupersededScrapeJobs(YamlMappingNode spec, YamlMappingNode catalogSpec)
+    {
+        if (!TryGetValue(spec, "additionalScrapeConfigs", out YamlNode? stored) || stored is not YamlSequenceNode jobs
+            || !TryGetValue(catalogSpec, "additionalScrapeConfigs", out YamlNode? shipped) || shipped is not YamlSequenceNode current)
+        {
+            return false;
+        }
+
+        YamlMappingNode superseded = ParseOrCreateRoot(SupersededAnnotationScrapeJob);
+        YamlNode? replacement = current.Children.OfType<YamlMappingNode>()
+            .FirstOrDefault(job => JobName(job) == JobName(superseded));
+        if (replacement is null) return false;
+
+        bool changed = false;
+        for (int i = 0; i < jobs.Children.Count; i++)
+        {
+            if (!SameYaml(jobs.Children[i], superseded)) continue;
+            jobs.Children[i] = replacement;
+            changed = true;
+        }
+
+        return changed;
+
+        static string? JobName(YamlMappingNode job)
+            => TryGetValue(job, "job_name", out YamlNode? name) ? (name as YamlScalarNode)?.Value : null;
+    }
+
+    /// <summary>
+    /// Whether two YAML nodes say the same thing: same scalars, same keys in any order, same list in the same
+    /// order. Quoting and layout do not count, because a saved component form rewrites both.
+    /// </summary>
+    private static bool SameYaml(YamlNode a, YamlNode b) => (a, b) switch
+    {
+        (YamlScalarNode x, YamlScalarNode y) => x.Value == y.Value,
+        (YamlSequenceNode x, YamlSequenceNode y) =>
+            x.Children.Count == y.Children.Count && x.Children.Zip(y.Children).All(p => SameYaml(p.First, p.Second)),
+        (YamlMappingNode x, YamlMappingNode y) =>
+            x.Children.Count == y.Children.Count
+            && x.Children.All(kv => kv.Key is YamlScalarNode { Value: { } key }
+                && TryGetValue(y, key, out YamlNode? other) && SameYaml(kv.Value, other!)),
+        _ => false,
+    };
 
     private static bool TryGetMapping(YamlMappingNode parent, string key, out YamlMappingNode? mapping)
     {
