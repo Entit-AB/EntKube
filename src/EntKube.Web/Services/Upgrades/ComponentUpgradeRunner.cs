@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
@@ -91,6 +92,10 @@ public class ComponentUpgradeRunner(
                 $"Cluster '{component.Cluster.Name}' is not this tenant's, or has no kubeconfig configured.");
 
         bool wasInstalled = component.Status == ComponentStatus.Installed;
+
+        // Read before anything is changed, to tell an upgrade helm refused from one that went wrong
+        // part-way. Only for a component that has something to go back to.
+        int? revisionBefore = wasInstalled ? await ReadRevisionAsync(cluster, component, ct) : null;
 
         // Helm builds the command from the component's *stored* chart version, so without
         // repinning first an upgrade re-runs `--version <current>` and changes nothing.
@@ -209,6 +214,21 @@ public class ComponentUpgradeRunner(
             }
         }
 
+        // Helm records a revision before it changes anything, so the same revision afterwards means the
+        // release is exactly what it was — a chart that refused to render, a guard that refused to start.
+        // With a new revision the release may be half-way to the new chart, and its pin has to stay.
+        if (!success && revisionBefore is not null
+            && await ReadRevisionAsync(cluster, component, CancellationToken.None) == revisionBefore)
+        {
+            await lifecycleService.RestoreAfterUnstartedUpgradeAsync(
+                request.TenantId, request.ComponentId, component.HelmChartVersion, log.ToString(), CancellationToken.None);
+
+            appliedVersion = component.HelmChartVersion ?? version;
+            log.AppendLine();
+            log.AppendLine($"The release was not changed. {component.Name} is still running "
+                + $"{component.HelmChartVersion ?? "its previous version"}.");
+        }
+
         return new ComponentUpgradeOutcome
         {
             Success = success,
@@ -216,6 +236,36 @@ public class ComponentUpgradeRunner(
             Error = error,
             AppliedVersion = appliedVersion,
         };
+    }
+
+    /// <summary>
+    /// The newest revision helm has recorded for the component's release, or null when there is none or
+    /// it cannot be read — in which case nothing is concluded from it.
+    /// </summary>
+    private async Task<int?> ReadRevisionAsync(
+        EntKube.Web.Services.Clusters.IClusterClient cluster, ClusterComponent component, CancellationToken ct)
+    {
+        if (component.ComponentType is "Manifest" or "ManifestUrl") return null;
+
+        try
+        {
+            string json = await cluster.GetJsonAsync(
+                "secrets", component.Namespace ?? "default",
+                $"owner=helm,name={component.ReleaseName ?? component.Name}", ct);
+
+            using JsonDocument doc = JsonDocument.Parse(json);
+
+            return doc.RootElement.GetProperty("items").EnumerateArray()
+                .Select(s => s.GetProperty("metadata").GetProperty("labels"))
+                .Select(l => l.TryGetProperty("version", out JsonElement v)
+                    && int.TryParse(v.GetString(), out int revision) ? (int?)revision : null)
+                .Max();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Could not read the helm revision of {Component}", component.Name);
+            return null;
+        }
     }
 
     private static string DescribeBlocked(VolumePreflight preflight) =>

@@ -342,6 +342,32 @@ public class ComponentLifecycleService(
     }
 
     /// <summary>
+    /// Puts a component back as it was before an upgrade that never reached its release: the chart
+    /// version it runs, and Installed. The error is kept so the component still shows why.
+    ///
+    /// <para>Without this a refused upgrade left the component Failed and pinned to the refused
+    /// version, so its Install button could only repeat the refusal, and everything that asks whether
+    /// the component is installed was told it was not, while it ran on undisturbed.</para>
+    /// </summary>
+    /// <param name="tenantId">Whose component.</param>
+    /// <param name="chartVersion">The version to restore; null when none was recorded.</param>
+    public async Task RestoreAfterUnstartedUpgradeAsync(
+        Guid tenantId, Guid componentId, string? chartVersion, string? error, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ClusterComponent component = await db.ClusterComponents
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Component not found.");
+
+        component.HelmChartVersion = chartVersion;
+        component.Status = ComponentStatus.Installed;
+        component.LastError = error;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
     /// Checks if a successfully installed component has companion charts defined
     /// Checks if a component has any subchart toggle fields enabled (YamlPath
     /// starting with "subchart:"). For each enabled subchart, runs a helm

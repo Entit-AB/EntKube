@@ -30,6 +30,7 @@ public class KyvernoApplyTests : IDisposable
 
     private readonly List<(string Manifest, string Namespace, string? Summary)> applied = [];
     private readonly List<(string Kind, string Name, string Namespace)> deleted = [];
+    private readonly Dictionary<(string Resource, string Name), string> live = [];
 
     public KyvernoApplyTests()
     {
@@ -48,13 +49,25 @@ public class KyvernoApplyTests : IDisposable
                 => deleted.Add((kind, name, ns)))
             .Returns(Task.CompletedTask);
 
+        // A Kyverno from before the CEL kinds, unless a test says otherwise.
+        k8s.Setup(x => x.GetResourceJsonAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string resource, string name, string _, string _, CancellationToken _) =>
+                live.TryGetValue((resource, name), out string? json)
+                    ? new HelmExecutionResult { Success = true, Output = json }
+                    : new HelmExecutionResult { Success = false, Output = $"Error from server (NotFound): \"{name}\" not found" });
+
         sut = new KyvernoPolicyService(
             testDb.Factory,
             k8s.Object,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
             new NoAckGate(),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
-            NullLogger<KyvernoPolicyService>.Instance);
+            NullLogger<KyvernoPolicyService>.Instance)
+        {
+            ReadyTimeout = TimeSpan.Zero,
+            ReadyPollInterval = TimeSpan.Zero,
+        };
     }
 
     public void Dispose()
@@ -192,6 +205,125 @@ public class KyvernoApplyTests : IDisposable
         success.Should().BeFalse();
         output.Should().Contain("not this tenant's");
         deleted.Should().BeEmpty("removing a ClusterPolicy uncovers every namespace it protected");
+    }
+
+    // ---- Moving to the CEL kinds ---------------------------------------------------------
+
+    private const string Crd = "customresourcedefinitions.apiextensions.k8s.io";
+
+    /// <summary>A Kyverno serving the CEL kinds, with these legacy policies in every namespace asked about.</summary>
+    private void ServeCel(string chart, params string[] legacyPolicies)
+    {
+        live[(Crd, "namespacedvalidatingpolicies.policies.kyverno.io")] =
+            """{"spec":{"versions":[{"name":"v1","served":true},{"name":"v1beta1","served":true}]}}""";
+        live[(Crd, "policies.kyverno.io")] =
+            """{"metadata":{"labels":{"app.kubernetes.io/version":"CHART"}}}""".Replace("CHART", chart);
+
+        k8s.Setup(x => x.GetJsonAsync("policies.kyverno.io", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("{\"items\":[" + string.Join(",", legacyPolicies.Select(n => "{\"metadata\":{\"name\":\"" + n + "\"}}")) + "]}");
+    }
+
+    /// <summary>
+    /// Enforced, and not "ready": Kyverno's own status for a policy over a kind its reports controller may
+    /// not read, which is what the chart ships for Roles.
+    /// </summary>
+    private void Enforced(string name, string resource = "namespacedvalidatingpolicies.policies.kyverno.io") =>
+        live[(resource, name)] = """
+            {"status":{"conditionStatus":{"ready":false,"conditions":[
+              {"type":"RBACPermissionsGranted","status":"False"},
+              {"type":"WebhookConfigured","status":"True"}]}}}
+            """;
+
+    [Fact]
+    public async Task An_enforced_replacement_retires_the_policy_it_replaces()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        ServeCel("3.8.1", "disallow-privileged-containers");
+        Enforced("disallow-privileged-containers");
+
+        (bool success, string output) =
+            await sut.ApplyToNamespaceAsync(OnePolicy(), tenantId, cluster.Id, "billing-prod");
+
+        success.Should().BeTrue(output);
+        applied.Should().ContainSingle().Which.Manifest.Should().Contain("kind: NamespacedValidatingPolicy");
+        deleted.Should().Equal(("policies.kyverno.io", "disallow-privileged-containers", "billing-prod"));
+    }
+
+    /// <summary>Deleting first, or without asking, leaves the namespace with neither policy.</summary>
+    [Fact]
+    public async Task A_replacement_not_yet_enforced_leaves_the_old_policy_enforcing()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        ServeCel("3.8.1", "disallow-privileged-containers");
+        // "Ready" before the webhook has said anything about it.
+        live[("namespacedvalidatingpolicies.policies.kyverno.io", "disallow-privileged-containers")] =
+            """{"status":{"conditionStatus":{"ready":true,"conditions":[{"type":"RBACPermissionsGranted","status":"True"}]}}}""";
+
+        (bool success, string output) =
+            await sut.ApplyToNamespaceAsync(OnePolicy(), tenantId, cluster.Id, "billing-prod");
+
+        success.Should().BeFalse();
+        output.Should().Contain("still enforced").And.Contain("disallow-privileged-containers");
+        deleted.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_legacy_policy_with_no_replacement_is_left_alone()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        ServeCel("3.8.1", "disallow-host-path", "somebody-elses");
+        Enforced("disallow-host-path");
+
+        (bool success, string output) =
+            await sut.ApplyToNamespaceAsync(OnePolicy(), tenantId, cluster.Id, "billing-prod");
+
+        success.Should().BeTrue(output);
+        deleted.Should().BeEmpty("neither was applied, so removing either would drop an enforced rule");
+    }
+
+    /// <summary>Read as "old Kyverno", this would write policies a 1.20 cluster accepts and ignores.</summary>
+    [Fact]
+    public async Task A_cluster_that_cannot_be_asked_is_not_written_to()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        k8s.Setup(x => x.GetResourceJsonAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HelmExecutionResult { Success = false, Output = "Unable to connect to the server" });
+
+        (bool success, string output) =
+            await sut.ApplyToNamespaceAsync(OnePolicy(), tenantId, cluster.Id, "billing-prod");
+
+        success.Should().BeFalse();
+        output.Should().Contain("Unable to connect");
+        applied.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("3.9.2", true)]
+    [InlineData("3.10.0", false)]
+    public async Task A_legacy_custom_policy_is_withheld_only_where_it_would_do_nothing(string chart, bool appliedThere)
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        ServeCel(chart);
+        List<KyvernoPolicy> policies =
+        [
+            .. OnePolicy(),
+            new()
+            {
+                Id = Guid.NewGuid(), PolicyType = KyvernoPolicyType.Custom, Name = "mine",
+                CustomYaml = "apiVersion: kyverno.io/v1\nkind: Policy\nmetadata:\n  name: mine\n",
+            },
+        ];
+
+        (bool success, string output) =
+            await sut.ApplyToNamespaceAsync(policies, tenantId, cluster.Id, "billing-prod");
+
+        string manifest = applied.Should().ContainSingle().Subject.Manifest;
+        manifest.Should().Contain("disallow-privileged-containers", "the rest still apply");
+        manifest.Contains("name: mine").Should().Be(appliedThere);
+        success.Should().Be(appliedThere);
+        if (!appliedThere) output.Should().Contain("mine").And.Contain("3.10.0");
     }
 
     /// <summary>A gate that asks nobody, for tests that are not about the gate.</summary>
