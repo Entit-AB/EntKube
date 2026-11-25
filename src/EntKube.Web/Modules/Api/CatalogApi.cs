@@ -131,9 +131,18 @@ public sealed class CatalogApi(
     /// render a ServiceMonitor) and must get the same answer the metrics views get, which a second
     /// copy of the predicate would only promise.</para>
     ///
-    /// <para>The status is compared as the entity's enum, in the query. Casting it to the
-    /// contract's enum inside the expression is the shape that translates to a 22P02 on Postgres
-    /// for a string-stored enum while SQLite quietly reads 0.</para>
+    /// <para>The rule is <see cref="PrometheusPresence.Serving"/>'s: Installed, or Installing/Failed
+    /// with <c>InstalledAt</c> set — an upgrade in flight or a failed upgrade of a release that ran,
+    /// which helm leaves serving its previous revision. Asking for Installed alone made every
+    /// upgrade of kube-prometheus-stack an outage of every metrics view, and an OBI re-apply in
+    /// that window switched its metrics off.</para>
+    ///
+    /// <para>Spelled out here rather than calling <see cref="PrometheusPresence.Serving"/>: the status
+    /// is compared as the entity's enum, in the query. Casting it to the contract's enum inside the
+    /// expression is the shape that translates to a 22P02 on Postgres for a string-stored enum
+    /// while SQLite quietly reads 0, and a method call does not translate at all. The two
+    /// spellings are pinned against each other for every status × InstalledAt by
+    /// <c>PrometheusPresenceTests</c>.</para>
     /// </summary>
     internal static Task<InstalledComponent?> FindPrometheusAsync(
         IQueryable<ClusterComponent> components, Guid tenantId, Guid clusterId, CancellationToken ct)
@@ -141,7 +150,10 @@ public sealed class CatalogApi(
             .Where(c => c.Cluster.TenantId == tenantId
                 && c.ClusterId == clusterId
                 && c.HelmChartName == PrometheusPresence.HelmChartName
-                && c.Status == EntKube.Web.Data.ComponentStatus.Installed)
+                && (c.Status == EntKube.Web.Data.ComponentStatus.Installed
+                    || ((c.Status == EntKube.Web.Data.ComponentStatus.Installing
+                         || c.Status == EntKube.Web.Data.ComponentStatus.Failed)
+                        && c.InstalledAt != null)))
             .Select(ToContract)
             .FirstOrDefaultAsync(ct);
 

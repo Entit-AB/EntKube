@@ -68,13 +68,17 @@ public class PrometheusPresenceTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    private static readonly DateTime RanBefore = new(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+
     private ClusterComponent Add(Guid cluster, DataStatus status,
-        string chart = "kube-prometheus-stack", string name = "kube-prometheus-stack")
+        string chart = "kube-prometheus-stack", string name = "kube-prometheus-stack",
+        DateTime? installedAt = null)
     {
         ClusterComponent component = new()
         {
             Id = Guid.NewGuid(), ClusterId = cluster, Name = name, ComponentType = "HelmChart",
             HelmChartName = chart, ReleaseName = "prom", Namespace = "monitoring", Status = status,
+            InstalledAt = installedAt,
         };
         db.ClusterComponents.Add(component);
         db.SaveChanges();
@@ -98,13 +102,43 @@ public class PrometheusPresenceTests : IDisposable
     [InlineData(DataStatus.Installing)]
     [InlineData(DataStatus.Failed)]
     [InlineData(DataStatus.Uninstalling)]
-    public async Task A_prometheus_that_is_not_installed_is_no_prometheus(DataStatus status)
+    public async Task A_prometheus_that_has_never_been_installed_is_no_prometheus(DataStatus status)
     {
-        Add(clusterId, status);
+        Add(clusterId, status, installedAt: null);
 
         (await catalog.FindPrometheusAsync(tenantId, clusterId)).Should().BeNull(
-            "a failed or half-removed install has no Prometheus Operator CRDs to promise — a "
-            + "ServiceMonitor rendered on its word fails the release");
+            "a first install that is running or failed, or a half-removed one, has no Prometheus "
+            + "Operator CRDs to promise — a ServiceMonitor rendered on its word fails the release");
+    }
+
+    /// <summary>
+    /// An upgrade of a running stack holds the status at Installing for the whole <c>helm --wait</c>,
+    /// and a failed upgrade leaves it Failed — while helm keeps the previous revision serving. Asking
+    /// for Installed alone made every upgrade an outage of every metrics view, and an OBI re-apply
+    /// in that window switched its metrics off.
+    /// </summary>
+    [Theory]
+    [InlineData(DataStatus.Installing)]
+    [InlineData(DataStatus.Failed)]
+    public async Task A_prometheus_being_upgraded_or_whose_upgrade_failed_is_still_the_answer(DataStatus status)
+    {
+        ClusterComponent prometheus = Add(clusterId, status, installedAt: RanBefore);
+
+        InstalledComponent? found = await catalog.FindPrometheusAsync(tenantId, clusterId);
+
+        found.Should().NotBeNull("InstalledAt says this release ran, and helm keeps its last revision serving");
+        found!.Id.Should().Be(prometheus.Id);
+    }
+
+    [Theory]
+    [InlineData(DataStatus.NotInstalled)]
+    [InlineData(DataStatus.Uninstalling)]
+    public async Task A_prometheus_being_removed_is_no_prometheus_even_though_it_once_ran(DataStatus status)
+    {
+        Add(clusterId, status, installedAt: RanBefore);
+
+        (await catalog.FindPrometheusAsync(tenantId, clusterId)).Should().BeNull(
+            "the release is going or gone; that it ran once says nothing about its CRDs now");
     }
 
     [Fact]
@@ -137,36 +171,131 @@ public class PrometheusPresenceTests : IDisposable
     }
 
     /// <summary>
-    /// The query and the in-memory rule the sweeps use are two spellings of one predicate; this asks
-    /// both the same question for every status, so they cannot drift apart unnoticed.
+    /// The query and the in-memory rule the sweeps use are two spellings of one predicate (the
+    /// query compares the entity's enum, which the contract cannot see); this asks both the same
+    /// question for every status, with and without <c>InstalledAt</c>, so they cannot drift apart
+    /// unnoticed — and pins both to the decided table, so they cannot drift together either.
     /// </summary>
     [Fact]
-    public async Task The_query_and_the_in_memory_rule_agree_for_every_status()
+    public async Task The_query_and_the_in_memory_rule_agree_for_every_status_and_install_history()
     {
         foreach (DataStatus status in Enum.GetValues<DataStatus>())
         {
-            db.ClusterComponents.RemoveRange(db.ClusterComponents);
-            db.SaveChanges();
-            Add(clusterId, status);
+            foreach (DateTime? installedAt in new DateTime?[] { null, RanBefore })
+            {
+                db.ClusterComponents.RemoveRange(db.ClusterComponents);
+                db.SaveChanges();
+                Add(clusterId, status, installedAt: installedAt);
 
-            bool byQuery = await catalog.FindPrometheusAsync(tenantId, clusterId) is not null;
-            bool byRule = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId))
-                .Any(PrometheusPresence.Answers);
+                bool byQuery = await catalog.FindPrometheusAsync(tenantId, clusterId) is not null;
+                bool byRule = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId))
+                    .Any(PrometheusPresence.Answers);
 
-            byRule.Should().Be(byQuery, $"both must answer the same for {status}");
-            byQuery.Should().Be(status == DataStatus.Installed);
+                // Spelled as a table on purpose, not by calling either rule.
+                bool expected = status switch
+                {
+                    DataStatus.Installed => true,
+                    DataStatus.Installing or DataStatus.Failed => installedAt is not null,
+                    _ => false,
+                };
+
+                string when = $"{status} with InstalledAt {(installedAt is null ? "null" : "set")}";
+                byRule.Should().Be(byQuery, $"both must answer the same for {when}");
+                byQuery.Should().Be(expected, $"the decided rule for {when}");
+            }
         }
     }
 
     [Fact]
     public void The_rule_reads_the_chart_and_the_status()
     {
-        InstalledComponent Component(string chart, ContractStatus status) => new(
+        InstalledComponent Component(string chart, ContractStatus status, DateTime? installedAt = null) => new(
             Guid.NewGuid(), tenantId, clusterId, "c", Guid.NewGuid(), "anything", "HelmChart", status,
-            "monitoring", "prom", chart, null, null, null, null, null);
+            "monitoring", "prom", chart, null, null, null, null, installedAt);
 
         PrometheusPresence.Answers(Component("kube-prometheus-stack", ContractStatus.Installed)).Should().BeTrue();
-        PrometheusPresence.Answers(Component("kube-prometheus-stack", ContractStatus.Failed)).Should().BeFalse();
+        PrometheusPresence.Answers(Component("kube-prometheus-stack", ContractStatus.Failed)).Should().BeFalse(
+            "a failed FIRST install never served");
+        PrometheusPresence.Answers(Component("kube-prometheus-stack", ContractStatus.Failed, RanBefore)).Should().BeTrue(
+            "a failed upgrade leaves the previous revision serving");
         PrometheusPresence.Answers(Component("prometheus", ContractStatus.Installed)).Should().BeFalse();
+        PrometheusPresence.Answers(Component("prometheus", ContractStatus.Installing, RanBefore)).Should().BeFalse(
+            "the chart still decides");
+    }
+}
+
+/// <summary>
+/// The cost the presence rule has at apply time: whether OBI's RED metrics stay on. Re-applying
+/// OBI while kube-prometheus-stack was being upgraded (Installing) or after a failed upgrade
+/// (Failed) asked "Installed?", heard no, and rendered the metrics OFF — on a cluster whose
+/// Prometheus Operator and its CRDs had never gone anywhere.
+/// </summary>
+public class PrometheusPresenceAtApplyTests : IDisposable
+{
+    private readonly SqliteConnection connection;
+    private readonly ApplicationDbContext db;
+    private readonly EntKube.Web.Services.ComponentLifecycleService sut;
+    private readonly Guid tenantId = Guid.NewGuid();
+    private readonly Guid clusterId = Guid.NewGuid();
+
+    public PrometheusPresenceAtApplyTests()
+    {
+        connection = new SqliteConnection("DataSource=:memory:");
+        connection.Open();
+        db = new ApplicationDbContext(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
+        db.Database.EnsureCreated();
+
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = $"t-{tenantId:N}", Slug = $"t-{tenantId:N}" });
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "prod" };
+        db.Environments.Add(env);
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = env.Id,
+            Name = $"c-{clusterId:N}", ApiServerUrl = "https://k8s.example",
+        });
+        db.SaveChanges();
+
+        TestDbContextFactory factory = new(connection);
+        EntKube.Web.Services.VaultService vault = new(factory,
+            new EntKube.Web.Services.VaultEncryptionService(Convert.FromBase64String(TestServices.TestRootKeyBase64)),
+            TestServices.NoClusterAccess);
+        sut = TestServices.BuildLifecycle(factory, vault);
+    }
+
+    public void Dispose()
+    {
+        db.Dispose();
+        connection.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    [Theory]
+    [InlineData(DataStatus.Installing)]
+    [InlineData(DataStatus.Failed)]
+    public async Task Re_applying_obi_while_prometheus_is_upgraded_or_after_a_failed_upgrade_keeps_its_metrics_on(
+        DataStatus prometheusStatus)
+    {
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = "kube-prometheus-stack", ComponentType = "HelmChart",
+            HelmChartName = "kube-prometheus-stack", Namespace = "monitoring", Status = prometheusStatus,
+            InstalledAt = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc),
+        });
+        ClusterComponent obi = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = "otel-ebpf", ComponentType = "HelmChart",
+            HelmChartName = "opentelemetry-ebpf-instrumentation", ReleaseName = "otel-ebpf",
+            Namespace = "monitoring",
+            HelmValues = EntKube.Web.Services.ComponentCatalog.GetByKey("otel-ebpf")!.DefaultValues,
+        };
+        db.ClusterComponents.Add(obi);
+        db.SaveChanges();
+
+        string values = (await sut.GetInstallCommandAsync(tenantId, obi.Id)).ValuesYaml!;
+
+        EntKube.Web.Services.YamlFormMerger.ExtractValue(values, "serviceMonitor.enabled").Should().Be("true",
+            "the release ran before (InstalledAt) and helm keeps its last revision — and its CRDs — serving");
+        EntKube.Web.Services.YamlFormMerger.ExtractValue(values, "config.data.prometheus_export.port").Should().Be("9090");
     }
 }

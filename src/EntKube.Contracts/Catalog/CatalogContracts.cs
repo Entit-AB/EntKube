@@ -131,9 +131,10 @@ public interface IComponentNaming
 /// <para><see cref="ICatalogApi.FindPrometheusAsync"/> is the question asked of one cluster; this
 /// is the same rule applied to components already in hand — the tenant-wide sweeps
 /// (<c>AlertSyncService</c>, <c>ResourceUsageCollectorService</c>) list every component of a
-/// tenant once rather than asking cluster by cluster. Both read <see cref="HelmChartName"/>, and
-/// <c>PrometheusPresenceTests</c> asks both the same question for every status so the two cannot
-/// drift apart.</para>
+/// tenant once rather than asking cluster by cluster. Both read <see cref="HelmChartName"/> and
+/// <see cref="Serving"/>'s rule, and <c>PrometheusPresenceTests</c> asks both the same question for
+/// every status, with and without <c>InstalledAt</c>, so the two cannot drift apart. (The query
+/// cannot call this: it compares Catalog's own entity enum, and the contract cannot see that type.)</para>
 /// </summary>
 public static class PrometheusPresence
 {
@@ -144,9 +145,37 @@ public static class PrometheusPresence
     /// </summary>
     public const string HelmChartName = "kube-prometheus-stack";
 
-    /// <summary>True when <paramref name="component"/> is a Prometheus that is installed.</summary>
+    /// <summary>
+    /// True when <paramref name="component"/> is a <c>kube-prometheus-stack</c> that is serving —
+    /// see <see cref="Serving"/> for what that means.
+    /// </summary>
     public static bool Answers(InstalledComponent component)
-        => component.HelmChartName == HelmChartName && component.Status == ComponentStatus.Installed;
+        => component.HelmChartName == HelmChartName && Serving(component.Status, component.InstalledAt);
+
+    /// <summary>
+    /// Whether a release in <paramref name="status"/> is one a running Prometheus stands behind:
+    /// <see cref="ComponentStatus.Installed"/>, or <see cref="ComponentStatus.Installing"/> /
+    /// <see cref="ComponentStatus.Failed"/> of a release that has run before
+    /// (<paramref name="installedAt"/> set).
+    ///
+    /// <para><b>Why not "Installed" alone, which this was.</b> An upgrade of a running stack sets
+    /// the status to Installing for the whole <c>helm --wait</c>, and a failed upgrade leaves it
+    /// Failed while helm keeps the previous revision serving. During either, every metrics view
+    /// said "No prometheus component found on this cluster", the environment tab said Prometheus
+    /// was not installed, the alert sweeps skipped the cluster, and re-applying OBI in that window
+    /// turned its RED metrics OFF — the Prometheus Operator's CRDs had not gone anywhere.</para>
+    ///
+    /// <para><b>Why <c>InstalledAt</c> tells the two apart.</b> It is set only by a successful
+    /// install or upgrade (<c>ComponentLifecycleService.MarkInstallResultAsync</c>) or from a live
+    /// release (<c>ComponentScanService</c>), and cleared by a successful uninstall and by
+    /// <c>ClusterProvidedComponents.RecordAsCatalogInstall</c>. So a FIRST install that is running
+    /// or failed (null) still does not count — there may be no CRDs yet, and a ServiceMonitor
+    /// rendered on its word fails the OBI release. Uninstalling and NotInstalled never count,
+    /// whatever the timestamp says: the release is going or gone.</para>
+    /// </summary>
+    public static bool Serving(ComponentStatus status, DateTime? installedAt)
+        => status == ComponentStatus.Installed
+            || ((status == ComponentStatus.Installing || status == ComponentStatus.Failed) && installedAt != null);
 }
 
 public sealed record InstalledComponent(
@@ -218,8 +247,10 @@ public interface ICatalogApi
     /// have Prometheus".
     ///
     /// <para>"Has" means what <see cref="PrometheusPresence.Answers"/> says: a
-    /// <c>kube-prometheus-stack</c> chart whose status is <see cref="ComponentStatus.Installed"/>.
-    /// The question used to be answered several ways at once. <c>PrometheusService</c> took the
+    /// <c>kube-prometheus-stack</c> chart that is <see cref="ComponentStatus.Installed"/>, or is
+    /// Installing or Failed after having been installed before (<c>InstalledAt</c> set) — an
+    /// upgrade in progress or a failed upgrade, while helm's previous revision keeps serving. See
+    /// <see cref="PrometheusPresence.Serving"/> for why. The question used to be answered several ways at once. <c>PrometheusService</c> took the
     /// first component whose <em>name</em> contained "prometheus", ignoring the chart and the
     /// status, while the alert and monitoring pages asked for the chart and the status — so a
     /// cluster whose Prometheus install had failed was one the metrics views tried to query and
