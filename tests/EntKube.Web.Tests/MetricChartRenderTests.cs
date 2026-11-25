@@ -133,4 +133,105 @@ public class MetricChartRenderTests : BunitContext
             "text-danger", "KeycloakMonitoringPanel charts heap in bytes — red above 90 bytes meant "
             + "red always, which is the same as no signal at all");
     }
+
+    // ── Gaps: a step with no value is a gap, not a missing step ─────────────
+
+    private static List<TimeSeriesDataPoint> Series(params double[] values)
+    {
+        DateTime at = new(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+        return [.. values.Select((v, i) => new TimeSeriesDataPoint { Timestamp = at.AddMinutes(i), Value = v })];
+    }
+
+    private IRenderedComponent<MetricChart> RenderInvariant(List<TimeSeriesDataPoint> points)
+    {
+        CultureInfo previous = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+        try
+        {
+            return Render<MetricChart>(ps => ps
+                .Add(p => p.Title, "p95 latency")
+                .Add(p => p.DataPoints, points)
+                .Add(p => p.Unit, "ms")
+                .Add(p => p.ShowAxes, true));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    /// <summary>
+    /// ⭐ Pinned against the renderer as it was before gaps existed, captured by running this very
+    /// test on that code (ad45bcb4): every chart in the product draws finite data, and teaching the
+    /// component about gaps must not move a single coordinate of any of them. Five points, peak 5:
+    /// x = 2 + i·74, y = 78 − v/5·76.
+    /// </summary>
+    [Fact]
+    public void A_series_without_gaps_draws_exactly_what_it_drew_before_gaps_were_supported()
+    {
+        IRenderedComponent<MetricChart> cut = RenderInvariant(Series(1, 3, 2, 5, 4));
+
+        cut.FindAll("polyline").Should().ContainSingle();
+        cut.Find("polyline").GetAttribute("points").Should().Be("2.0,62.8 76.0,32.4 150.0,47.6 224.0,2.0 298.0,17.2");
+        cut.Find("path").GetAttribute("d").Should().Be(
+            "M 2.0,78.0 L 2.0,62.8 L 76.0,32.4 L 150.0,47.6 L 224.0,2.0 L 298.0,17.2 L 298.0,78.0 Z");
+        cut.Find(".chart-axis-y").TextContent.Should().Contain("5.00 ms").And.Contain("2.50 ms");
+        cut.Find(".fw-bold").TextContent.Should().Be("4.0ms");
+    }
+
+    /// <summary>
+    /// ⚠️ The p95 series is NaN at every step that served no request (histogram_quantile of 0/0).
+    /// The panel used to drop those steps before handing the series here, and this component
+    /// places points by list index, so the surviving points were spread over the whole width:
+    /// a p95 spike at 12:03 was drawn under the Requests chart's 12:04, beside it on the same row.
+    /// A gap keeps its step: the line breaks, and the points after it stay where their time is.
+    /// </summary>
+    [Fact]
+    public void A_NaN_step_breaks_the_line_and_the_points_after_it_keep_their_time()
+    {
+        IRenderedComponent<MetricChart> cut = RenderInvariant(Series(1, 3, double.NaN, 5, 4));
+
+        cut.FindAll("polyline").Select(l => l.GetAttribute("points")).Should().Equal(
+            ["2.0,62.8 76.0,32.4", "224.0,2.0 298.0,17.2"],
+            "two segments, and 5 and 4 still sit at the x of steps 3 and 4 — the same x as in the "
+            + "gap-free series above, not squeezed into the width that four points would span");
+        cut.Find("path").GetAttribute("d").Should().Be(
+            "M 2.0,78.0 L 2.0,62.8 L 76.0,32.4 L 76.0,78.0 Z M 224.0,78.0 L 224.0,2.0 L 298.0,17.2 L 298.0,78.0 Z",
+            "the area under the line closes at each gap rather than bridging it");
+        cut.Markup.Should().NotContain("NaN");
+    }
+
+    [Fact]
+    public void The_scale_and_the_readout_come_from_finite_values_only()
+    {
+        IRenderedComponent<MetricChart> cut = RenderInvariant(
+            Series(1, double.PositiveInfinity, 3, 5, double.NaN));
+
+        cut.Find(".chart-axis-y").TextContent.Should().Contain("5.00 ms",
+            "an infinite step would otherwise be the peak, and every finite point would sit on the floor");
+        cut.Find(".fw-bold").TextContent.Should().Be("5.0ms",
+            "the latest value is the latest one measured — the trailing NaN is a step without requests");
+        cut.Markup.Should().NotContain("NaN").And.NotContain("Infinity").And.NotContain("∞");
+    }
+
+    /// <summary>An isolated point between two gaps would be a one-point line, which draws nothing.</summary>
+    [Fact]
+    public void A_point_between_two_gaps_is_still_drawn()
+    {
+        IRenderedComponent<MetricChart> cut = RenderInvariant(Series(1, 3, double.NaN, 5, double.NaN));
+
+        cut.FindAll("polyline").Select(l => l.GetAttribute("points")).Should().Equal(
+            ["2.0,62.8 76.0,32.4", "224.0,2.0 224.0,2.0"],
+            "a zero-length segment with a round cap renders as a dot, at its own time");
+    }
+
+    [Fact]
+    public void A_series_of_only_NaN_is_the_empty_state_not_a_broken_path()
+    {
+        IRenderedComponent<MetricChart> cut = RenderInvariant(Series(double.NaN, double.NaN, double.NaN));
+
+        cut.Markup.Should().Contain("Insufficient data");
+        cut.FindAll("svg").Should().BeEmpty();
+        cut.Markup.Should().NotContain("NaN");
+    }
 }

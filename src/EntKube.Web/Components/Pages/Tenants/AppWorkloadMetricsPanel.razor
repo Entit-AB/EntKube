@@ -1,0 +1,205 @@
+@using EntKube.Web.Services
+@implements IDisposable
+@inject PrometheusService PrometheusService
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   AppWorkloadMetricsPanel — the metrics every app gets with nothing to
+   configure, on a cluster that runs Prometheus: CPU and memory per pod,
+   container restarts, volume usage, and HTTP rate/errors/p95 from the eBPF
+   agent. One cluster's share of an environment (AppMetricsScope); the queries
+   come from AppWorkloadQueries so their metric names are pinned by tests.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex align-items-center gap-2 mb-2">
+    @if (ShowClusterName)
+    {
+        <span class="small text-muted"><span class="bi bi-hdd-network me-1"></span>@Scope.ClusterName</span>
+    }
+    <div class="ms-auto d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="width:auto"
+                @bind="rangeMinutes" @bind:after="LoadAsync">
+            <option value="30">Last 30 min</option>
+            <option value="180">Last 3 hours</option>
+            <option value="720">Last 12 hours</option>
+            <option value="1440">Last 24 hours</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@isLoading">
+            <span class="bi bi-arrow-clockwise"></span> Refresh
+        </button>
+    </div>
+</div>
+
+@if (isLoading)
+{
+    <div class="text-muted small text-center py-3">
+        <span class="bi bi-hourglass-split me-1"></span> Loading metrics…
+    </div>
+}
+else
+{
+    @if (rangeError is not null)
+    {
+        <div class="alert alert-warning py-2 small">
+            <span class="bi bi-exclamation-triangle me-1"></span> Some charts could not be loaded: @rangeError
+        </div>
+    }
+    <div class="small fw-semibold text-muted mb-1">Resources</div>
+    <div class="row g-3 mb-3">
+        <div class="col-lg-6">
+            <div class="small text-muted mb-1">CPU by pod (cores)</div>
+            <MultiSeriesChart Series="cpuByPod" Unit="cores" HeightPx="160" />
+        </div>
+        <div class="col-lg-6">
+            <div class="small text-muted mb-1">Memory by pod (MiB, working set)</div>
+            <MultiSeriesChart Series="memoryByPod" Unit="MiB" HeightPx="160" />
+        </div>
+        <div class="col-md-4">
+            <MetricChart Title="CPU total" DataPoints="cpu" Color="#0d6efd" Unit=" cores" HeightPx="90" ShowAxes="true" />
+        </div>
+        <div class="col-md-4">
+            <MetricChart Title="Memory total" DataPoints="memory" Color="#0dcaf0" Unit=" MiB" HeightPx="90" ShowAxes="true" />
+        </div>
+        <div class="col-md-4">
+            <MetricChart Title="Container restarts (per window)" DataPoints="restarts" Color="#ffc107" HeightPx="90" ShowAxes="true" />
+        </div>
+    </div>
+
+    <div class="small fw-semibold text-muted mb-1">Volumes</div>
+    <div class="mb-3">
+        @if (pvcError is not null)
+        {
+            <div class="alert alert-warning py-2 small mb-0">
+                <span class="bi bi-exclamation-triangle me-1"></span> Could not read volume usage: @pvcError
+            </div>
+        }
+        else
+        {
+            <PvcUsageTable Rows="pvcRows" />
+        }
+    </div>
+
+    <div class="small fw-semibold text-muted mb-1">HTTP</div>
+    <AppHttpMetricsCharts Available="@(http.State == HttpMetricsState.Charted)"
+                          LoadError="@(http.State == HttpMetricsState.Failed ? http.Error : null)"
+                          Rate="http.Rate" Errors="http.Errors" P95Ms="http.P95Ms"
+                          ErrorsLoadError="@http.ErrorsError" P95LoadError="@http.P95Error" />
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    /// <summary>The cluster and namespaces to chart — one entry of <see cref="AppMetricsOverview.Scopes"/>.</summary>
+    [Parameter] public required AppMetricsScope Scope { get; set; }
+
+    /// <summary>Whether to name the cluster: only worth it when an environment spans several.</summary>
+    [Parameter] public bool ShowClusterName { get; set; }
+
+    private readonly LatestLoad loads = new();
+    private bool isLoading = true;
+    private int rangeMinutes = 180;
+    private string? loadedFor;
+
+    private List<TimeSeriesDataPoint> cpu = [], memory = [], restarts = [];
+    private List<MetricSeriesGroup> cpuByPod = [], memoryByPod = [];
+    private List<PvcUsageRow> pvcRows = [];
+    private string? pvcError;
+    private string? rangeError;
+    private HttpMetricsView http = new(HttpMetricsState.NoSeries, null, [], [], [], null, null);
+
+    /// <summary>Loads when pointed at a different scope; refreshing is the button's and the range selector's.</summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        string key = $"{Scope.ClusterId}/{Scope.NsRegex}";
+        if (loadedFor == key) return;
+        loadedFor = key;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// One load of every chart. The range selector is not disabled while one runs, so loads
+    /// overlap; <see cref="LatestLoad"/> cancels the previous one and lets only the latest write
+    /// what is shown — the charts, the warnings and the end of the spinner.
+    /// </summary>
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        await loads.RunAsync(FetchAsync, Apply, settled: () => isLoading = false);
+    }
+
+    private sealed record Loaded(
+        RangeOutcome Cpu, RangeOutcome CpuByPod, RangeOutcome Memory, RangeOutcome MemoryByPod,
+        RangeOutcome Restarts, RangeOutcome HttpRate, RangeOutcome HttpErrors, RangeOutcome HttpP95,
+        KubernetesOperationResult<List<PvcUsageRow>> Pvc);
+
+    private async Task<Loaded> FetchAsync(CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, string> q = AppWorkloadQueries.Build(Scope.NsRegex);
+        TimeSpan window = TimeSpan.FromMinutes(rangeMinutes);
+
+        // Scaled in PromQL rather than here, so the axes read in the unit the title names.
+        Task<RangeOutcome> cpuT    = RangeAsync(q[AppWorkloadQueries.Cpu], window);
+        Task<RangeOutcome> cpuPodT = RangeAsync(q[AppWorkloadQueries.CpuByPod], window);
+        Task<RangeOutcome> memT    = RangeAsync($"({q[AppWorkloadQueries.Memory]}) / 1048576", window);
+        Task<RangeOutcome> memPodT = RangeAsync($"({q[AppWorkloadQueries.MemoryByPod]}) / 1048576", window);
+        Task<RangeOutcome> rstT    = RangeAsync(q[AppWorkloadQueries.Restarts], window);
+        Task<RangeOutcome> rateT   = RangeAsync(q[AppWorkloadQueries.HttpRate], window);
+        Task<RangeOutcome> errT    = RangeAsync(q[AppWorkloadQueries.HttpErrors], window);
+        Task<RangeOutcome> p95T    = RangeAsync($"({q[AppWorkloadQueries.HttpP95]}) * 1000", window);
+        Task<KubernetesOperationResult<List<PvcUsageRow>>> pvcT =
+            PrometheusService.GetPvcUsageAsync(TenantId, Scope.ClusterId, Scope.NsRegex, ct,
+                requireComponent: !Scope.ViaDefaultService);
+
+        await Task.WhenAll(cpuT, cpuPodT, memT, memPodT, rstT, rateT, errT, p95T, pvcT);
+
+        return new Loaded(cpuT.Result, cpuPodT.Result, memT.Result, memPodT.Result, rstT.Result,
+            rateT.Result, errT.Result, p95T.Result, pvcT.Result);
+    }
+
+    private void Apply(Loaded r)
+    {
+        cpu         = r.Cpu.FirstSeries;
+        memory      = r.Memory.FirstSeries;
+        restarts    = r.Restarts.FirstSeries;
+        cpuByPod    = ByPod(r.CpuByPod);
+        memoryByPod = ByPod(r.MemoryByPod);
+        http        = AppWorkloadQueries.HttpMetrics(r.HttpRate, r.HttpErrors, r.HttpP95);
+
+        // A failed query must not read as an idle app: its chart is empty, and this names it.
+        rangeError = AppWorkloadQueries.FailedCharts(
+        [
+            ("CPU by pod", r.CpuByPod), ("Memory by pod", r.MemoryByPod),
+            ("CPU total", r.Cpu), ("Memory total", r.Memory), ("Container restarts", r.Restarts),
+            ("Requests", r.HttpRate), ("5xx errors", r.HttpErrors), ("p95 latency", r.HttpP95),
+        ]);
+
+        pvcRows  = r.Pvc.IsSuccess ? r.Pvc.Data ?? [] : [];
+        pvcError = r.Pvc.IsSuccess ? null : r.Pvc.Error;
+    }
+
+    /// <summary>
+    /// ⚠️ No cancellation token, deliberately. <see cref="PrometheusService.GetMetricRangeAsync"/>
+    /// coalesces identical in-flight queries (PromQueryCache) and runs the shared fetch under the
+    /// <i>first</i> caller's token. Switching 3 h → 30 min → 3 h would cancel the first 3 h load,
+    /// and the third load — joined to that same in-flight fetch — would fail with "A task was
+    /// canceled" on a range nobody abandoned. A superseded range load therefore runs to the end
+    /// and is discarded by <see cref="LatestLoad"/>; the volume queries are not coalesced and do
+    /// take the token.
+    /// </summary>
+    private async Task<RangeOutcome> RangeAsync(string query, TimeSpan window) =>
+        RangeOutcome.From(await PrometheusService.GetMetricRangeAsync(TenantId, Scope.ClusterId, query, window,
+            requireComponent: !Scope.ViaDefaultService));
+
+    /// <summary>
+    /// Per-pod lines for MultiSeriesChart, which places points by timestamp, so dropping the
+    /// non-finite steps leaves no shifted time axis behind — unlike MetricChart, which gets every
+    /// step and draws gaps (see <see cref="AppWorkloadQueries.Drawable"/>).
+    /// </summary>
+    private static List<MetricSeriesGroup> ByPod(RangeOutcome outcome) =>
+        [.. outcome.Series.Select(s => new MetricSeriesGroup(
+            s.Labels.TryGetValue("pod", out string? pod) && !string.IsNullOrEmpty(pod) ? pod : "(unlabeled)",
+            AppWorkloadQueries.Drawable(s.DataPoints)))];
+
+    public void Dispose() => loads.Dispose();
+}

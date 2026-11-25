@@ -17,9 +17,11 @@ namespace EntKube.Web.Tests;
 /// the ratchet cannot see: a page could be structurally converted, pass every structural check,
 /// and throw on first render.</para>
 ///
-/// <para>⚠️ The <c>Include</c> is the part worth pinning. <c>TenantAlertsTab</c> reads
+/// <para>⚠️ The <c>Include</c> is the part worth pinning. <c>TenantLogsTab</c> reads
 /// <c>KubernetesClusters</c> with <c>.Include(c =&gt; c.Components)</c> — a hub table pulling in a
-/// <em>Catalog</em> entity — from Telemetry's context. That works because <c>ModuleDbContext</c>
+/// <em>Catalog</em> entity — from Telemetry's context. (<c>TenantAlertsTab</c> made the same read
+/// until it asked Catalog's <c>FindPrometheusAsync</c> instead; the logs tab still needs the
+/// components for its Loki and collector checks.) That works because <c>ModuleDbContext</c>
 /// builds the same full model for every module, so the navigation exists; but "it compiles" and
 /// "EF can translate it" are different claims, and only the second one matters at render time.
 /// </para>
@@ -66,7 +68,7 @@ public class HubReadOnAModuleContextTests : IDisposable
             Name = "someone-elses", ApiServerUrl = "https://b.example",
         });
 
-        // The component the alerts page filters on, so the Include has something to materialise.
+        // A component for the Include to materialise.
         seed.ClusterComponents.Add(new ClusterComponent
         {
             Id = Guid.NewGuid(),
@@ -87,7 +89,7 @@ public class HubReadOnAModuleContextTests : IDisposable
     }
 
     /// <summary>
-    /// ⭐ The exact query <c>TenantAlertsTab</c> makes, executed against Telemetry's context.
+    /// ⭐ The exact query <c>TenantLogsTab</c> makes, executed against Telemetry's context.
     /// </summary>
     [Fact]
     public async Task A_hub_table_serves_an_include_across_a_module_boundary()

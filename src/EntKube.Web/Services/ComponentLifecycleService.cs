@@ -917,6 +917,23 @@ public class ComponentLifecycleService(
         // eBPF maps, and a RED-metrics endpoint nothing scrapes. Only genuinely absent keys are filled.
         if (component.HelmChartName == "opentelemetry-ebpf-instrumentation")
         {
+            // RED metrics follow the cluster: on where kube-prometheus-stack is installed, forced off
+            // where it is not — a ServiceMonitor on a cluster without the Prometheus Operator's CRDs
+            // fails the whole release. Asked of Catalog's one answer, the query the metrics views use,
+            // and asked at every apply, so installing Prometheus and re-applying this turns them on.
+            //
+            // ⚠️ BEFORE the bounds below, which write `prometheus_export.port: 0` when the block is
+            // absent. This step reads 0 as the operator's "off" (it cannot tell whose 0 it is), so
+            // running second would turn an old install's absent port — which this step makes 9090 —
+            // into a 0 it then respects.
+            EntKube.Contracts.Catalog.InstalledComponent? prometheus =
+                await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
+                    db.ClusterComponents, tenantId, component.ClusterId, ct);
+
+            valuesYaml = prometheus is not null
+                ? YamlFormMerger.EnableObiPrometheusMetrics(valuesYaml ?? "", PrometheusReleaseName(prometheus))
+                : YamlFormMerger.KeepObiPrometheusMetricsOff(valuesYaml ?? "");
+
             valuesYaml = YamlFormMerger.EnsureObiResourceBounds(valuesYaml ?? "");
         }
 
@@ -949,6 +966,24 @@ public class ComponentLifecycleService(
             ValuesYaml = valuesYaml,
             Timeout = installTimeout
         };
+    }
+
+    /// <summary>
+    /// The helm release the cluster's kube-prometheus-stack actually runs under — the value its
+    /// <c>release: &lt;name&gt;</c> monitor selector matches when the NilUsesHelmValues flags are still true.
+    ///
+    /// <para><c>ReleaseName ?? Name</c>, the same expression this class installs it with (see
+    /// <see cref="GetInstallCommandAsync"/>): a component with no stored ReleaseName was installed under its
+    /// Name, so the catalog's default release would be the wrong label for any Prometheus whose Name
+    /// is not the default. The catalog's default is only the last resort for a blank Name.</para>
+    /// </summary>
+    private static string PrometheusReleaseName(EntKube.Contracts.Catalog.InstalledComponent prometheus)
+    {
+        string? release = string.IsNullOrWhiteSpace(prometheus.ReleaseName) ? prometheus.Name : prometheus.ReleaseName;
+        return !string.IsNullOrWhiteSpace(release)
+            ? release.Trim()
+            : ComponentCatalog.GetByKey(EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName)?.DefaultReleaseName
+              ?? EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName;
     }
 
     /// <summary>

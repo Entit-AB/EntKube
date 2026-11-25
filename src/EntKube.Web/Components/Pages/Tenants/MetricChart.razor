@@ -5,6 +5,8 @@
    Purely server-rendered, no JS. With ShowAxes it grows a value scale (y) and
    a start/end time axis (x) plus faint gridlines — for full-size panels.
    Without it, it stays a compact sparkline (the default, for dashboard tiles).
+   A non-finite value is a gap: its step keeps its place on the x axis and the
+   line breaks there (see Segments).
    ═══════════════════════════════════════════════════════════════════════════ *@
 
 <div class="metric-chart-container">
@@ -12,14 +14,14 @@
     {
         <div class="d-flex justify-content-between align-items-center mb-1">
             <small class="text-muted fw-medium">@Title</small>
-            @if (DataPoints.Count > 0)
+            @if (LatestFinite is not null)
             {
                 <small class="fw-bold @GetValueColorClass()">@CurrentValue</small>
             }
         </div>
     }
 
-    @if (DataPoints.Count >= 2)
+    @if (DataPoints.Count >= 2 && LatestFinite is not null)
     {
         <div style="@(ShowAxes ? $"display:grid;grid-template-columns:auto 1fr;grid-template-rows:{HeightPx}px auto;column-gap:6px;" : "")">
             @if (ShowAxes)
@@ -53,9 +55,12 @@
                     @* Area fill below the line *@
                     <path d="@AreaPath" fill="url(#@GradientId)" />
 
-                    @* The line itself *@
-                    <polyline points="@LinePath" fill="none" stroke="@Color" stroke-width="1.5"
-                              stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                    @* The line itself: one polyline per run of finite points, so a gap stays a gap. *@
+                    @foreach (string points in LinePaths)
+                    {
+                        <polyline points="@points" fill="none" stroke="@Color" stroke-width="1.5"
+                                  stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                    }
                 </svg>
             </div>
             @if (ShowAxes)
@@ -118,13 +123,27 @@
 
     private string GradientId => $"grad-{Title?.GetHashCode():x}";
 
-    // The value the top of the plot represents — an explicit MaxValue, else the data peak (never ≤ 0).
+    // The value the top of the plot represents — an explicit MaxValue, else the peak of the
+    // measured (finite) values, never ≤ 0. An infinite step as the peak would put every real
+    // point on the floor and write "Infinity" on the axis.
     private double MaxVal
     {
         get
         {
-            double m = MaxValue ?? (DataPoints.Count > 0 ? DataPoints.Max(d => d.Value) : 0);
+            double[] finite = [.. DataPoints.Select(d => d.Value).Where(double.IsFinite)];
+            double m = MaxValue ?? (finite.Length > 0 ? finite.Max() : 0);
             return m <= 0 ? 1 : m;
+        }
+    }
+
+    /// <summary>The latest measured value, skipping trailing gaps; null when nothing was measured.</summary>
+    private double? LatestFinite
+    {
+        get
+        {
+            for (int i = DataPoints.Count - 1; i >= 0; i--)
+                if (double.IsFinite(DataPoints[i].Value)) return DataPoints[i].Value;
+            return null;
         }
     }
 
@@ -141,68 +160,82 @@
     {
         get
         {
-            if (DataPoints.Count == 0)
+            if (LatestFinite is not double last)
             {
                 return "";
             }
 
-            double last = DataPoints[^1].Value;
             string formatted = last >= 100 ? last.ToString("F0") : last.ToString("F1");
             return Unit is not null ? $"{formatted}{Unit}" : formatted;
         }
     }
 
-    private string LinePath
+    /// <summary>
+    /// The plotted points, split into runs of consecutive finite values.
+    ///
+    /// <para>⚠️ Points are placed by list <b>index</b> — x = Padding + i·xStep over every step,
+    /// gaps included. The p95 chart's NaN steps (histogram_quantile at a step with no requests)
+    /// used to be dropped before they got here, which spread the surviving points over the whole
+    /// width: the p95 line no longer lined up with the Requests and 5xx charts beside it, and a
+    /// spike was drawn minutes away from the traffic that caused it. A non-finite value is kept as
+    /// a step and ends the run; the next finite point starts a new one. Never NaN in an attribute:
+    /// one NaN in an SVG coordinate list discards the rest of the shape.</para>
+    /// </summary>
+    private List<List<(double X, double Y)>> Segments()
     {
-        get
+        List<List<(double X, double Y)>> segments = [];
+        if (DataPoints.Count < 2) return segments;
+
+        double maxVal = MaxVal;
+        double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
+
+        List<(double X, double Y)>? run = null;
+        for (int i = 0; i < DataPoints.Count; i++)
         {
-            if (DataPoints.Count < 2)
+            double v = DataPoints[i].Value;
+            if (!double.IsFinite(v))
             {
-                return "";
+                run = null;
+                continue;
             }
 
-            double maxVal = MaxVal;
-            double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
-
-            List<string> points = [];
-            for (int i = 0; i < DataPoints.Count; i++)
-            {
-                double x = Padding + i * xStep;
-                double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
-                points.Add($"{Coord(x)},{Coord(y)}");
-            }
-
-            return string.Join(" ", points);
+            if (run is null) segments.Add(run = []);
+            double x = Padding + i * xStep;
+            double y = Height - Padding - (v / maxVal * (Height - 2 * Padding));
+            run.Add((x, y));
         }
+
+        return segments;
     }
 
+    /// <summary>
+    /// One <c>points</c> list per run. A run of a single point — a measured step between two gaps
+    /// — is written as a zero-length segment, which a round line cap renders as a dot; a
+    /// one-point polyline would draw nothing and the measurement would vanish.
+    /// </summary>
+    private List<string> LinePaths =>
+        [.. Segments().Select(run => run.Count == 1
+            ? $"{Coord(run[0].X)},{Coord(run[0].Y)} {Coord(run[0].X)},{Coord(run[0].Y)}"
+            : string.Join(" ", run.Select(p => $"{Coord(p.X)},{Coord(p.Y)}")))];
+
+    /// <summary>
+    /// The fill under the line: one closed subpath per run, from the baseline under its first
+    /// point to the baseline under its last, so a gap is unfilled instead of bridged. With no
+    /// gaps this is the single shape it always was, coordinate for coordinate.
+    /// </summary>
     private string AreaPath
     {
         get
         {
-            if (DataPoints.Count < 2)
+            List<string> pathParts = [];
+            foreach (List<(double X, double Y)> run in Segments())
             {
-                return "";
+                pathParts.Add($"M {Coord(run[0].X)},{Coord(Height - Padding)}");
+                foreach ((double x, double y) in run)
+                    pathParts.Add($"L {Coord(x)},{Coord(y)}");
+                pathParts.Add($"L {Coord(run[^1].X)},{Coord(Height - Padding)}");
+                pathParts.Add("Z");
             }
-
-            double maxVal = MaxVal;
-            double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
-
-            // Start at the bottom-left corner.
-            List<string> pathParts = [$"M {Coord(Padding)},{Coord(Height - Padding)}"];
-
-            // Line to each data point.
-            for (int i = 0; i < DataPoints.Count; i++)
-            {
-                double x = Padding + i * xStep;
-                double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
-                pathParts.Add($"L {Coord(x)},{Coord(y)}");
-            }
-
-            // Close back to bottom-right.
-            double lastX = Padding + (DataPoints.Count - 1) * xStep;
-            pathParts.Add($"L {Coord(lastX)},{Coord(Height - Padding)}");
-            pathParts.Add("Z");
 
             return string.Join(" ", pathParts);
         }
@@ -228,12 +261,11 @@
     /// </summary>
     private string GetValueColorClass()
     {
-        if (DataPoints.Count == 0 || Unit != "%")
+        if (LatestFinite is not double last || Unit != "%")
         {
             return "";
         }
 
-        double last = DataPoints[^1].Value;
         return last switch
         {
             >= 90 => "text-danger",

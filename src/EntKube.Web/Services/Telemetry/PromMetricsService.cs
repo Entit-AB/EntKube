@@ -6,9 +6,8 @@ namespace EntKube.Web.Services.Telemetry;
 /// Prometheus-backed <see cref="IMetricsQuery"/>: the metrics explorer / dashboards read app metrics from
 /// the cluster's Prometheus via PromQL rather than a native store (apps write to Prometheus directly). The
 /// metric-name and service dropdowns come from Prometheus label values; the charts come from range queries.
-/// PromQL is assembled by <see cref="PromMetricsQueryBuilder"/> (OTel→Prometheus label conventions, counter
-/// detection by <c>_total</c> suffix). Returns the same DTOs the old PgMetricsService did, so the UI is
-/// unchanged.
+/// PromQL is assembled by <see cref="PromMetricsQueryBuilder"/> (both label spellings, counter detection);
+/// returns the same DTOs the old PgMetricsService did, so the UI is unchanged.
 /// </summary>
 public sealed class PromMetricsService(PrometheusService prometheus, ILogger<PromMetricsService> logger) : IMetricsQuery
 {
@@ -52,23 +51,43 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
     public Task<KubernetesOperationResult<List<string>>> GetMetricNamesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => prometheus.GetLabelValuesAsync(tenantId, clusterId, "__name__",
-            NullIfEmpty(PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, null)), DiscoveryLookback, ct);
+        => prometheus.GetLabelValuesMatchingAnyAsync(tenantId, clusterId, "__name__",
+            PromMetricsQueryBuilder.BuildSelectors(namespaces, podPattern, null), DiscoveryLookback, ct);
 
-    public Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
+    /// <summary>
+    /// The service dropdown: OpenTelemetry's <c>service_name</c> and, for scraped pods, the
+    /// <c>app_kubernetes_io_name</c> the scrape job copies — the label a chosen service filters the
+    /// scraped spelling by. Fails only when both lookups fail.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => prometheus.GetLabelValuesAsync(tenantId, clusterId, PromMetricsQueryBuilder.ServiceLabel,
-            NullIfEmpty(PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, null)), DiscoveryLookback, ct);
+    {
+        IReadOnlyList<string> selectors = PromMetricsQueryBuilder.BuildSelectors(namespaces, podPattern, null);
+
+        KubernetesOperationResult<List<string>>[] both = await Task.WhenAll(
+            prometheus.GetLabelValuesMatchingAnyAsync(tenantId, clusterId,
+                PromMetricsQueryBuilder.ServiceLabel, selectors, DiscoveryLookback, ct),
+            prometheus.GetLabelValuesMatchingAnyAsync(tenantId, clusterId,
+                PromMetricsQueryBuilder.ScrapedServiceLabel, selectors, DiscoveryLookback, ct));
+
+        if (both.All(r => !r.IsSuccess)) return both[0];
+
+        return KubernetesOperationResult<List<string>>.Success(
+            [.. both.Where(r => r.IsSuccess).SelectMany(r => r.Data ?? [])
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]);
+    }
 
     public async Task<KubernetesOperationResult<List<TimeSeriesDataPoint>>> GetSeriesAsync(
         Guid tenantId, Guid clusterId, string name, string? service, DateTime from, DateTime to,
         int buckets = 60, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
     {
-        string selector = PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, service);
+        IReadOnlyList<string> selectors = PromMetricsQueryBuilder.BuildSelectors(namespaces, podPattern, service);
         int rate = PromMetricsQueryBuilder.RateWindowSeconds(from, to, buckets);
-        string promql = PromMetricsQueryBuilder.BuildSeriesQuery(name, selector, rate);
+        bool counter = await IsCounterAsync(name, namespaces, podPattern, service,
+            s => prometheus.GetLabelValuesMatchingAnyAsync(tenantId, clusterId, "__name__", s, DiscoveryLookback, ct));
+        string promql = PromMetricsQueryBuilder.BuildSeriesQuery(name, selectors, rate, counter);
 
         KubernetesOperationResult<List<PrometheusTimeSeries>> res =
             await prometheus.GetMetricRangeAsync(tenantId, clusterId, promql, to - from, ct);
@@ -86,23 +105,47 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
         CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
     {
-        string selector = PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, service);
-        string label = PromMetricsQueryBuilder.BreakdownLabel(dimension);
+        IReadOnlyList<string> selectors = PromMetricsQueryBuilder.BuildSelectors(namespaces, podPattern, service);
         int rate = PromMetricsQueryBuilder.RateWindowSeconds(from, to, buckets);
-        string promql = PromMetricsQueryBuilder.BuildSeriesByQuery(name, selector, label, rate, maxSeries);
+        bool counter = await IsCounterAsync(name, namespaces, podPattern, service,
+            s => prometheus.GetLabelValuesMatchingAnyAsync(tenantId, clusterId, "__name__", s, DiscoveryLookback, ct));
+        string promql = PromMetricsQueryBuilder.BuildSeriesByQuery(name, selectors, dimension, rate, maxSeries, counter);
 
         KubernetesOperationResult<List<PrometheusTimeSeries>> res =
             await prometheus.GetMetricRangeAsync(tenantId, clusterId, promql, to - from, ct);
         if (!res.IsSuccess)
             return KubernetesOperationResult<List<MetricSeriesGroup>>.Failure(res.Error!);
 
-        List<MetricSeriesGroup> groups = (res.Data ?? [])
-            .Select(s => new MetricSeriesGroup(
-                s.Labels.TryGetValue(label, out string? v) && !string.IsNullOrEmpty(v) ? v : "(unlabeled)",
-                s.DataPoints))
-            .ToList();
-        return KubernetesOperationResult<List<MetricSeriesGroup>>.Success(groups);
+        return KubernetesOperationResult<List<MetricSeriesGroup>>.Success(
+            PromMetricsQueryBuilder.CollapseBreakdown(res.Data ?? [], dimension));
     }
 
-    private static string? NullIfEmpty(string s) => string.IsNullOrEmpty(s) ? null : s;
+    /// <summary>
+    /// Whether to rate <paramref name="name"/>. The name decides for <c>_total</c> and
+    /// <c>_bucket</c>; a <c>_count</c> or <c>_sum</c> is a counter only when Prometheus holds, within
+    /// the same scope, its family's <c>_bucket</c> series (histogram), quantiles (summary), or its
+    /// sibling — <c>_sum</c> for a <c>_count</c>, <c>_count</c> for a <c>_sum</c> — which is all a
+    /// summary without quantile objectives exposes (see
+    /// <see cref="PromMetricsQueryBuilder.FamilyMemberSelectors"/>). One lookup asks for all of them.
+    /// A lookup that fails answers "gauge", which is what every name got before.
+    /// </summary>
+    /// <param name="lookupNames">
+    /// Metric names matching any of the given selectors — the label-values call, taken as a
+    /// delegate so the decision is testable without a Prometheus.
+    /// </param>
+    public static async Task<bool> IsCounterAsync(
+        string name, IReadOnlyList<string>? namespaces, string? podPattern, string? service,
+        Func<IReadOnlyList<string>, Task<KubernetesOperationResult<List<string>>>> lookupNames)
+    {
+        if (PromMetricsQueryBuilder.IsCounter(name)) return true;
+
+        string? family = PromMetricsQueryBuilder.HistogramFamily(name);
+        if (family is null) return false;
+
+        KubernetesOperationResult<List<string>> found = await lookupNames(
+            PromMetricsQueryBuilder.FamilyMemberSelectors(family, namespaces, podPattern, service));
+
+        return found.IsSuccess && found.Data is not null
+            && PromMetricsQueryBuilder.ProvesCumulativeFamily(family, found.Data);
+    }
 }

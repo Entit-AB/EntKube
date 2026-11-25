@@ -20,6 +20,7 @@
    It needs only the read: there is no SaveChanges anywhere in this component.
    docs/decomposition.md §4.0.2. *@
 @inject IDbContextFactory<EntKube.Web.Data.Modules.TelemetryDbContext> DbFactory
+@inject EntKube.Contracts.Catalog.ICatalogApi Catalog
 @inject AuthenticationStateProvider AuthStateProvider
 @implements IAsyncDisposable
 
@@ -467,18 +468,16 @@ else
         using (EntKube.Web.Data.Modules.TelemetryDbContext db = DbFactory.CreateDbContext())
         {
             clusters = await db.KubernetesClusters
-                .Include(c => c.Components)
                 .Where(c => c.TenantId == TenantId)
                 .OrderBy(c => c.Name)
                 .ToListAsync();
         }
 
-        // Only query clusters that have Prometheus installed
-        List<KubernetesCluster> prometheusEnabled = clusters
-            .Where(c => c.Components.Any(comp =>
-                comp.HelmChartName == "kube-prometheus-stack" &&
-                comp.Status == ComponentStatus.Installed))
-            .ToList();
+        // Only query clusters that have Prometheus installed — Catalog's answer, the same one
+        // PrometheusService.GetAlertsAsync resolves the cluster's Prometheus by.
+        bool[] hasPrometheus = await Task.WhenAll(
+            clusters.Select(async c => await Catalog.FindPrometheusAsync(TenantId, c.Id) is not null));
+        List<KubernetesCluster> prometheusEnabled = [.. clusters.Where((_, i) => hasPrometheus[i])];
 
         List<Task<ClusterAlertVm>> tasks = prometheusEnabled
             .Select(c => LoadClusterAlertsAsync(c))

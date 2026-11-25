@@ -34,6 +34,15 @@ public class PrometheusMetricResult
 }
 
 /// <summary>
+/// One instant query's answer with its failure kept: <paramref name="Error"/> is null when
+/// Prometheus answered, and then an empty <paramref name="Results"/> really is "no series".
+/// </summary>
+public sealed record InstantQueryOutcome(List<PrometheusMetricResult> Results, string? Error)
+{
+    public bool Succeeded => Error is null;
+}
+
+/// <summary>
 /// A time-series result from a Prometheus range query — a set of data points over time.
 /// </summary>
 public class PrometheusTimeSeries
@@ -129,6 +138,36 @@ public class DeploymentMetricsSummary
 /// <summary>
 /// CPU%, memory%, and pod-count time series for a cluster's monitoring graphs.
 /// </summary>
+/// <summary>
+/// An aggregate across clusters that keeps what each cluster said: the totals of those that
+/// answered, the scopes to chart them with, and why every other cluster contributed nothing.
+/// </summary>
+public sealed class AppMetricsOverview
+{
+    /// <summary>The sum over the clusters that answered; null when none did, never a zero for "nothing answered".</summary>
+    public DeploymentMetricsSummary? Totals { get; init; }
+
+    /// <summary>The clusters that answered, with their namespaces — what the charts query.</summary>
+    public List<AppMetricsScope> Scopes { get; init; } = [];
+
+    /// <summary>
+    /// Clusters EntKube reached that have no Prometheus component and where nothing answered on
+    /// the default service either: an empty state, not an error. A component-less cluster whose
+    /// default service does answer is not here — it contributes like any other.
+    /// </summary>
+    public List<string> ClustersWithoutPrometheus { get; init; } = [];
+
+    /// <summary>Every other cluster that did not answer, as "cluster: why".</summary>
+    public List<string> Problems { get; init; } = [];
+
+    /// <summary>The sentence shown for a cluster that has no Prometheus.</summary>
+    public static string NotInstalled(string clusterName) => $"Prometheus is not installed on {clusterName}.";
+
+    /// <summary>Every reason, one sentence each: what a failure carries.</summary>
+    public string Describe() =>
+        string.Join(" ", ClustersWithoutPrometheus.Select(NotInstalled).Concat(Problems));
+}
+
 public sealed record ClusterMetricsHistory(
     List<TimeSeriesDataPoint> CpuPercent,
     List<TimeSeriesDataPoint> MemoryPercent,
@@ -608,10 +647,15 @@ public class PrometheusService(
     /// <summary>
     /// Queries a Prometheus range query over the given duration and returns time-series data.
     /// </summary>
+    /// <param name="requireComponent">
+    /// False only for a scope the aggregate already found answering on the default service
+    /// (<see cref="AppMetricsScope.ViaDefaultService"/>); see <see cref="ResolveReachableAsync"/>.
+    /// </param>
     public async Task<KubernetesOperationResult<List<PrometheusTimeSeries>>> GetMetricRangeAsync(
-        Guid tenantId, Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default,
+        bool requireComponent = true)
     {
-        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent);
         if (info is null) return KubernetesOperationResult<List<PrometheusTimeSeries>>.Failure(error!);
 
         long end   = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -653,6 +697,19 @@ public class PrometheusService(
     public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesAsync(
         Guid tenantId, Guid clusterId, string label, string? matchSelector, TimeSpan lookback,
         CancellationToken ct = default)
+        => await GetLabelValuesMatchingAnyAsync(
+            tenantId, clusterId, label,
+            string.IsNullOrEmpty(matchSelector) ? [] : [matchSelector], lookback, ct);
+
+    /// <summary>
+    /// The label-values lookup with several series selectors, of which a series has to match
+    /// <b>any</b> — Prometheus's repeated <c>match[]</c>, which is a union. A selector cannot
+    /// express "this label or that one", so the metrics explorer asks with one selector per
+    /// label spelling. No selectors means no constraint.
+    /// </summary>
+    public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesMatchingAnyAsync(
+        Guid tenantId, Guid clusterId, string label, IReadOnlyList<string> matchSelectors, TimeSpan lookback,
+        CancellationToken ct = default)
     {
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
@@ -660,11 +717,12 @@ public class PrometheusService(
         long end = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long start = end - (long)lookback.TotalSeconds;
         string path = $"/api/v1/label/{Uri.EscapeDataString(label)}/values?start={start}&end={end}";
-        if (!string.IsNullOrEmpty(matchSelector))
+        foreach (string matchSelector in matchSelectors.Where(s => !string.IsNullOrEmpty(s)))
             path += $"&match[]={Q(matchSelector)}";
 
         return await queryCache.GetOrFetchAsync(
-            EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "labels", label, matchSelector, (long)lookback.TotalSeconds),
+            EntKube.Web.Services.Telemetry.PromQueryCache.Key(
+                clusterId, "labels", label, string.Join("\n", matchSelectors), (long)lookback.TotalSeconds),
             async () => await WithServiceAsync<List<string>>(
                 info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
                 async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
@@ -956,16 +1014,99 @@ public class PrometheusService(
         // each cluster through the seam, so this method was resolving half of it a second time.
         // The "has a stored kubeconfig" filter went with it: ForAsync refuses a cluster with no
         // credential, which is the same answer read from the place that owns it.
-        List<(Guid ClusterId, string NsRegex)> clusterQueries =
-            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
-                .Where(d => d.AppId == appId)
-                .GroupBy(d => d.ClusterId)
-                .Select(g => (g.Key, NsRegex(g)))];
+        List<ClusterQuery> clusterQueries = ByCluster(
+            (await delivery.GetDeploymentsForTenantAsync(tenantId, ct)).Where(d => d.AppId == appId));
 
         if (clusterQueries.Count == 0)
             return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this app.");
 
-        return await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct);
+        return TotalsOrFailure(await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct));
+    }
+
+    /// <summary>
+    /// CPU, memory, pods and restarts for what one app runs in <b>one environment</b>, with the
+    /// per-cluster scopes the environment's charts query.
+    ///
+    /// <para>⚠️ <b>The environment's Metrics tab used to call <see cref="GetAppMetricsAsync"/></b>,
+    /// which sums every environment of the app, under a heading that said "aggregate across all
+    /// deployments in this environment" — so production's tab showed production plus staging plus
+    /// test, and nothing on the screen said so. This asks Delivery for the environment's own
+    /// deployments.</para>
+    ///
+    /// <para>Succeeds without <see cref="AppMetricsOverview.Totals"/> when every cluster simply has
+    /// no Prometheus: that is a true answer, shown as an empty state naming the cluster, not a zero.
+    /// Fails when nothing answered for any other reason.</para>
+    /// </summary>
+    public async Task<KubernetesOperationResult<AppMetricsOverview>> GetEnvironmentMetricsAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
+    {
+        List<ClusterQuery> clusterQueries = ByCluster(
+            await delivery.GetDeploymentsForAppEnvironmentAsync(tenantId, appId, environmentId, ct));
+
+        if (clusterQueries.Count == 0)
+            return KubernetesOperationResult<AppMetricsOverview>.Failure(
+                "No deployments with clusters configured for this app in this environment.");
+
+        AppMetricsOverview overview = await AggregateMetricsAsync(
+            tenantId, clusterQueries, $"environment metrics {appId}/{environmentId}", ct);
+
+        return overview.Totals is null && overview.Problems.Count > 0
+            ? KubernetesOperationResult<AppMetricsOverview>.Failure(overview.Describe())
+            : KubernetesOperationResult<AppMetricsOverview>.Success(overview);
+    }
+
+    /// <summary>
+    /// The volume claims of one app's namespaces on one cluster: used, capacity and free for each
+    /// mounted claim, and the requested size of each unmounted one. See
+    /// <see cref="AppWorkloadQueries.PvcRows"/>.
+    ///
+    /// <para>Fails when any of the five volume queries failed — see <see cref="ReadPvcUsageAsync"/>.</para>
+    /// </summary>
+    /// <param name="requireComponent">As on <see cref="GetMetricRangeAsync"/>.</param>
+    public async Task<KubernetesOperationResult<List<PvcUsageRow>>> GetPvcUsageAsync(
+        Guid tenantId, Guid clusterId, string nsRegex, CancellationToken ct = default,
+        bool requireComponent = true)
+    {
+        if (string.IsNullOrWhiteSpace(nsRegex))
+            return KubernetesOperationResult<List<PvcUsageRow>>.Failure(
+                "No namespace to look for volume claims in.");
+
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent);
+        if (info is null) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(error!);
+
+        KubernetesOperationResult<KubernetesOperationResult<List<PvcUsageRow>>> asked =
+            await WithServiceAsync<KubernetesOperationResult<List<PvcUsageRow>>>(
+                info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                (http, baseUrl, token) => ReadPvcUsageAsync(http, baseUrl, nsRegex, token),
+                $"volume usage for {clusterId}", ct, probeHealthEndpoint: false);
+
+        if (!asked.IsSuccess) return KubernetesOperationResult<List<PvcUsageRow>>.Failure(asked.Error!);
+        if (!asked.Data!.IsSuccess)
+            logger.LogWarning("Volume usage for {ClusterId} not shown: {Error}", clusterId, asked.Data.Error);
+        return asked.Data;
+    }
+
+    /// <summary>
+    /// The five volume queries against one Prometheus, joined into rows — or a failure naming the
+    /// queries that did not answer.
+    ///
+    /// <para>⚠️ This used to go through <see cref="QueryManyAsync"/>, which turns a failed query
+    /// into an empty vector so one metric a broker does not export cannot blank a whole panel.
+    /// For this table that is the wrong trade: the rows are a <i>join</i> of the five vectors, and
+    /// with the health probe skipped (<c>probeHealthEndpoint: false</c>) nothing else notices a
+    /// Prometheus answering 503 or timing out. All five failing read as "No persistent volume
+    /// claims"; only the mounted query failing turned every claim on local-path storage (which
+    /// reports no kubelet stats) into "not mounted"; only the requested-size query failing showed
+    /// every unmounted claim's size as "—". Each of those is a confident statement about the app's
+    /// storage that nobody measured, so a partial table is not shown at all.</para>
+    /// </summary>
+    public static async Task<KubernetesOperationResult<List<PvcUsageRow>>> ReadPvcUsageAsync(
+        HttpClient http, string baseUrl, string nsRegex, CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, string> all = AppWorkloadQueries.Build(nsRegex);
+        Dictionary<string, string> queries = AppWorkloadQueries.PvcKeys.ToDictionary(k => k, k => all[k]);
+
+        return AppWorkloadQueries.PvcUsage(await QueryManyReportingAsync(http, baseUrl, queries, ct));
     }
 
     /// <summary>
@@ -982,16 +1123,13 @@ public class PrometheusService(
                 .Where(a => a.CustomerId == customerId)
                 .Select(a => a.Id)];
 
-        List<(Guid ClusterId, string NsRegex)> clusterQueries =
-            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
-                .Where(d => customerApps.Contains(d.AppId))
-                .GroupBy(d => d.ClusterId)
-                .Select(g => (g.Key, NsRegex(g)))];
+        List<ClusterQuery> clusterQueries = ByCluster(
+            (await delivery.GetDeploymentsForTenantAsync(tenantId, ct)).Where(d => customerApps.Contains(d.AppId)));
 
         if (clusterQueries.Count == 0)
             return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this customer.");
 
-        return await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct);
+        return TotalsOrFailure(await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct));
     }
 
     /// <summary>
@@ -1760,6 +1898,78 @@ public class PrometheusService(
         }
     }
 
+    /// <summary>
+    /// <see cref="QueryManyAsync"/> for callers to whom a failed query is not "no data": every
+    /// key's outcome carries either its results or why there are none. The RabbitMQ and Keycloak
+    /// panels keep the folding variant, where one unexported metric must not blank the rest.
+    /// Cancellation by <paramref name="ct"/> propagates; it is the caller giving up, not an answer.
+    /// </summary>
+    public static async Task<Dictionary<string, InstantQueryOutcome>> QueryManyReportingAsync(
+        HttpClient http, string baseUrl, IReadOnlyDictionary<string, string> queries, CancellationToken ct)
+    {
+        KeyValuePair<string, string>[] pairs = [.. queries];
+
+        InstantQueryOutcome[] outcomes = await Task.WhenAll(
+            pairs.Select(kv => InstantReportingAsync(http, baseUrl, kv.Value, ct)));
+
+        Dictionary<string, InstantQueryOutcome> byKey = [];
+        for (int i = 0; i < pairs.Length; i++)
+            byKey[pairs[i].Key] = outcomes[i];
+
+        return byKey;
+    }
+
+    private static async Task<InstantQueryOutcome> InstantReportingAsync(
+        HttpClient http, string baseUrl, string query, CancellationToken ct)
+    {
+        try
+        {
+            string json = await http.GetStringAsync($"{baseUrl}/api/v1/query?query={Q(query)}", ct);
+            string? refused = PrometheusRefusal(json);
+            return refused is null
+                ? new InstantQueryOutcome(ParseInstantQueryResult(json), null)
+                : new InstantQueryOutcome([], refused);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TaskCanceledException)
+        {
+            // Not our token: HttpClient's own timeout, which surfaces as a cancellation.
+            return new InstantQueryOutcome([], "Prometheus did not answer in time.");
+        }
+        catch (Exception ex)
+        {
+            return new InstantQueryOutcome([], ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Why a 2xx body is not a result, or null when it is one. <see cref="ParseInstantQueryResult"/>
+    /// answers an empty list for both <c>"status":"error"</c> and a body that is not JSON at all
+    /// (a proxy's HTML page), which is exactly the confusion the reporting path exists to avoid.
+    /// </summary>
+    private static string? PrometheusRefusal(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("status", out JsonElement status))
+                return "Prometheus answered with something that is not a query result.";
+            if (status.GetString() == "success") return null;
+            return root.TryGetProperty("error", out JsonElement error) && error.GetString() is { Length: > 0 } message
+                ? message
+                : $"Prometheus answered with status \"{status.GetString()}\".";
+        }
+        catch (JsonException)
+        {
+            return "Prometheus answered with something that is not a query result.";
+        }
+    }
+
     /// <summary>First value of a vector, or 0 when the query matched nothing.</summary>
     private static double Scalar(List<PrometheusMetricResult> results)
         => results.Count > 0 ? results[0].Value : 0;
@@ -2107,19 +2317,20 @@ public class PrometheusService(
         }
     }
 
-    /// <summary>
-    /// Queries each cluster/namespace-regex pair, sums CPU, memory, pods across all clusters,
-    /// and returns a single aggregated DeploymentMetricsSummary.
-    /// </summary>
-    /// <summary>
-    /// Sums one metric set across several clusters. Takes cluster <em>ids</em> and resolves each
-    /// through the seam, so a cluster this tenant does not own is skipped rather than queried —
-    /// the tuple used to carry a kubeconfig, which made every producer of it a custodian.
-    /// </summary>
+    /// <summary>One cluster's share of an aggregate: which cluster, its name for messages, and the namespaces.</summary>
+    private sealed record ClusterQuery(Guid ClusterId, string ClusterName, string NsRegex);
+
+    /// <summary>Deployments grouped by cluster, each group reduced to its namespace alternation.</summary>
+    private static List<ClusterQuery> ByCluster(IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments)
+        => [.. deployments
+            .GroupBy(d => d.ClusterId)
+            .Select(g => new ClusterQuery(g.Key, g.First().ClusterName, NsRegex(g)))];
+
     /// <summary>
     /// The namespace alternation for one cluster's deployments, escaped. Distinct, because several
     /// deployments of one app can share a namespace and a repeated alternative is a longer query
-    /// for the same answer.
+    /// for the same answer. Empty when none of them has a namespace — which
+    /// <see cref="AggregateMetricsAsync"/> refuses rather than queries.
     /// </summary>
     private static string NsRegex(IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments)
         => string.Join("|", deployments
@@ -2127,32 +2338,92 @@ public class PrometheusService(
             .Where(ns => ns.Length > 0)
             .Distinct());
 
-    private async Task<KubernetesOperationResult<DeploymentMetricsSummary>> AggregateMetricsAsync(
+    /// <summary>The single-number callers' view of an overview: no totals is a failure, never a zero.</summary>
+    private static KubernetesOperationResult<DeploymentMetricsSummary> TotalsOrFailure(AppMetricsOverview overview)
+        => overview.Totals is null
+            ? KubernetesOperationResult<DeploymentMetricsSummary>.Failure(overview.Describe())
+            : KubernetesOperationResult<DeploymentMetricsSummary>.Success(overview.Totals);
+
+    /// <summary>
+    /// Sums one metric set across several clusters, and says what happened to each one that did
+    /// not contribute.
+    ///
+    /// <para>Takes cluster <em>ids</em> and resolves each through the seam, so a cluster this
+    /// tenant does not own is skipped rather than queried — the tuple used to carry a kubeconfig,
+    /// which made every producer of it a custodian.</para>
+    ///
+    /// <para><b>Each cluster ends in exactly one of three places.</b></para>
+    /// <list type="bullet">
+    /// <item><b>Answered</b> — its Prometheus answered all four queries: summed into
+    /// <see cref="AppMetricsOverview.Totals"/> and listed in <see cref="AppMetricsOverview.Scopes"/>.
+    /// That includes a cluster with <em>no</em> EntKube component whose default service
+    /// (<see cref="PrometheusConfig"/>: <c>prometheus-kube-prometheus-prometheus:9090</c> in
+    /// <c>monitoring</c>) answers — a hand-installed release EntKube never tracked.</item>
+    /// <item><b>Without Prometheus</b> — it resolves, has no component, and nothing answers the
+    /// probe of the default service — the endpoints lookup answers and no ready pod stands behind
+    /// it (<see cref="NoReadyPodException"/>):
+    /// <see cref="AppMetricsOverview.ClustersWithoutPrometheus"/>, the honest empty state.</item>
+    /// <item><b>A problem</b> — it does not resolve for this tenant (or has no kubeconfig), its
+    /// deployments carry no namespace, its registered Prometheus fails, or the default service
+    /// passed the probe and then a query failed.</item>
+    /// </list>
+    ///
+    /// <para>⚠️ <b>The component-less probe is load-bearing both ways.</b> Originally every
+    /// component-less cluster was queried and a failure surfaced as a proxy error about a service
+    /// nobody had installed. Then the query was dropped (<c>requireComponent: true</c>), and the
+    /// customer tab and <see cref="GetAppMetricsAsync"/> stopped reading every cluster running a
+    /// Prometheus EntKube did not install — those read as "not installed". The probe decides
+    /// between the two, and only "no ready pod" means "not installed". A lookup that could not be
+    /// made (403, an API server that does not answer, a timeout), an unhealthy pod, or a query
+    /// that failed is a problem — reported as "not installed" it sent operators to install a
+    /// Prometheus that may well be there.</para>
+    ///
+    /// <para>⚠️ <b>A successful zero is still impossible.</b> A group whose deployments have no
+    /// namespace is refused rather than queried with <c>namespace=~""</c>, which matches no
+    /// container series and answered 0 cores, 0 pods as success; and
+    /// <see cref="AppMetricsOverview.Totals"/> is null unless at least one cluster answered.</para>
+    /// </summary>
+    private async Task<AppMetricsOverview> AggregateMetricsAsync(
         Guid tenantId,
-        IEnumerable<(Guid ClusterId, string NsRegex)> clusterQueries,
+        IEnumerable<ClusterQuery> clusterQueries,
         string logContext,
         CancellationToken ct)
     {
         double totalCpu = 0, totalMemBytes = 0, totalPods = 0, totalRestarts = 0;
-        bool anySuccess = false;
+        List<AppMetricsScope> answered = [];
+        List<string> withoutPrometheus = [];
+        List<string> problems = [];
 
-        foreach ((Guid clusterId, string nsRegex) in clusterQueries)
+        foreach (ClusterQuery q in clusterQueries)
         {
-            // Resolved here rather than by the callers, which were each doing half of it: the
-            // cluster comes from the seam and the Prometheus service from Catalog. `requireComponent:
-            // false` keeps the behaviour the callers had — a cluster running a Prometheus EntKube did
-            // not install is still queried on the default service name, which is the only way those
-            // clusters ever answered.
-            (ReachablePrometheus? reachable, _) =
-                await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent: false);
+            if (q.NsRegex.Length == 0)
+            {
+                problems.Add($"{q.ClusterName}: no namespace is recorded for the deployments there, so there is nothing to scope a query to.");
+                continue;
+            }
 
-            // Skipped, not failed: this aggregates across a tenant's clusters and one it cannot
-            // reach contributes nothing. `anySuccess` below is what decides whether the whole
-            // answer is a failure, so an unreachable cluster cannot masquerade as a zero.
-            if (reachable is null) continue;
+            // Without the component requirement: a cluster that resolves but has no component is
+            // probed on the default service below rather than written off here. Null now means
+            // only that the cluster itself did not resolve — not this tenant's, or no kubeconfig.
+            (ReachablePrometheus? reachable, string? error) =
+                await ResolveReachableAsync(tenantId, q.ClusterId, ct, requireComponent: false);
+
+            if (reachable is null)
+            {
+                problems.Add($"{q.ClusterName}: {error}");
+                continue;
+            }
 
             EntKube.Web.Services.Clusters.IClusterClient cluster = reachable.Cluster;
             PrometheusConfig cfg = reachable.Config;
+            string nsRegex = q.NsRegex;
+
+            // The probe's one "not installed" answer: the cluster's API answered the endpoints
+            // lookup and no ready pod stands behind the default service (an absent namespace lists
+            // as empty, so it lands here too). Any other failure — 403 on the lookup, an API server
+            // that does not answer, a timeout, an unhealthy pod — is a problem with this cluster,
+            // and reporting it as "Prometheus is not installed" sent operators to install one.
+            bool nothingServing = false;
 
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
@@ -2171,31 +2442,46 @@ public class PrometheusService(
 
                         return (cpu, mem, pods, rst);
                     },
-                    logContext, ct);
+                    logContext, ct,
+                    onFailure: ex => nothingServing = ex is NoReadyPodException);
 
             if (result.IsSuccess)
             {
-                anySuccess      =  true;
+                answered.Add(new AppMetricsScope(q.ClusterId, q.ClusterName, q.NsRegex,
+                    ViaDefaultService: !reachable.Registered));
                 totalCpu      += result.Data.Item1;
                 totalMemBytes += result.Data.Item2;
                 totalPods     += result.Data.Item3;
                 totalRestarts += result.Data.Item4;
             }
+            else if (!reachable.Registered && nothingServing)
+            {
+                // No component, and nothing answers where one would be: not installed. Not a
+                // problem carrying a proxy error about a service nobody installed.
+                withoutPrometheus.Add(q.ClusterName);
+            }
+            else
+            {
+                problems.Add($"{q.ClusterName}: {result.Error}");
+            }
         }
 
-        if (!anySuccess)
-            return KubernetesOperationResult<DeploymentMetricsSummary>.Failure(
-                "Could not reach Prometheus on any cluster for this resource.");
-
-        return KubernetesOperationResult<DeploymentMetricsSummary>.Success(new DeploymentMetricsSummary
+        return new AppMetricsOverview
         {
-            Namespace    = "aggregated",
-            CpuCores     = Math.Round(totalCpu, 4),
-            MemoryMiB    = Math.Round(totalMemBytes / (1024 * 1024), 1),
-            PodCount     = (int)totalPods,
-            RestartCount = (int)totalRestarts,
-            QueriedAt    = DateTime.UtcNow
-        });
+            // Null unless something answered: a skipped cluster must not read as a measured zero.
+            Totals = answered.Count == 0 ? null : new DeploymentMetricsSummary
+            {
+                Namespace    = "aggregated",
+                CpuCores     = Math.Round(totalCpu, 4),
+                MemoryMiB    = Math.Round(totalMemBytes / (1024 * 1024), 1),
+                PodCount     = (int)totalPods,
+                RestartCount = (int)totalRestarts,
+                QueriedAt    = DateTime.UtcNow
+            },
+            Scopes = answered,
+            ClustersWithoutPrometheus = withoutPrometheus,
+            Problems = problems,
+        };
     }
 
     // ──────── Internal Helpers ────────
@@ -2211,18 +2497,30 @@ public class PrometheusService(
     /// side by side instead and the methods moved across in six steps, each compiling and tested.
     /// This is what is left.</para>
     /// </summary>
-    private sealed record ReachablePrometheus(EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config);
+    /// <param name="Cluster">The cluster, as a seam client.</param>
+    /// <param name="Config">Where on it Prometheus is, or would be.</param>
+    /// <param name="Registered">
+    /// Whether <paramref name="Config"/> came from a Prometheus component Catalog knows of. False
+    /// only from <c>requireComponent: false</c> on a cluster without one, where the config is the
+    /// default service name — a guess the caller has to probe before it means anything.
+    /// </param>
+    private sealed record ReachablePrometheus(
+        EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config, bool Registered);
 
     /// <summary>
     /// The tenant-scoped resolution. The old one is <c>c.Id == clusterId</c> with no tenant
     /// predicate, which is why a cluster id alone answered about any cluster in the installation.
     /// </summary>
     /// <param name="requireComponent">
-    /// Whether a registered prometheus component is required. The single-cluster callers say yes:
-    /// they are answering a question about one cluster, and "there is no Prometheus here" is the
-    /// answer rather than an empty graph. The aggregate paths say no, because they query several
-    /// clusters and one that runs a Prometheus EntKube did not install still answers on the
-    /// default service name — which is the behaviour they had before the lookup moved here.
+    /// Whether a registered prometheus component is required — "registered" meaning what
+    /// <c>ICatalogApi.FindPrometheusAsync</c> answers, which includes a stack mid-upgrade or whose
+    /// upgrade failed. The single-cluster callers say yes (the default): they answer a question
+    /// about one cluster, and "No prometheus component found on this cluster." is the answer
+    /// rather than an empty graph. Only <see cref="AggregateMetricsAsync"/> says no: a cluster
+    /// without a component then resolves with the default <see cref="PrometheusConfig"/> and
+    /// <c>Registered: false</c>, and the aggregate probes that service — it answers for a
+    /// hand-installed release, and a failed probe is "not installed". Either way, a cluster that
+    /// is not this tenant's, or has no kubeconfig, does not resolve.
     /// </param>
     private async Task<(ReachablePrometheus? Info, string? Error)> ResolveReachableAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct, bool requireComponent = true)
@@ -2232,18 +2530,21 @@ public class PrometheusService(
         if (cluster is null)
             return (null, "Cluster not found for this tenant, or it has no kubeconfig configured.");
 
+        // Catalog's one answer to "does this cluster have Prometheus". This used to be the first
+        // component whose NAME contained "prometheus" — any status, any chart — so a failed install
+        // was queried as if it were running, and whichever prometheus-named component came back
+        // first decided the service name.
         EntKube.Contracts.Catalog.InstalledComponent? prometheusComponent =
-            (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
-            .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
+            await catalog.FindPrometheusAsync(tenantId, clusterId, ct);
 
         if (prometheusComponent is null)
         {
             return requireComponent
                 ? (null, "No prometheus component found on this cluster.")
-                : (new ReachablePrometheus(cluster, new PrometheusConfig()), null);
+                : (new ReachablePrometheus(cluster, new PrometheusConfig(), Registered: false), null);
         }
 
-        return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent)), null);
+        return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent), Registered: true), null);
     }
 
     /// <summary>
@@ -2271,10 +2572,11 @@ public class PrometheusService(
         Func<HttpClient, string, CancellationToken, Task<T>> action,
         string logContext,
         CancellationToken ct,
-        bool probeHealthEndpoint = true)
+        bool probeHealthEndpoint = true,
+        Action<Exception>? onFailure = null)
         => await WithServiceCoreAsync(
             cluster.GetPooledSdkClient(), ns, svcName, svcPort, action, logContext, ct,
-            probeHealthEndpoint);
+            probeHealthEndpoint, onFailure);
 
     private async Task<KubernetesOperationResult<T>> WithServiceCoreAsync<T>(
         Kubernetes k8s,
@@ -2284,13 +2586,14 @@ public class PrometheusService(
         Func<HttpClient, string, CancellationToken, Task<T>> action,
         string logContext,
         CancellationToken ct,
-        bool probeHealthEndpoint)
+        bool probeHealthEndpoint,
+        Action<Exception>? onFailure = null)
     {
         try
         {
             V1EndpointAddress? addr = await FindEndpointAddressAsync(k8s, ns, svcName, svcPort, ct);
             if (addr?.TargetRef is null)
-                throw new InvalidOperationException(
+                throw new NoReadyPodException(
                     $"No ready pods found for service {svcName}:{svcPort} in {ns}. " +
                     "Check the component's ReleaseName and Namespace, or set an explicit Configuration JSON.");
 
@@ -2320,6 +2623,9 @@ public class PrometheusService(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Prometheus query failed ({Context})", logContext);
+            // The failure's kind, for the one caller that must tell "nothing serving here" from
+            // "could not ask" — the message alone is the only thing the result carries.
+            onFailure?.Invoke(ex);
             return KubernetesOperationResult<T>.Failure(ex.Message);
         }
     }
@@ -2543,3 +2849,10 @@ public class CnpgScrapeDiagnosis
     /// <summary>The concrete next step, including any YAML to paste.</summary>
     public string? Remedy { get; init; }
 }
+
+/// <summary>
+/// The endpoints lookup answered and no ready pod stands behind the service: nothing is serving
+/// there. Its own type so the aggregate can tell this — "not installed" — apart from a lookup that
+/// could not be made at all (403, network, timeout), which is a problem with the cluster.
+/// </summary>
+internal sealed class NoReadyPodException(string message) : InvalidOperationException(message);

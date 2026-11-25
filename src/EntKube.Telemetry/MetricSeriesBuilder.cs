@@ -24,7 +24,7 @@ public readonly record struct MetricSeriesPoint(DateTime Timestamp, double Value
 /// <para><b>The two rules it has to reproduce</b> (see <c>PromMetricsQueryBuilder</c>):</para>
 /// <list type="bullet">
 /// <item><c>sum(metric)</c> for a gauge — summed across series, as sampled at that moment.</item>
-/// <item><c>sum(rate(metric[w]))</c> for a counter, which is anything named <c>*_total</c> — a
+/// <item><c>sum(rate(metric[w]))</c> for a counter — see <see cref="IsCounter"/> — a
 /// per-second rate, differenced per series and only then summed.</item>
 /// </list>
 /// </summary>
@@ -32,12 +32,19 @@ public static class MetricSeriesBuilder
 {
     /// <summary>
     /// Whether a metric is a counter, by the same rule the PromQL builder uses: the
-    /// <c>_total</c> suffix. Kept identical deliberately — if the two ever disagree, one backend
-    /// would rate a metric the other summed, and the graph would change by orders of magnitude
-    /// when routing flipped.
+    /// <c>_total</c> suffix, or a histogram's <c>_bucket</c> — cumulative per bucket, so summing it
+    /// as a gauge charts every request since the process started. Kept identical deliberately,
+    /// and <c>PromMetricsQueryBuilder.IsCounter</c> now delegates here — if the two ever disagree,
+    /// one backend would rate a metric the other summed, and the graph would change by orders of
+    /// magnitude when routing flipped.
+    ///
+    /// <para><c>_count</c> and <c>_sum</c> are not here: they are counters only inside a histogram
+    /// or summary, and gauges with those endings are common (connection-pool counts). The PromQL
+    /// path asks Prometheus which it is; this rule has no store to ask.</para>
     /// </summary>
     public static bool IsCounter(string metricName) =>
-        metricName.EndsWith("_total", StringComparison.Ordinal);
+        metricName.EndsWith("_total", StringComparison.Ordinal)
+        || metricName.EndsWith("_bucket", StringComparison.Ordinal);
 
     /// <summary>
     /// Collapses <paramref name="buckets"/> into one series: a gauge summed across scopes, a

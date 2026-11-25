@@ -1,0 +1,92 @@
+@using EntKube.Web.Services
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   PvcUsageTable — an app's volume claims: used, capacity, free and % for each
+   mounted claim. Three states, none of which may render as a 0 that reads as
+   an empty disk:
+   - mounted, usage reported: the kubelet's numbers;
+   - mounted, usage not reported: the storage driver does not measure itself
+     (hostPath-backed ones such as local-path); requested size and a badge;
+   - not mounted: no running pod mounts it; requested size and a badge.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+@if (Rows.Count == 0)
+{
+    <div class="text-muted small">No persistent volume claims in this environment's namespaces.</div>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+            <thead>
+                <tr class="small text-muted">
+                    <th>Claim</th>
+                    <th class="text-end">Used</th>
+                    <th class="text-end">Capacity</th>
+                    <th class="text-end">Free</th>
+                    <th style="min-width:140px">Usage</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (PvcUsageRow r in Rows)
+                {
+                    <tr data-claim="@r.Claim">
+                        <td class="small">
+                            <span class="font-monospace">@r.Claim</span>
+                            @if (ShowNamespace)
+                            {
+                                <span class="text-muted ms-1">@r.Namespace</span>
+                            }
+                        </td>
+                        @if (r.Mounted && r.UsageReported)
+                        {
+                            <td class="text-end small">@Bytes(r.UsedBytes)</td>
+                            <td class="text-end small">@Bytes(r.CapacityBytes ?? r.RequestedBytes)</td>
+                            <td class="text-end small">@Bytes(r.AvailableBytes)</td>
+                            <td>
+                                @if (r.UsedPercent is double pct)
+                                {
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="progress flex-grow-1" style="height:6px">
+                                            <div class="progress-bar @BarClass(pct)" style="width:@Math.Clamp(pct, 0, 100).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)%"></div>
+                                        </div>
+                                        <span class="small">@pct.ToString("F0")%</span>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="text-muted small">—</span>
+                                }
+                            </td>
+                        }
+                        else
+                        {
+                            <td class="text-end small text-muted">—</td>
+                            <td class="text-end small" title="Requested size">@Bytes(r.RequestedBytes)</td>
+                            <td class="text-end small text-muted">—</td>
+                            @if (r.Mounted)
+                            {
+                                <td><span class="badge text-bg-light border" title="A running pod mounts this claim, but its storage driver does not report how full it is.">usage not reported</span></td>
+                            }
+                            else
+                            {
+                                <td><span class="badge text-bg-secondary">not mounted</span></td>
+                            }
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter] public List<PvcUsageRow> Rows { get; set; } = [];
+
+    /// <summary>Whether to name each claim's namespace — useful when the app spans several.</summary>
+    private bool ShowNamespace => Rows.Select(r => r.Namespace).Distinct().Skip(1).Any();
+
+    private static string Bytes(double? bytes) => bytes is double b ? AppWorkloadQueries.FormatBytes(b) : "—";
+
+    private static string BarClass(double pct) => pct >= 90 ? "bg-danger" : pct >= 75 ? "bg-warning" : "bg-success";
+}

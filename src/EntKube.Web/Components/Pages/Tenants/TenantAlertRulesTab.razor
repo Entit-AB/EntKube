@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject EntKube.Contracts.Catalog.ICatalogApi Catalog
 
 @* Cluster picker — AlertRulesPanel is cluster-scoped *@
 <div class="d-flex align-items-center gap-3 mb-4">
@@ -53,18 +54,20 @@ else
     {
         using ApplicationDbContext db = DbFactory.CreateDbContext();
         List<KubernetesCluster> clusters = await db.KubernetesClusters
-            .Include(c => c.Components)
             .Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name)
             .ToListAsync();
 
-        clusterOptions = clusters.Select(c => new ClusterOption(
-            c.Id.ToString(),
-            c.Name,
-            HasPrometheus: c.Components.Any(comp =>
-                comp.HelmChartName == "kube-prometheus-stack" &&
-                comp.Status == ComponentStatus.Installed)
-        )).ToList();
+        // Catalog's answer to "does this cluster have Prometheus", the same one the rules panel's
+        // PrometheusService calls resolve it by.
+        clusterOptions = [];
+        foreach (KubernetesCluster c in clusters)
+        {
+            clusterOptions.Add(new ClusterOption(
+                c.Id.ToString(),
+                c.Name,
+                HasPrometheus: await Catalog.FindPrometheusAsync(TenantId, c.Id) is not null));
+        }
 
         // Auto-select first cluster with Prometheus
         ClusterOption? best = clusterOptions.FirstOrDefault(c => c.HasPrometheus);
