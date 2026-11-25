@@ -199,7 +199,7 @@ else
         {
             string name = cnpg.Name;
             KubernetesOperationResult<CnpgMetricsSummary> result =
-                await PrometheusService.GetCnpgClusterMetricsAsync(cnpg.TenantId, ClusterId, name);
+                await PrometheusService.GetCnpgClusterMetricsAsync(cnpg.TenantId, ClusterId, cnpg.Namespace, name);
 
             if (result.IsSuccess && result.Data is not null)
                 results.Add(result.Data);
