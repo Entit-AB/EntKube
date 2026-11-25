@@ -46,8 +46,8 @@ else if (metrics is null || !metrics.HasData)
             Prometheus holds no metrics for this Keycloak instance.
         </div>
         <div class="text-muted">
-            Keycloak serves metrics on its management port (9000), but the Helm chart leaves its
-            ServiceMonitor switched off, so nothing scrapes them.
+            Keycloak serves metrics on its management port (9000), and Prometheus collects them once a
+            ServiceMonitor selects its Service. EntKube creates that monitor on a cluster that has Prometheus.
         </div>
         <div class="mt-2">
             <button class="btn btn-sm btn-outline-secondary" @onclick="DiagnoseAsync" disabled="@busy">
@@ -220,6 +220,9 @@ else
     /// <summary>Namespace the Keycloak release runs in — the only thing that scopes its series.</summary>
     [Parameter] public required string Namespace { get; set; }
 
+    /// <summary>The Helm release, which is how its Service is told from another Keycloak's.</summary>
+    [Parameter] public required string ReleaseName { get; set; }
+
     [Parameter] public string InstanceName { get; set; } = "Keycloak";
 
     private KeycloakMetricsSummary? metrics;
@@ -241,7 +244,7 @@ else
     /// </summary>
     protected override async Task OnParametersSetAsync()
     {
-        string key = $"{ClusterId}/{Namespace}";
+        string key = $"{ClusterId}/{Namespace}/{ReleaseName}";
         if (loadedFor == key) return;
         loadedFor = key;
         await LoadAsync();
@@ -313,9 +316,7 @@ else
         {
             KubernetesOperationResult<ScrapeDiagnosis> result =
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
-                    TenantId, ClusterId, Namespace, "keycloak",
-                    "Set serviceMonitor.enabled to true in the component's values "
-                    + "(Cluster → Components → keycloak → Values), then Save & Apply.");
+                    TenantId, ClusterId, MonitoredWorkload.Keycloak(ReleaseName, Namespace));
 
             if (result.IsSuccess) diagnosis = result.Data;
             else error = result.Error;

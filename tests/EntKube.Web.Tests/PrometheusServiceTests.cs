@@ -647,6 +647,8 @@ public class PrometheusServiceTests : IDisposable
     //  rabbitmq_prometheus plugin's published metrics reference.
     // ════════════════════════════════════════════════════════════════
 
+    private static RabbitMQBrokerIdentity Broker(string name) => new(name, "mq", IsOperatorManaged: true);
+
     [Theory]
     [InlineData("unacked",     "rabbitmq_queue_messages_unacked")]
     [InlineData("ready",       "rabbitmq_queue_messages_ready")]
@@ -661,7 +663,7 @@ public class PrometheusServiceTests : IDisposable
     [InlineData("diskLimit",   "rabbitmq_disk_space_available_limit_bytes")]
     public void BuildRabbitMQQueries_UsesThePublishedMetricName(string key, string expectedMetric)
     {
-        PrometheusService.BuildRabbitMQQueries("broker")[key].Should().Contain(expectedMetric);
+        PrometheusService.BuildRabbitMQQueries(Broker("broker"))[key].Should().Contain(expectedMetric);
     }
 
     [Fact]
@@ -670,7 +672,7 @@ public class PrometheusServiceTests : IDisposable
         // Both of these were queried previously and always answered with nothing:
         // the unacknowledged gauge is spelled "_unacked", and delivery is counted on
         // the channel rather than the queue.
-        string all = string.Join("\n", PrometheusService.BuildRabbitMQQueries("broker").Values);
+        string all = string.Join("\n", PrometheusService.BuildRabbitMQQueries(Broker("broker")).Values);
 
         all.Should().NotContain("rabbitmq_queue_messages_unacknowledged");
         all.Should().NotContain("rabbitmq_queue_messages_delivered_total");
@@ -680,7 +682,7 @@ public class PrometheusServiceTests : IDisposable
     public void BuildRabbitMQQueries_ScopesEveryQueryToTheNamedCluster()
     {
         // Without the cluster label every broker on the cluster would be summed into one card.
-        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries("orders"))
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries(Broker("orders")))
         {
             q.Value.Should().Contain("rabbitmq_cluster=\"orders\"", $"query '{q.Key}' must be scoped");
         }
@@ -692,7 +694,7 @@ public class PrometheusServiceTests : IDisposable
         // The plugin emits its aggregated families with no labels whatsoever — rabbitmq_cluster
         // exists only on rabbitmq_identity_info. Writing metric{rabbitmq_cluster="x"} directly
         // matches no series and reports zero forever, so every non-identity query has to join.
-        Dictionary<string, string> queries = PrometheusService.BuildRabbitMQQueries("orders");
+        Dictionary<string, string> queries = PrometheusService.BuildRabbitMQQueries(Broker("orders"));
 
         foreach (KeyValuePair<string, string> q in queries.Where(q => q.Key != "nodes"))
         {
@@ -707,7 +709,7 @@ public class PrometheusServiceTests : IDisposable
         // The plugin emits identity info once per scrape path. If /metrics/detailed is also
         // scraped, an unpinned join finds two identity series per node — Prometheus rejects the
         // ambiguity, and the node count doubles.
-        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries("orders"))
+        foreach (KeyValuePair<string, string> q in PrometheusService.BuildRabbitMQQueries(Broker("orders")))
         {
             q.Value.Should().Contain("rabbitmq_endpoint=\"aggregated\"",
                 $"query '{q.Key}' must pin the identity endpoint");
@@ -719,7 +721,7 @@ public class PrometheusServiceTests : IDisposable
     {
         // "_delivered_total" counts auto-ack deliveries only; manual-ack ones — the normal case —
         // land in "_delivered_ack_total". Querying one alone reports zero for real workloads.
-        string deliver = PrometheusService.BuildRabbitMQQueries("orders")["deliver"];
+        string deliver = PrometheusService.BuildRabbitMQQueries(Broker("orders"))["deliver"];
 
         deliver.Should().Contain("rabbitmq_channel_messages_delivered_ack_total");
         deliver.Should().Contain("rabbitmq_channel_messages_delivered_total");
@@ -730,7 +732,7 @@ public class PrometheusServiceTests : IDisposable
     {
         // Auto-ack deliveries are never acknowledged, so including them would show permanent
         // ack lag on a healthy auto-ack consumer.
-        string deliverAck = PrometheusService.BuildRabbitMQQueries("orders")["deliverAck"];
+        string deliverAck = PrometheusService.BuildRabbitMQQueries(Broker("orders"))["deliverAck"];
 
         deliverAck.Should().Contain("rabbitmq_channel_messages_delivered_ack_total");
         deliverAck.Should().NotContain("rabbitmq_channel_messages_delivered_total");
@@ -744,7 +746,7 @@ public class PrometheusServiceTests : IDisposable
         // The join must also carry rabbitmq_node, since the node families carry no labels.
         foreach (string key in new[] { "mem", "memLimit", "disk", "diskLimit", "fds", "fdsMax" })
         {
-            string q = PrometheusService.BuildRabbitMQQueries("broker")[key];
+            string q = PrometheusService.BuildRabbitMQQueries(Broker("broker"))[key];
             q.Should().NotStartWith("sum(");
             q.Should().Contain("rabbitmq_node", $"query '{key}' must carry the node identity");
         }
@@ -755,7 +757,7 @@ public class PrometheusServiceTests : IDisposable
     {
         // Vector arithmetic yields an empty result when either side has no series, which would
         // silently zero the value and the warning that depends on it.
-        PrometheusService.BuildRabbitMQQueries("orders")["unroutable"].Should().Contain("or vector(0)");
+        PrometheusService.BuildRabbitMQQueries(Broker("orders"))["unroutable"].Should().Contain("or vector(0)");
     }
 
     // ════════════════════════════════════════════════════════════════
