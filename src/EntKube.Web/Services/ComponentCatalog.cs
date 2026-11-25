@@ -2063,10 +2063,10 @@ public static class ComponentCatalog
                 // one knob, and the apply step derives the Service and ServiceMonitor from it.
                 new ComponentFormField
                 {
-                    Key = "prometheus-port", Label = "RED Metrics Port (0 = off)",
+                    Key = "prometheus-port", Label = "HTTP Metrics Port",
                     YamlPath = "config.data.prometheus_export.port", Type = FormFieldType.Number,
                     DefaultValue = "9090",
-                    HelpText = "Where OBI serves per-workload HTTP/gRPC/SQL request rate, error and latency metrics for the cluster's Prometheus. Takes effect only on a cluster where kube-prometheus-stack is installed: there EntKube also creates the Service and ServiceMonitor that make Prometheus scrape it. On a cluster without Prometheus it is forced to 0 at apply time — OBI evicts expired series only when scraped, so an unscraped endpoint grows for ever. OBI runs on the host network, so this port is opened on every node; change it only if 9090 is taken there. 0 keeps RED metrics off even where Prometheus is installed. Components registered before 2026-11-24 stored 0 here, which was then the default; EntKube cannot tell that 0 from a deliberate one, so they stay off until this is set to 9090."
+                    HelpText = "Where OBI serves per-workload HTTP/gRPC/SQL request rate, error and latency metrics for the cluster's Prometheus. Takes effect only on a cluster where kube-prometheus-stack is installed: there EntKube also creates the Service and ServiceMonitor that make Prometheus scrape it. On a cluster without Prometheus it is forced to 0 at apply time — OBI evicts expired series only when scraped, so an unscraped endpoint grows for ever. OBI runs on the host network, so this port is opened on every node; change it only if 9090 is taken there. 0 means the default (9090): components registered before 2026-11-24 stored 0 here as a bound for an endpoint nothing scraped, so EntKube treats it as not chosen."
                 },
                 new ComponentFormField
                 {

@@ -692,12 +692,14 @@ public static class YamlFormMerger
     /// Turns OBI's per-workload HTTP/gRPC/SQL RED metrics on, for a cluster where
     /// <c>kube-prometheus-stack</c> is installed. Runs at apply time; the stored values are not touched.
     ///
-    /// <para><b>The port is the operator's knob, and a 0 is respected.</b> EntKube's own 0 (the
-    /// catalog default until 2026-11-24, and what the form wrote) and an operator's deliberate 0 are
-    /// the same scalar at the same path — nothing in the values tells them apart, and the chart's
-    /// strict values schema leaves nowhere to keep a marker. So a 0 means off, whoever wrote it, and the
-    /// catalog default is 9090 instead. Only an ABSENT port (an install older than the bounds) or one
-    /// that is not a number becomes <see cref="ObiPrometheusPort"/>.</para>
+    /// <para><b>A 0 port means "not chosen", and becomes <see cref="ObiPrometheusPort"/>.</b> Until
+    /// 2026-11-24 the catalog default and the form both wrote 0, as a memory bound for an endpoint
+    /// nothing scraped — so every agent installed since then carries a 0 nobody chose, and an operator's
+    /// deliberate 0 is the same scalar at the same path (the chart's strict values schema leaves nowhere
+    /// to keep a marker). Treating 0 as "off" would keep HTTP metrics off on every one of those clusters,
+    /// against the rule this exists for: every app gets basic metrics wherever Prometheus is installed,
+    /// with nothing to configure. Any other number moves the port; an absent or non-numeric one is also
+    /// <see cref="ObiPrometheusPort"/>.</para>
     ///
     /// <para><b>Derived, not filled in:</b> <c>service.enabled</c> and <c>serviceMonitor.enabled</c>
     /// are set from the port, overriding what is stored. The chart renders a ServiceMonitor only when
@@ -743,7 +745,7 @@ public static class YamlFormMerger
         YamlMappingNode export = GetOrCreateMapping(data!, "prometheus_export", ref changed);
 
         string? port = TryGetValue(export, "port", out YamlNode? portNode) && portNode is YamlScalarNode s
-            && int.TryParse(s.Value, out int parsed) && parsed >= 0
+            && int.TryParse(s.Value, out int parsed) && parsed > 0
                 ? parsed.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : null;
 

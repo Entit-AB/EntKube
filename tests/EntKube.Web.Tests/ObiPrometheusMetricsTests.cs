@@ -157,26 +157,24 @@ public class ObiPrometheusMetricsTests
     /// Service (one with no port is invalid) and the ServiceMonitor go off too.
     /// </summary>
     [Fact]
-    public void A_zero_port_is_respected_as_off()
+    public void A_zero_port_is_the_old_default_and_turns_metrics_on()
     {
-        const string off = """
+        // Every agent installed between 2026-09-10 and 2026-11-24 stored 0 as a memory bound for an
+        // endpoint nothing scraped. Reading that 0 as "off" would keep HTTP metrics off on all of them.
+        const string old = """
             config:
               data:
                 prometheus_export:
                   port: 0
-            service:
-              enabled: true
             serviceMonitor:
-              enabled: true
+              enabled: false
             """;
 
-        string values = YamlFormMerger.EnableObiPrometheusMetrics(off);
+        string values = YamlFormMerger.EnableObiPrometheusMetrics(old);
 
-        Scalar(values, "config", "data", "prometheus_export", "port").Should().Be("0");
-        Scalar(values, "service", "enabled").Should().Be("false", "a Service with no port is rejected by the API server");
-        Scalar(values, "serviceMonitor", "enabled").Should().Be("false");
-        At(values, "config", "data", "metrics").Should().BeNull("nothing is added for metrics that are off");
-        At(values, "serviceMonitor", "metrics").Should().BeNull();
+        Scalar(values, "config", "data", "prometheus_export", "port").Should().Be(YamlFormMerger.ObiPrometheusPort);
+        Scalar(values, "service", "enabled").Should().Be("true");
+        Scalar(values, "serviceMonitor", "enabled").Should().Be("true");
     }
 
     [Fact]
