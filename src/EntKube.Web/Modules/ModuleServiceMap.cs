@@ -91,6 +91,7 @@ public static partial class ModuleMap
         [typeof(ComponentInstallOrchestrator)] = Module.Catalog,
         [typeof(ComponentLifecycleService)] = Module.Catalog,
         [typeof(ComponentScanService)] = Module.Catalog,
+        [typeof(KyvernoUpgradeGuard)] = Module.Catalog,
         [typeof(EntKube.Web.Services.Upgrades.ComponentUpgradeRunner)] = Module.Catalog,
         [typeof(EntKube.Web.Services.Upgrades.ComponentUpgradeService)] = Module.Catalog,
         [typeof(EntKube.Web.Services.Adoption.DriftAdoptionService)] = Module.Catalog,

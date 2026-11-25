@@ -87,13 +87,13 @@ public class KyvernoAvailabilityTests : IDisposable
     }
 
     private void Install(Guid clusterId, string? name = null, string? release = null, string? chart = null,
-        ComponentStatus status = ComponentStatus.Installed)
+        ComponentStatus status = ComponentStatus.Installed, DateTime? installedAt = null)
     {
         db.ClusterComponents.Add(new ClusterComponent
         {
             Id = Guid.NewGuid(), ClusterId = clusterId, Name = name ?? "something",
             ComponentType = "helm", ReleaseName = release, HelmChartName = chart,
-            Status = status, Namespace = "kyverno",
+            Status = status, InstalledAt = installedAt, Namespace = "kyverno",
         });
         db.SaveChanges();
     }
@@ -132,6 +132,22 @@ public class KyvernoAvailabilityTests : IDisposable
         (await sut.IsKyvernoAvailableAsync(tenantId, envA)).Should().BeFalse(
             "offering to author policies against a half-installed admission controller tells the "
             + "operator the cluster is governed when nothing is enforcing anything yet");
+    }
+
+    /// <summary>
+    /// An upgrade under way or failed leaves the previous revision serving. Saying "not installed" then
+    /// hid the policies from the operator who had to apply them to get the upgrade through.
+    /// </summary>
+    [Theory]
+    [InlineData(ComponentStatus.Installing, true)]
+    [InlineData(ComponentStatus.Failed, true)]
+    [InlineData(ComponentStatus.Uninstalling, false)]
+    [InlineData(ComponentStatus.NotInstalled, false)]
+    public async Task A_kyverno_that_has_run_counts_through_an_upgrade(ComponentStatus status, bool available)
+    {
+        Install(clusterA, name: "kyverno", status: status, installedAt: new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        (await sut.IsKyvernoAvailableAsync(tenantId, envA)).Should().Be(available);
     }
 
     /// <summary>

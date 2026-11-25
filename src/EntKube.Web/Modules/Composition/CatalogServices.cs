@@ -52,6 +52,7 @@ internal static class CatalogServices
         services.AddSingletonWork<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
         services.AddScoped<EntKube.Web.Services.Adoption.DriftAdoptionService>();
         services.AddScoped<ClusterProvidedComponents>();
+        services.AddScoped<KyvernoUpgradeGuard>();
         services.AddScoped<ComponentInstallOrchestrator>();
         services.AddScoped<CatalogComponentRegistrar>();
 

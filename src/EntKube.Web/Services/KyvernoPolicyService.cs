@@ -211,7 +211,9 @@ public class KyvernoPolicyService(
 
     /// <summary>
     /// Returns true if at least one cluster registered for this tenant+environment
-    /// has Kyverno installed (ComponentStatus.Installed).
+    /// has Kyverno running: Installed, or Installing/Failed after having been installed. An upgrade
+    /// that is under way or that failed leaves the previous revision serving, and reading that as
+    /// "not installed" told the operator their policies were off at the moment they had to act on them.
     /// </summary>
     public async Task<bool> IsKyvernoAvailableAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
@@ -230,11 +232,17 @@ public class KyvernoPolicyService(
         // need to be in SQL, and keeping it here keeps the question's exact shape.
         return (await catalog.GetComponentsForTenantAsync(tenantId, ct))
             .Any(c => clusterIds.Contains(c.ClusterId)
-                   && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                   && IsRunning(c.Status, c.InstalledAt)
                    && (c.Name == "kyverno"
                        || c.HelmChartName == "kyverno"
                        || c.ReleaseName == "kyverno"));
     }
+
+    private static bool IsRunning(EntKube.Contracts.Catalog.ComponentStatus status, DateTime? installedAt) =>
+        status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+        || (installedAt is not null
+            && status is EntKube.Contracts.Catalog.ComponentStatus.Installing
+                or EntKube.Contracts.Catalog.ComponentStatus.Failed);
 
     // ── Cluster-wide policies (observed, not owned) ────────────────────────────
 
@@ -265,52 +273,73 @@ public class KyvernoPolicyService(
             // already handles, and it used to be the `cluster.Kubeconfig!` below.
             if (reachable is null) continue;
 
-            string json;
-            try
+            // Both generations: a cluster part-way through the move to the CEL kinds has some of each.
+            foreach (string resource in (string[])["clusterpolicies.kyverno.io", "validatingpolicies.policies.kyverno.io"])
             {
-                json = await reachable.GetJsonAllNamespacesAsync(
-                    "clusterpolicies.kyverno.io", ct: ct);
-            }
-            catch
-            {
-                // ClusterPolicy CRD not installed or cluster unreachable — skip.
-                continue;
-            }
-
-            JsonDocument doc;
-            try { doc = JsonDocument.Parse(json); }
-            catch { continue; }
-
-            using JsonDocument _ = doc;
-
-            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
-                || items.ValueKind != JsonValueKind.Array)
-                continue;
-
-            foreach (JsonElement item in items.EnumerateArray())
-            {
-                string? name = item.TryGetProperty("metadata", out JsonElement meta)
-                            && meta.TryGetProperty("name", out JsonElement nameEl)
-                    ? nameEl.GetString() : null;
-
-                if (string.IsNullOrWhiteSpace(name)) continue;
-
-                int ruleCount = item.TryGetProperty("spec", out JsonElement spec)
-                             && spec.TryGetProperty("rules", out JsonElement rules)
-                             && rules.ValueKind == JsonValueKind.Array
-                    ? rules.GetArrayLength() : 0;
-
-                result.Add(new KyvernoClusterPolicyInfo
+                string json;
+                try
                 {
-                    Name = name,
-                    ClusterName = cluster.Name,
-                    Mode = ReadFailureAction(item),
-                    RuleCount = ruleCount
-                });
+                    json = await reachable.GetJsonAllNamespacesAsync(resource, ct: ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // CRD not installed or cluster unreachable — skip.
+                    continue;
+                }
+
+                result.AddRange(ParseClusterPolicies(json, cluster.Name));
             }
         }
 
         return result.OrderBy(p => p.ClusterName).ThenBy(p => p.Name).ToList();
+    }
+
+    private static List<KyvernoClusterPolicyInfo> ParseClusterPolicies(string json, string clusterName)
+    {
+        List<KyvernoClusterPolicyInfo> found = [];
+
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (JsonException) { return found; }
+
+        using JsonDocument _ = doc;
+
+        if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
+            || items.ValueKind != JsonValueKind.Array)
+            return found;
+
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            string? name = item.TryGetProperty("metadata", out JsonElement meta)
+                        && meta.TryGetProperty("name", out JsonElement nameEl)
+                ? nameEl.GetString() : null;
+
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            found.Add(new KyvernoClusterPolicyInfo
+            {
+                Name = name,
+                ClusterName = clusterName,
+                Mode = ReadFailureAction(item),
+                RuleCount = Rules(item).Count(),
+            });
+        }
+
+        return found;
+    }
+
+    /// <summary>A policy's rules: <c>rules</c> on the legacy kinds, <c>validations</c> on the CEL ones.</summary>
+    private static IEnumerable<JsonElement> Rules(JsonElement policy)
+    {
+        if (!policy.TryGetProperty("spec", out JsonElement spec)) return [];
+
+        foreach (string field in (string[])["rules", "validations"])
+        {
+            if (spec.TryGetProperty(field, out JsonElement rules) && rules.ValueKind == JsonValueKind.Array)
+                return rules.EnumerateArray();
+        }
+
+        return [];
     }
 
     // ── Apply to environment ──────────────────────────────────────────────────
@@ -470,10 +499,18 @@ public class KyvernoPolicyService(
             ? []
             : await ResolveClusterAppNamespacesAsync(db, clusterId, ct);
 
+        KyvernoApi api = await KyvernoApi.ReadAsync(access, ct);
+        if (api.Error is not null) return (false, api.Error);
+
         string? yaml = mode is null
             ? null
-            : BuildClusterRbacPolicy(appNamespaces,
-                mode == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit");
+            : api.CelServed
+                ? KyvernoCelPolicyBuilder.BuildClusterRbacPolicy(appNamespaces, mode.Value)
+                : BuildClusterRbacPolicy(appNamespaces,
+                    mode == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit");
+
+        // One decision, as in ApplyToNamespaceAsync.
+        using IDisposable operation = gate.BeginOperation($"Reconcile {ClusterRbacPolicyName}");
 
         // The seam throws on a non-zero exit where this method has always returned (false, output),
         // and the difference is load-bearing: its caller logs a failed reconcile and goes on to
@@ -487,12 +524,25 @@ public class KyvernoPolicyService(
                 // would keep enforcing a namespace list that no longer reflects the cluster.
                 // DeleteManifestAsync carries --ignore-not-found, as this call always has.
                 await access.DeleteManifestAsync("clusterpolicy", ClusterRbacPolicyName, "", ct);
+                if (api.CelServed)
+                    await access.DeleteManifestAsync(ClusterCelResource, ClusterRbacPolicyName, "", ct);
                 return (true, $"Removed {ClusterRbacPolicyName}.");
             }
 
             // No explicit gate call any more: the seam raises the acknowledgment on the way
             // through, with the same verb and manifest, and supplies the credential itself.
             string output = await access.ApplyManifestAsync(yaml, ct);
+
+            if (api.CelServed && await access.ResourceExistsAsync(
+                    LegacyClusterResource, ClusterRbacPolicyName, "", ct))
+            {
+                if (!await BecomesEnforcedAsync(access, ClusterCelResource, ClusterRbacPolicyName, "",
+                        System.Diagnostics.Stopwatch.StartNew(), ct))
+                    return (false, $"{output.TrimEnd()}\n{NotReady(ClusterRbacPolicyName)}");
+
+                await access.DeleteManifestAsync(LegacyClusterResource, ClusterRbacPolicyName, "", ct);
+            }
+
             return (true, output);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -587,6 +637,7 @@ public class KyvernoPolicyService(
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         List<KyvernoPolicy> toAdd = [];
+        Dictionary<Guid, KyvernoApi> apis = [];
 
         foreach ((KubernetesCluster cluster, string ns) in targets)
         {
@@ -595,19 +646,30 @@ public class KyvernoPolicyService(
 
             if (reachable is null) continue;
 
-            string json;
-            try
-            {
-                json = await reachable.GetJsonAsync("policies.kyverno.io", ns, ct: ct);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add($"{cluster.Name}/{ns}: {ex.Message}");
-                continue;
-            }
+            if (!apis.TryGetValue(cluster.Id, out KyvernoApi? api))
+                apis[cluster.Id] = api = await KyvernoApi.ReadAsync(reachable, ct);
 
-            ParseDiscoveredPolicies(json, tenantId, environmentId,
-                seenBuiltIns, seenCustomNames, toAdd, result);
+            // CEL first: where a policy exists in both generations, the CEL one is the newer.
+            string[] resources = api.CelServed
+                ? [.. NamespacedCelResources, LegacyResource]
+                : [LegacyResource];
+
+            foreach (string resource in resources)
+            {
+                string json;
+                try
+                {
+                    json = await reachable.GetJsonAsync(resource, ns, ct: ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    result.Errors.Add($"{cluster.Name}/{ns}: {ex.Message}");
+                    continue;
+                }
+
+                ParseDiscoveredPolicies(json, tenantId, environmentId,
+                    seenBuiltIns, seenCustomNames, toAdd, result);
+            }
         }
 
         if (toAdd.Count > 0)
@@ -728,6 +790,12 @@ public class KyvernoPolicyService(
             && string.Equals(vfa.GetString(), "Enforce", StringComparison.OrdinalIgnoreCase))
             return KyvernoValidationFailureAction.Enforce;
 
+        // The CEL kinds say Deny where the legacy ones said Enforce.
+        if (spec.TryGetProperty("validationActions", out JsonElement actions)
+            && actions.ValueKind == JsonValueKind.Array
+            && actions.EnumerateArray().Any(a => a.GetString() == "Deny"))
+            return KyvernoValidationFailureAction.Enforce;
+
         if (spec.TryGetProperty("rules", out JsonElement rules) && rules.ValueKind == JsonValueKind.Array)
         {
             foreach (JsonElement rule in rules.EnumerateArray())
@@ -749,15 +817,12 @@ public class KyvernoPolicyService(
     /// </summary>
     private static string? ExtractConfigFromMessage(JsonElement policy, string marker)
     {
-        if (!policy.TryGetProperty("spec", out JsonElement spec)
-            || !spec.TryGetProperty("rules", out JsonElement rules)
-            || rules.ValueKind != JsonValueKind.Array)
-            return null;
-
-        foreach (JsonElement rule in rules.EnumerateArray())
+        foreach (JsonElement rule in Rules(policy))
         {
-            if (!rule.TryGetProperty("validate", out JsonElement validate)
-                || !validate.TryGetProperty("message", out JsonElement msgEl))
+            // On the rule itself in a CEL policy, under `validate` in a legacy one.
+            JsonElement holder = rule.TryGetProperty("validate", out JsonElement validate) ? validate : rule;
+
+            if (!holder.TryGetProperty("message", out JsonElement msgEl))
                 continue;
 
             string? message = msgEl.GetString();
@@ -795,9 +860,29 @@ public class KyvernoPolicyService(
         if (access is null)
             return (false, "Cluster has no kubeconfig configured, or is not this tenant's.");
 
-        string yaml = BuildManifest(policies, ns);
+        KyvernoApi api = await KyvernoApi.ReadAsync(access, ct);
+        if (api.Error is not null) return (false, api.Error);
+
+        // A custom policy is the operator's own YAML. Where the legacy engine is gone, applying a
+        // legacy one would succeed and enforce nothing, so it is withheld and named instead.
+        List<string> retired = api.ExecutesLegacy
+            ? []
+            : policies.Where(IsLegacyCustom).Select(p => p.Name ?? "(unnamed)").ToList();
+        List<KyvernoPolicy> usable = api.ExecutesLegacy
+            ? policies
+            : policies.Where(p => !IsLegacyCustom(p)).ToList();
+
+        string retiredNote = retired.Count == 0
+            ? ""
+            : $"Not applied, because Kyverno {api.ChartVersion} does not run kyverno.io policies: "
+              + $"{string.Join(", ", retired)}. Rewrite them as policies.kyverno.io/v1 policies.";
+
+        string yaml = api.CelServed ? BuildCelManifest(usable, ns) : BuildManifest(usable, ns);
         if (string.IsNullOrWhiteSpace(yaml))
-            return (false, "No policies generated (check configuration).");
+            return (false, retired.Count > 0 ? retiredNote : "No policies generated (check configuration).");
+
+        // One decision: the apply, and the removal of whatever it supersedes.
+        using IDisposable operation = gate.BeginOperation($"Apply Kyverno policies to {ns}");
 
         // Same tuple-preserving catch as ReconcileClusterRbacPolicyAsync, and the same reason: the
         // caller treats a failure here as a logged warning on an otherwise successful deploy.
@@ -807,7 +892,15 @@ public class KyvernoPolicyService(
                 yaml, ns, $"Apply Kyverno policies to {ns}", ct);
 
             logger.LogInformation("Kyverno policies applied to {ClusterId}/{Namespace}", clusterId, ns);
-            return (true, output.TrimEnd());
+
+            string? replaced = api.CelServed ? await RetireReplacedAsync(access, usable, ns, ct) : null;
+
+            List<string> problems = new[] { replaced, retiredNote }
+                .Where(s => !string.IsNullOrEmpty(s)).Select(s => s!).ToList();
+
+            return problems.Count == 0
+                ? (true, output.TrimEnd())
+                : (false, string.Join("\n", problems.Prepend(output.TrimEnd())));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -816,6 +909,135 @@ public class KyvernoPolicyService(
             return (false, ex.Message);
         }
     }
+
+    // ── Moving to the CEL kinds ───────────────────────────────────────────────
+
+    private const string LegacyResource = "policies.kyverno.io";
+    private const string LegacyClusterResource = "clusterpolicies.kyverno.io";
+    private const string ClusterCelResource = "validatingpolicies.policies.kyverno.io";
+    private const string ImageCelResource = "namespacedimagevalidatingpolicies.policies.kyverno.io";
+
+    private static readonly string[] NamespacedCelResources = [KyvernoApi.ValidatingCrd, ImageCelResource];
+
+    /// <summary>How long a namespace's replacements get, together. Settable so tests need not wait it out.</summary>
+    public TimeSpan ReadyTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    public TimeSpan ReadyPollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Removes the legacy policies in a namespace that the CEL ones just applied replace, once those
+    /// are being enforced. Returns what could not be moved, or null.
+    ///
+    /// <para>In that order, so no policy is ever absent: both generations are enforced between the apply
+    /// and the delete. Only a name that was just applied is removed. A legacy policy with no
+    /// replacement — disabled here but never removed from the cluster, or written by somebody else —
+    /// stays, because deleting it would drop an enforced rule as a side effect.</para>
+    /// </summary>
+    private async Task<string?> RetireReplacedAsync(
+        EntKube.Web.Services.Clusters.IClusterClient access,
+        List<KyvernoPolicy> policies, string ns, CancellationToken ct)
+    {
+        HashSet<string> live = NamesIn(await access.GetJsonAsync(LegacyResource, ns, ct: ct));
+        List<string> waiting = [];
+        System.Diagnostics.Stopwatch waited = System.Diagnostics.Stopwatch.StartNew();
+
+        foreach (KyvernoPolicy policy in policies)
+        {
+            // Only what was rendered: an incomplete policy has no replacement on the cluster.
+            if (KyvernoCelPolicyBuilder.NameOf(policy.PolicyType) is not { } name
+                || !live.Contains(name)
+                || KyvernoCelPolicyBuilder.Build(policy, ns) is null)
+                continue;
+
+            string resource = policy.PolicyType == KyvernoPolicyType.VerifyImageSignatures
+                ? ImageCelResource
+                : KyvernoApi.ValidatingCrd;
+
+            if (await BecomesEnforcedAsync(access, resource, name, ns, waited, ct))
+                await access.DeleteManifestAsync(LegacyResource, name, ns, ct);
+            else
+                waiting.Add(name);
+        }
+
+        return waiting.Count == 0 ? null : NotReady(string.Join(", ", waiting));
+    }
+
+    private static string NotReady(string names) =>
+        $"Kyverno is not enforcing the replacement for {names} yet, so the previous policy was kept and is still enforced. Apply again.";
+
+    private async Task<bool> BecomesEnforcedAsync(
+        EntKube.Web.Services.Clusters.IClusterClient access,
+        string resource, string name, string ns, System.Diagnostics.Stopwatch waited, CancellationToken ct)
+    {
+        while (true)
+        {
+            HelmExecutionResult result = await access.GetResourceJsonAsync(resource, name, ns, ct);
+            if (result.Success && IsInWebhook(result.Output)) return true;
+
+            if (waited.Elapsed >= ReadyTimeout) return false;
+            await Task.Delay(ReadyPollInterval, ct);
+        }
+    }
+
+    /// <summary>
+    /// Whether Kyverno has put the policy in its admission webhook, which is what enforcing it means.
+    ///
+    /// <para>Not <c>conditionStatus.ready</c>, which is wrong both ways. It is also false while the reports
+    /// controller may not read the matched kind, and the chart does not let it read Roles or
+    /// ClusterRoleBindings, so the RBAC policies would never be ready. And until the webhook has any state
+    /// for the policy that condition is absent rather than false, so it can be true too early.</para>
+    /// </summary>
+    private static bool IsInWebhook(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("status", out JsonElement status)
+                && status.TryGetProperty("conditionStatus", out JsonElement conditions)
+                && conditions.TryGetProperty("conditions", out JsonElement list)
+                && list.ValueKind == JsonValueKind.Array
+                && list.EnumerateArray().Any(c =>
+                    c.TryGetProperty("type", out JsonElement type) && type.GetString() == "WebhookConfigured"
+                    && c.TryGetProperty("status", out JsonElement value) && value.GetString() == "True");
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static HashSet<string> NamesIn(string listJson)
+    {
+        using JsonDocument doc = JsonDocument.Parse(listJson);
+        HashSet<string> names = new(StringComparer.Ordinal);
+
+        if (doc.RootElement.TryGetProperty("items", out JsonElement items) && items.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in items.EnumerateArray())
+            {
+                if (item.TryGetProperty("metadata", out JsonElement meta)
+                    && meta.TryGetProperty("name", out JsonElement name)
+                    && name.GetString() is { Length: > 0 } value)
+                    names.Add(value);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>A custom policy written against the API group Kyverno 1.20 stopped executing.</summary>
+    internal static bool IsLegacyCustom(KyvernoPolicy policy) =>
+        policy.PolicyType == KyvernoPolicyType.Custom
+        && policy.CustomYaml is { } yaml
+        && System.Text.RegularExpressions.Regex.IsMatch(
+            yaml, @"^\s*apiVersion:\s*[""']?kyverno\.io/", System.Text.RegularExpressions.RegexOptions.Multiline);
+
+    /// <summary>The CEL counterpart of <see cref="BuildManifest"/>, custom YAML included as written.</summary>
+    internal static string BuildCelManifest(List<KyvernoPolicy> policies, string ns) =>
+        string.Join("\n---\n", policies
+            .Select(p => p.PolicyType == KyvernoPolicyType.Custom ? p.CustomYaml : KyvernoCelPolicyBuilder.Build(p, ns))
+            .Where(y => !string.IsNullOrWhiteSpace(y))
+            .Select(y => y!.Trim()));
 
     // ── Configuration helpers ─────────────────────────────────────────────────
 
@@ -1183,7 +1405,7 @@ public class KyvernoPolicyService(
     /// exist. <c>system:serviceaccounts</c> is every ServiceAccount in the cluster; the other two
     /// are every user who can authenticate, and every user who cannot.
     /// </summary>
-    private static readonly string[] AlwaysDeniedGroups =
+    internal static readonly string[] AlwaysDeniedGroups =
         ["system:serviceaccounts", "system:authenticated", "system:anonymous"];
 
     /// <summary>

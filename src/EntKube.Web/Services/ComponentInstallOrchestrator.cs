@@ -40,6 +40,7 @@ public class ComponentInstallOrchestrator(
     StalwartService stalwartService,
     HeadscaleService headscaleService,
     ClusterProvidedComponents providedComponents,
+    KyvernoUpgradeGuard kyvernoGuard,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
 {
     /// <summary>
@@ -79,6 +80,13 @@ public class ComponentInstallOrchestrator(
         if (await harborService.DescribeRedisConflictAsync(tenantId, componentId, ct) is string redisConflict)
         {
             return new HelmExecutionResult { Success = false, Output = redisConflict };
+        }
+
+        // And a Kyverno that would stop enforcing the policies already on the cluster. Helm refuses that
+        // too, but in terms of a flag that turns the policies off.
+        if (await kyvernoGuard.DescribeLegacyPolicyConflictAsync(tenantId, componentId, ct) is string policyConflict)
+        {
+            return new HelmExecutionResult { Success = false, Output = policyConflict };
         }
 
         // Managed clusters usually already run a metrics-server, in a namespace of their own choosing and
