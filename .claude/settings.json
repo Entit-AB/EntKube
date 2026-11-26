@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -E \"\\\\.\\(cs|razor\\)$\")"
+      "Bash(grep -E \"\\\\.\\(cs|razor\\)$\")",
+      "Bash(bb:*)"
     ]
   }
 }

@@ -457,3 +457,6 @@ artifacts/terraform-provider/
 # opened a folder in Finder produced a diff nobody meant to make.
 .DS_Store
 **/.DS_Store
+
+# Claude Code agent worktrees
+.claude/worktrees/
