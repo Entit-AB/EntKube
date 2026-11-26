@@ -164,6 +164,21 @@ public static class ScrapeMonitorPlanner
                     + "something EntKube does not understand. Nothing is changed while that is so.", resolved);
             }
 
+            // Our own monitor would be the second job. Ours goes if there is one: a gap the row
+            // explains is better than every sum over those pods silently twice what it is.
+            if (resolved.Twice is [TwiceScrapedEndpoint twice, ..])
+            {
+                if (existingIsOurs) prune.Add(monitor.Identity);
+
+                return Row(target, MonitorState.NotSelectable,
+                    existingIsOurs ? MonitorChange.Remove : MonitorChange.None,
+                    $"Pod {twice.Endpoint.PodName} is behind {string.Join(" and ", twice.Services)}, both with port "
+                    + $"{twice.Endpoint.Port}, so a ServiceMonitor would scrape it twice and double every sum. EntKube "
+                    + (existingIsOurs ? "removes its monitor" : "makes no monitor")
+                    + " while that is so; remove the extra Service, or label it apart, and EntKube picks it up by itself.",
+                    resolved);
+            }
+
             if (WhyPrometheusWouldNotSelect(monitor.Identity, out IReadOnlyDictionary<string, string> labels) is { } why)
             {
                 return Row(target, MonitorState.NotSelectable, MonitorChange.None, why, resolved);

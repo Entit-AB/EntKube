@@ -802,6 +802,73 @@ public class ScrapeMonitorPlannerTests
     // ── One pod, once ─────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Kyverno's admission controller behind kyverno-svc-metrics and a second Service with the same
+    /// labels and port name, as a chart upgrade or a hand-made Service puts it. A ServiceMonitor gets
+    /// one target per Service, each with its own job label, so every sum over those pods is twice
+    /// what it is. Seen on kind: 9 targets for the 6 endpoints the row claimed.
+    /// </summary>
+    private V1Pod KyvernoAdmissionBehindTwoServices()
+    {
+        world.Component("kyverno", "kyverno", "kyverno");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(
+            ("app.kubernetes.io/instance", "kyverno"), ("app.kubernetes.io/part-of", "kyverno"),
+            ("app.kubernetes.io/component", "admission-controller"));
+        V1Pod pod = world.Pod("kyverno", "kyverno-admission-controller-0", labels,
+            ScrapeWorld.Container("kyverno", ("https", 9443), ("metrics-port", 8000)));
+        world.Service("kyverno", "kyverno-svc-metrics", labels, labels, ("metrics-port", 8000, "8000"));
+        world.Service("kyverno", "kyverno-svc-metrics-extra", labels, labels, ("metrics-port", 8000, "8000"));
+        return pod;
+    }
+
+    [Fact]
+    public void A_pod_two_Services_lead_to_gets_no_ServiceMonitor_that_would_scrape_it_twice()
+    {
+        KyvernoAdmissionBehindTwoServices();
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.NotSelectable);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.None);
+        OnlyRow(plan).Detail.Should().Contain("kyverno-svc-metrics").And.Contain("kyverno-svc-metrics-extra")
+            .And.Contain("twice");
+        plan.HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>Ours is what counts it twice, so ours goes: a visible gap rather than a silent double.</summary>
+    [Fact]
+    public void Our_ServiceMonitor_goes_when_a_second_Service_makes_it_scrape_a_pod_twice()
+    {
+        KyvernoAdmissionBehindTwoServices();
+        world.OurMonitor(MonitorKind.ServiceMonitor, "kyverno", "entkube-kyverno-kyverno");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).Change.Should().Be(MonitorChange.Remove);
+        plan.Prune.Should().Equal(Services("kyverno", "entkube-kyverno-kyverno"));
+        plan.Apply.Should().BeEmpty();
+    }
+
+    /// <summary>Two Services in front of different pods are two endpoints, not one twice.</summary>
+    [Fact]
+    public void Two_Services_in_front_of_different_pods_are_scraped_once_each()
+    {
+        world.Component("kyverno", "kyverno", "kyverno");
+        foreach (string controller in (string[])["admission-controller", "reports-controller"])
+        {
+            Dictionary<string, string> labels = ScrapeWorld.Labels(
+                ("app.kubernetes.io/instance", "kyverno"), ("app.kubernetes.io/part-of", "kyverno"),
+                ("app.kubernetes.io/component", controller));
+            world.Pod("kyverno", $"kyverno-{controller}-0", labels, ScrapeWorld.Container("kyverno", ("metrics", 8000)));
+            world.Service("kyverno", $"kyverno-{controller}-metrics", labels, labels, ("metrics-port", 8000, "8000"));
+        }
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
+        OnlyRow(plan).Endpoints.Should().HaveCount(2);
+    }
+
+    /// <summary>
     /// Two headless Services in front of the same filer pods, both with the port. Only one carries
     /// monitoring=true, and a monitor matching both scrapes every filer twice.
     /// </summary>

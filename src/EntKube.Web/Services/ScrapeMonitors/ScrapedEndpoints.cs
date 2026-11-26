@@ -13,10 +13,19 @@ public sealed record ScrapedEndpoint(V1Pod Pod, int Port, string Path)
     public string PodIp => Pod.Status.PodIP;
 }
 
+/// <summary>One endpoint a ServiceMonitor would reach through more than one Service, and those Services.</summary>
+public sealed record TwiceScrapedEndpoint(ScrapedEndpoint Endpoint, IReadOnlyList<string> Services);
+
 /// <summary>What a monitor would scrape in a namespace, as it runs right now.</summary>
 /// <param name="Pods">The running pods it selects, whether or not they expose the port.</param>
-/// <param name="Endpoints">The ports of theirs it would scrape.</param>
-public sealed record ResolvedTargets(IReadOnlyList<V1Pod> Pods, IReadOnlyList<ScrapedEndpoint> Endpoints);
+/// <param name="Endpoints">The ports of theirs it would scrape, each once.</param>
+/// <param name="Twice">
+/// The ones it would scrape more than once. Prometheus makes a ServiceMonitor one target per Service
+/// that leads to a pod, each with its own job label, so two Services in front of the same pods with
+/// the same port double every sum over them.
+/// </param>
+public sealed record ResolvedTargets(
+    IReadOnlyList<V1Pod> Pods, IReadOnlyList<ScrapedEndpoint> Endpoints, IReadOnlyList<TwiceScrapedEndpoint> Twice);
 
 /// <summary>
 /// Follows a monitor's selector to the pod ports it ends at, the way the Prometheus Operator's own
@@ -41,20 +50,30 @@ public static class ScrapedEndpoints
                 from pod in selected
                 from port in DeclaredPorts(pod)
                 where endpoint.Port is not null ? port.Name == endpoint.Port : port.ContainerPort == endpoint.ContainerPort
-                select new ScrapedEndpoint(pod, port.ContainerPort, endpoint.Path)));
+                select new ScrapedEndpoint(pod, port.ContainerPort, endpoint.Path)), []);
         }
 
         List<V1Service> services = [.. ns.Services.Where(s => monitor.Selector.Matches(Labels(s)) is true)];
 
+        List<(ScrapedEndpoint Endpoint, string Service)> reached =
+        [
+            .. from endpoint in monitor.Endpoints
+               from service in services
+               from port in service.Spec?.Ports ?? []
+               where port.Name == endpoint.Port
+               from target in Behind(service, port, ns)
+               select (new ScrapedEndpoint(target.Pod, target.Port, endpoint.Path), service.Metadata.Name),
+        ];
+
         return new ResolvedTargets(
             [.. services.SelectMany(s => PodsBehind(s, ns)).DistinctBy(p => p.Metadata.Name)],
-            Distinct(
-                from endpoint in monitor.Endpoints
-                from service in services
-                from port in service.Spec?.Ports ?? []
-                where port.Name == endpoint.Port
-                from target in Behind(service, port, ns)
-                select new ScrapedEndpoint(target.Pod, target.Port, endpoint.Path)));
+            Distinct(reached.Select(r => r.Endpoint)),
+            [
+                .. reached
+                    .GroupBy(r => (r.Endpoint.PodIp, r.Endpoint.Port, r.Endpoint.Path))
+                    .Where(g => g.Count() > 1)
+                    .Select(g => new TwiceScrapedEndpoint(g.First().Endpoint, [.. g.Select(r => r.Service).Distinct()])),
+            ]);
     }
 
     /// <summary>

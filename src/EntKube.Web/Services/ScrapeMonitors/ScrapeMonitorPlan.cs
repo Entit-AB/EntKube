@@ -28,7 +28,8 @@ public enum MonitorState
 
     /// <summary>
     /// Whether Prometheus would pick the monitor up cannot be told, or it certainly would not.
-    /// Nothing is created; ours, if there is one, stays.
+    /// Nothing is created; ours, if there is one, stays. One exception: where two Services lead a
+    /// ServiceMonitor to the same pod port, ours would scrape it twice itself, and ours goes.
     /// </summary>
     NotSelectable,
 
