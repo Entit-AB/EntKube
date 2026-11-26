@@ -23,8 +23,13 @@ public class CnpgService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Contracts.Delivery.IDeliveryApi delivery,
-    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    Microsoft.Extensions.Logging.ILogger<CnpgService>? logger = null)
 {
+    /// <summary>Where a choice made on an answer that could not be had is said. The container always gives one.</summary>
+    private readonly Microsoft.Extensions.Logging.ILogger log =
+        logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<CnpgService>.Instance;
+
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why.
     ///
@@ -42,7 +47,8 @@ public class CnpgService(
 
     /// <summary>
     /// Whether the monitor engine's own PodMonitor for this database stands on the cluster right now
-    /// (<c>entkube-cnpg-&lt;name&gt;</c>, ours by <see cref="IsTheEnginesOwn"/>): the one case in which the
+    /// (<c>entkube-cnpg-&lt;name&gt;</c>, ours by the planner's own rule, <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>):
+    /// the one case in which the
     /// operator's own PodMonitor may be switched off. See <see cref="EngineMonitorOnCluster"/> for why this
     /// question, and not whether EntKube's Prometheus serves the cluster.
     ///
@@ -63,27 +69,17 @@ public class CnpgService(
     private static async Task<bool> EnginesPodMonitorStandsAsync(
         Clusters.IClusterClient client, string name, string ns, CancellationToken ct)
     {
-        ScrapeMonitors.MonitorIdentity ours = EngineMonitorOnCluster.ForPostgres(name, ns);
+        ScrapeMonitors.MonitorSpec ours = EngineMonitorOnCluster.ForPostgres(name, ns);
 
         // No PodMonitor kind, nothing of ours: an answer, and nothing more is asked.
-        if (!await EngineMonitorOnCluster.KindIsServedAsync(client, ours.Kind, ct)) return false;
+        if (!await EngineMonitorOnCluster.KindIsServedAsync(client, ours.Identity.Kind, ct)) return false;
 
-        return IsTheEnginesOwn(
-            await EngineMonitorOnCluster.ListAsync(client, ours.Kind, ours.Namespace, ct), ours, client.ClusterId);
+        // Ours by the function the planner keeps and prunes by, asked of what the cluster lists, so a monitor the
+        // planner would keep is one this hands over to, and one it would not is not.
+        return ScrapeMonitors.ScrapeMonitorIdentity.Stands(
+            await EngineMonitorOnCluster.ListAsync(client, ours.Identity.Kind, ours.Identity.Namespace, ct),
+            ours, client.ClusterId);
     }
-
-    /// <summary>
-    /// Whether the engine's monitor <paramref name="ours"/> is among those <paramref name="listed"/> on the cluster
-    /// registered as <paramref name="clusterId"/>: that name in that namespace, and ours by the planner's rule, which
-    /// is the ownership label carrying the cluster's id and nothing else (<c>ScrapeMonitorPlanner</c>'s
-    /// <c>IsOurs</c>). The planner keeps and prunes by that rule alone, so a monitor it would keep is one this hands
-    /// over to, and one it would not is not. Pinned to the planner by
-    /// <c>TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes</c>.
-    /// </summary>
-    private static bool IsTheEnginesOwn(
-        IEnumerable<ScrapeMonitors.LiveMonitor> listed, ScrapeMonitors.MonitorIdentity ours, Guid clusterId)
-        => listed.Any(m => m.Identity == ours
-            && m.Labels.GetValueOrDefault(ScrapeMonitors.ScrapeMonitorManifest.OwnershipLabel) == clusterId.ToString());
 
     /// <summary>The one line of <c>spec.monitoring</c> both Cluster builders write.</summary>
     private static string PodMonitorLine(bool enginesPodMonitorStands)
@@ -911,7 +907,13 @@ public class CnpgService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Kept: enginesPodMonitorStands as read before the first write.
+            // Kept: enginesPodMonitorStands as read before the first write. Said, because the database is then
+            // written on an answer that may be a pass old.
+            log.LogWarning(ex,
+                "Major upgrade of {Cluster} in {Namespace}: whether the monitor engine's own PodMonitor stands could "
+                + "not be asked again before the final cluster was written, so the answer from before the upgrade "
+                + "began was used (enablePodMonitor: {EnablePodMonitor}). The next monitor pass corrects either way.",
+                source.Name, source.Namespace, !enginesPodMonitorStands);
         }
 
         string s3SecretFinal = $"{source.Name}-s3-credentials";
@@ -2947,9 +2949,12 @@ public class CnpgService(
 ///
 /// <para><b>Ours is the planner's word.</b> The engine's name for that target, in the target's namespace, and ours by
 /// the rule the planner prunes and keeps by. This class only reads (<see cref="KindIsServedAsync"/>,
-/// <see cref="ListAsync"/>); each caller decides with one predicate over what was listed, the planner's rule and
-/// nothing else, so the handover can never call a monitor ours that the planner would not keep, or the other way
-/// round.</para>
+/// <see cref="ListAsync"/>); each caller decides by asking <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/> of
+/// what was listed, the very function the planner's own rule is, so the handover can never call a monitor ours that
+/// the planner would not keep, or the other way round. That takes in the planner's one exception too: an unlabelled
+/// monitor that one the engine wants takes over (<see cref="ScrapeMonitors.ScrapeTargetCatalog"/> marks only
+/// RabbitMQ's so, which has no handover; were CNPG's or Keycloak's ever marked, handing over to it keeps a double
+/// from following, at the price of a gap of one pass where the planner then prunes it).</para>
 ///
 /// <para><b>Unknown is an exception.</b> A cluster that does not serve the monitor kind at all is an answer (no CRD,
 /// so nothing of ours can stand). Every other failed or unreadable answer throws, and the caller's action fails whole
@@ -2963,26 +2968,21 @@ public static class EngineMonitorOnCluster
     /// The engine's monitor for one CNPG cluster, named as the engine's catalog names it. Only the name and the
     /// namespace go into it; the ids of the summary are not part of the answer.
     /// </summary>
-    public static ScrapeMonitors.MonitorIdentity ForPostgres(string name, string ns)
-        => ScrapeMonitors.ScrapeTargetCatalog.For([],
-            [
+    public static ScrapeMonitors.MonitorSpec ForPostgres(string name, string ns)
+        => ScrapeMonitors.ScrapeMonitorIdentity.MonitorsFor(
                 new EntKube.Contracts.DataServices.ManagedServiceSummary(
                     Guid.Empty, Guid.Empty, Guid.Empty, EntKube.Contracts.DataServices.ManagedServiceKind.Postgres,
                     name, ns, EntKube.Contracts.DataServices.ManagedServiceStatus.Running,
-                    IsOperatorManaged: true, IsInCluster: true, HasExporter: false),
-            ])
-            .Single().Monitor!.Identity;
+                    IsOperatorManaged: true, IsInCluster: true, HasExporter: false))
+            .Single();
 
     /// <summary>
-    /// The engine's monitor for one installed component, named as the engine's catalog names it; null where the
-    /// engine makes none for it (no namespace recorded, a chart it does not monitor).
+    /// The engine's monitor for one installed component, as the engine's catalog gives it; null where the engine
+    /// makes none for it (no namespace recorded, a chart it does not monitor).
     /// </summary>
-    /// <remarks>Counted as installed: the name does not depend on the status, and an apply runs while it is Installing.</remarks>
-    public static ScrapeMonitors.MonitorIdentity? ForComponent(EntKube.Contracts.Catalog.InstalledComponent component)
-        => ScrapeMonitors.ScrapeTargetCatalog.For(
-                [component with { Status = EntKube.Contracts.Catalog.ComponentStatus.Installed }], [])
-            .Select(t => t.Monitor?.Identity)
-            .FirstOrDefault(i => i is not null);
+    /// <remarks>Whatever its status: the name does not depend on it, and an apply runs while it is Installing.</remarks>
+    public static ScrapeMonitors.MonitorSpec? ForComponent(EntKube.Contracts.Catalog.InstalledComponent component)
+        => ScrapeMonitors.ScrapeMonitorIdentity.MonitorsFor(component).FirstOrDefault();
 
     /// <summary>The resource kubectl names a monitor kind by.</summary>
     public static string Resource(ScrapeMonitors.MonitorKind kind)
@@ -2996,9 +2996,9 @@ public static class EngineMonitorOnCluster
         => cluster.ResourceExistsAsync(CrdResource, Resource(kind), "", ct);
 
     /// <summary>
-    /// Every monitor of <paramref name="kind"/> in <paramref name="ns"/>, whoever wrote it, with its name and labels
-    /// as the API server lists them. Nothing is filtered here: which of them is ours is the caller's one predicate,
-    /// asked of the answer. Ask <see cref="KindIsServedAsync"/> first; a list of a kind the cluster does not serve
+    /// Every monitor of <paramref name="kind"/> in <paramref name="ns"/>, whoever wrote it, with its name, labels and
+    /// spec as the API server lists them. Nothing is filtered here: which of them is ours is
+    /// <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>, asked of the answer. Ask <see cref="KindIsServedAsync"/> first; a list of a kind the cluster does not serve
     /// is a failed read like any other, and throws.
     /// </summary>
     public static async Task<IReadOnlyList<ScrapeMonitors.LiveMonitor>> ListAsync(
@@ -3046,8 +3046,16 @@ public static class EngineMonitorOnCluster
                 throw new FormatException($"the labels of {name} are not a map");
         }
 
+        // The spec, for the one rule's takeover of an unlabelled monitor, which compares what it selects.
+        System.Text.Json.Nodes.JsonObject spec = item["spec"] switch
+        {
+            null => [],
+            System.Text.Json.Nodes.JsonObject given => (System.Text.Json.Nodes.JsonObject)given.DeepClone(),
+            _ => throw new FormatException($"the spec of {name} is not an object"),
+        };
+
         return new ScrapeMonitors.LiveMonitor(
-            new ScrapeMonitors.MonitorIdentity(kind, itsNamespace, name), labels, new Dictionary<string, string>(), []);
+            new ScrapeMonitors.MonitorIdentity(kind, itsNamespace, name), labels, new Dictionary<string, string>(), spec);
     }
 
     private static string? Text(System.Text.Json.Nodes.JsonNode? node)

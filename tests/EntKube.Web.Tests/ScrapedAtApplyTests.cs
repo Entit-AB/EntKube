@@ -591,8 +591,9 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     }
 
     /// <summary>
-    /// One rule for "ours". The handover counts a monitor as the engine's exactly where the planner does
-    /// (<c>ScrapeMonitorPlanner</c>'s private <c>IsOurs</c>), fed the same labels; see
+    /// One rule for "ours", and one function for it: the Keycloak handover asks
+    /// <see cref="EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>, the planner keeps and prunes by
+    /// the same rule, and fed the same labels all three say the same; see
     /// <see cref="CnpgServiceTests.TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes"/>, which asks the same of
     /// the CNPG handover.
     /// </summary>
@@ -617,8 +618,16 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
         string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
         bool handedOver = Said(At(Parse(values), "serviceMonitor")!) == "{enabled:false}";
 
-        planner.Should().Be(expected, "the planner's rule, as it is");
+        CnpgServiceTests.TheOneRuleSaysItStands(ClusterId,
+                EngineMonitorOnCluster.ForComponent(new EntKube.Contracts.Catalog.InstalledComponent(
+                    Guid.NewGuid(), TenantId, ClusterId, "", Guid.Empty, "keycloak", "HelmChart",
+                    EntKube.Contracts.Catalog.ComponentStatus.Installed, "keycloak", "keycloak", "keycloakx", null,
+                    null, null, null, null))!, labels)
+            .Should().Be(planner, "the planner's rule is ScrapeMonitorIdentity's");
         handedOver.Should().Be(planner, "the handover asks the planner's question");
+        // The rule as it is comes last: were the one rule changed, the handover and the planner would still agree,
+        // and only this line would say so.
+        planner.Should().Be(expected, "the planner's rule, as it is");
     }
 
     [Theory]
@@ -1256,5 +1265,62 @@ public class SeaweedFsLetsPrometheusInTests : ValuesAtApply
         const string stored = "networkPolicy:\n  enabled: true\n  extraIngress: []\n";
 
         (await ApplyAsync(InstallChart("acme-store", "acme-store", "acme-store", "acme", stored))).Should().Be(stored);
+    }
+}
+
+/// <summary>
+/// orchestrator-throws: what the install flow does with a throw after it has marked the component Installing and
+/// before helm's answer is recorded. Left alone, the component stayed Installing for ever: no install running, and
+/// every later one refused as "an operation in progress". Any such throw ends it Failed, with the reason, and is
+/// still thrown, so the Install button shows it as it always has.
+/// </summary>
+public class InstallFlowThrowTests : ValuesAtApply
+{
+    /// <summary>
+    /// A manifest component with nothing in it: the install command refuses it, after the component is Installing. It
+    /// ends Failed with the refusal as its error, and neither helm nor kubectl is run.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_between_installing_and_helm_ends_the_component_failed_and_is_still_thrown()
+    {
+        ClusterComponent empty = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = ClusterId, Name = "plain-manifest", ComponentType = "Manifest",
+            Namespace = "default", HelmValues = "# nothing rendered yet\n",
+        };
+        Db.ClusterComponents.Add(empty);
+        Db.SaveChanges();
+
+        Func<Task> act = () => Orchestrator().InstallAsync(TenantId, empty.Id);
+
+        InvalidOperationException thrown = (await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*has no manifest to apply*")).Which;
+        Db.ChangeTracker.Clear();
+        ClusterComponent component = await Db.ClusterComponents.SingleAsync(c => c.Id == empty.Id);
+        component.Status.Should().Be(ComponentStatus.Failed, "nothing is installing any more");
+        component.LastError.Should().Be(thrown.Message);
+        Cluster.Verify(c => c.RunHelmAsync(
+            It.IsAny<EntKube.Web.Services.Clusters.HelmInvocation>(), It.IsAny<CancellationToken>()), Times.Never);
+        Cluster.Verify(c => c.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>
+    /// A cancelled install is not a failed one: the window's catch leaves cancellation alone, and it goes on up. Here
+    /// the cluster is asked whether the engine's Keycloak monitor stands, and the asking is cancelled.
+    /// </summary>
+    [Fact]
+    public async Task A_cancellation_in_the_same_place_is_not_called_a_failure()
+    {
+        InstallPrometheus();
+        Guid keycloak = InstallChart("keycloak", "keycloakx", "keycloak", "keycloak",
+            "database:\n  vendor: postgres\nserviceMonitor:\n  enabled: true\n");
+        Cluster.Setup(c => c.ResourceExistsAsync(CrdResource, ServiceMonitors, "", It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException());
+
+        Func<Task> act = () => Orchestrator().InstallAsync(TenantId, keycloak);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        Db.ChangeTracker.Clear();
+        (await Db.ClusterComponents.SingleAsync(c => c.Id == keycloak)).Status.Should().Be(ComponentStatus.Installing);
     }
 }

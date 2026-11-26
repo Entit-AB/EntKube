@@ -706,6 +706,10 @@ public static class ScrapeDiagnostician
     /// The endpoints a monitor scrapes on the workload's metrics port, as port and path. The path
     /// counts: RabbitMQ's published monitor reads <c>/metrics/detailed</c> beside
     /// <c>/metrics</c>, and a second monitor on the other path doubles nothing.
+    ///
+    /// <para>An endpoint that names no port scrapes every port there is (prometheus-operator keeps every target
+    /// for it, promcfg.go), the metrics port among them, so it is one of the workload's monitors: it used to be left
+    /// out, and two monitors that doubled a broker were never compared.</para>
     /// </summary>
     private static HashSet<(string Port, string Path)> Endpoints(JsonNode monitor, MonitoredWorkload workload)
     {
@@ -717,7 +721,14 @@ public static class ScrapeDiagnostician
             string? port = Text(endpoint?["port"])
                 ?? Text(endpoint?["portNumber"])
                 ?? Text(endpoint?["targetPort"]);
-            if (port is null) continue;
+            if (port is null)
+            {
+                if (endpoint is not JsonObject) continue;
+                string path =Text(endpoint?["path"]) ?? "/metrics";
+                if (workload.Ports.Count == 0) endpoints.Add(("", path));
+                foreach (int every in workload.Ports.Select(p => p.Number)) endpoints.Add((every.ToString(CultureInfo.InvariantCulture), path));
+                continue;
+            }
 
             if (workload.Ports.Count > 0)
             {

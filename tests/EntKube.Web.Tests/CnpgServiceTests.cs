@@ -31,6 +31,9 @@ public class CnpgServiceTests : IDisposable
     private readonly EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate;
     private readonly CnpgService sut;
 
+    /// <summary>What the service logged, for the one choice it makes on an answer it could not have.</summary>
+    private readonly CapturingLogger<CnpgService> logged = new();
+
     public CnpgServiceTests()
     {
         // Mirrors production: contexts resolve cluster.Kubeconfig from the vault via the interceptor.
@@ -47,7 +50,7 @@ public class CnpgServiceTests : IDisposable
         sut = new CnpgService(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
-            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), gate);
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), gate, logged);
     }
 
     public void Dispose()
@@ -1558,13 +1561,50 @@ public class CnpgServiceTests : IDisposable
 
         clusters.Should().HaveCount(2);
         clusters[1].Should().Contain("  name: pg\n").And.Contain("    enablePodMonitor: false\n");
+        TheFallbackWasLogged("enablePodMonitor: False");
     }
 
     /// <summary>
-    /// One rule for "ours". The handover counts a monitor as the engine's exactly where the planner does
-    /// (<c>ScrapeMonitorPlanner</c>'s private <c>IsOurs</c>), fed the same labels. The planner is asked through what
-    /// it does with them: with nothing to plan for and no Prometheus to wait on, it prunes every monitor it calls its
-    /// own and nothing else.
+    /// upgrade-fallback: the other side of the test above. Nothing of ours stood when the upgrade began, so the
+    /// operator's own PodMonitor is the database's one scrape; when the last question cannot be answered the final
+    /// cluster keeps it on, with the answer from the start, and does not guess that ours stands (that guess ends the
+    /// only scrape there is). That the early answer was used is said in the log, with why the last read failed.
+    /// </summary>
+    [Fact]
+    public async Task AMajorUpgradeWithNothingOfOursWhoseLastQuestionCannotBeAnsweredKeepsTheOperatorsMonitor()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        PodMonitorsOnTheCluster(kindServed: true, []);
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                "Cluster", "pg-v18", "databases", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback(() => TheClusterCannotSay("list"))
+            .Returns(Task.CompletedTask);
+
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("major-upgrade", tenant, cluster, storageLink);
+
+        clusters.Should().HaveCount(2);
+        clusters[1].Should().Contain("  name: pg\n").And.Contain("    enablePodMonitor: true\n");
+        TheFallbackWasLogged("enablePodMonitor: True");
+    }
+
+    /// <summary>The warning a major upgrade leaves when its last question could not be answered, with why.</summary>
+    private void TheFallbackWasLogged(string answer)
+    {
+        CapturingLogger<CnpgService>.Entry warning = logged.Entries.Should()
+            .ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning).Subject;
+        warning.Message.Should().Contain("pg").And.Contain("databases").And.Contain(answer)
+            .And.Contain("answer from before the upgrade began");
+        warning.Exception.Should().NotBeNull();
+        warning.Exception!.Message.Should().Contain("cluster unreachable");
+    }
+
+    /// <summary>
+    /// One rule for "ours", and one function for it. The handover asks
+    /// <see cref="EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands"/> of what the cluster lists, and the
+    /// planner keeps and prunes by the same <c>ScrapeMonitorIdentity.IsOurs</c>; fed the same labels, all three say the
+    /// same. The planner is asked through what it does with them: with nothing to plan for and no Prometheus to wait
+    /// on, it prunes every monitor it calls its own and nothing else. A change to the one rule moves all three
+    /// together, which is what the rows pin: the expected value is the rule's, as it is.
     /// </summary>
     [Theory]
     [InlineData("the ownership label and managed-by", true)]
@@ -1590,9 +1630,20 @@ public class CnpgServiceTests : IDisposable
         bool handedOver = clusters.Should().ContainSingle(lastReapply?.Error).Subject
             .Contains("    enablePodMonitor: false\n", StringComparison.Ordinal);
 
-        planner.Should().Be(expected, "the planner's rule, as it is");
+        TheOneRuleSaysItStands(cluster.Id, EngineMonitorOnCluster.ForPostgres("pg", "databases"), labels)
+            .Should().Be(planner, "the planner's rule is ScrapeMonitorIdentity's");
         handedOver.Should().Be(planner, "the handover asks the planner's question");
+        // The rule as it is comes last: were the one rule changed, the handover and the planner would still agree,
+        // and only this line would say so.
+        planner.Should().Be(expected, "the planner's rule, as it is");
     }
+
+    /// <summary>What <see cref="EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands"/> says of one listed monitor with these labels.</summary>
+    internal static bool TheOneRuleSaysItStands(
+        Guid clusterId, EntKube.Web.Services.ScrapeMonitors.MonitorSpec wanted, IReadOnlyDictionary<string, string> labels)
+        => EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands(
+            [new EntKube.Web.Services.ScrapeMonitors.LiveMonitor(wanted.Identity, labels, new Dictionary<string, string>(), [])],
+            wanted, clusterId);
 
     /// <summary>The label sets of <see cref="TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes"/>.</summary>
     internal static Dictionary<string, string> LabelsOf(string which, Guid clusterId)

@@ -1049,7 +1049,8 @@ public class ComponentLifecycleService(
     /// ServiceMonitor"), so Keycloak would not install at all. Off, whatever else is true.</item>
     /// <item><b>The monitor engine's own ServiceMonitor for this Keycloak already stands</b>
     /// (its name for this release, in this namespace, on this Keycloak's own cluster, ours by
-    /// <see cref="IsTheEnginesOwn"/>). The chart's beside it would double every number. Off.</item>
+    /// <see cref="EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>, the planner's own rule). The
+    /// chart's beside it would double every number. Off.</item>
     /// </list>
     ///
     /// <para><b>Everywhere else it stays as stored.</b> Where EntKube's Prometheus selects the chart's monitor,
@@ -1079,36 +1080,22 @@ public class ComponentLifecycleService(
                 return true;
             }
 
-            EntKube.Web.Services.ScrapeMonitors.MonitorIdentity? ours = EngineMonitorOnCluster.ForComponent(
+            EntKube.Web.Services.ScrapeMonitors.MonitorSpec? ours = EngineMonitorOnCluster.ForComponent(
                 new EntKube.Contracts.Catalog.InstalledComponent(
                     component.Id, tenantId, component.ClusterId, "", Guid.Empty, component.Name,
                     component.ComponentType, EntKube.Contracts.Catalog.ComponentStatus.Installed,
                     component.Namespace, component.ReleaseName, component.HelmChartName, component.HelmChartVersion,
                     component.HelmValues, component.Configuration, null, component.InstalledAt));
 
-            return ours is not null && IsTheEnginesOwn(
-                await EngineMonitorOnCluster.ListAsync(cluster, ours.Kind, ours.Namespace, ct), ours, cluster.ClusterId);
+            return ours is not null && EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands(
+                await EngineMonitorOnCluster.ListAsync(cluster, ours.Identity.Kind, ours.Identity.Namespace, ct),
+                ours, cluster.ClusterId);
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or MonitorHandoverUnknownException))
         {
             throw new MonitorHandoverUnknownException(MonitorHandoverUnknownException.Say(component.Name, ex.Message), ex);
         }
     }
-
-    /// <summary>
-    /// Whether the engine's monitor <paramref name="ours"/> is among those <paramref name="listed"/> on the cluster
-    /// registered as <paramref name="clusterId"/>: that name in that namespace, and ours by the planner's rule, which
-    /// is the ownership label carrying the cluster's id and nothing else (<c>ScrapeMonitorPlanner</c>'s
-    /// <c>IsOurs</c>). The planner keeps and prunes by that rule alone, so a monitor it would keep is one this hands
-    /// over to, and one it would not is not. Pinned to the planner by
-    /// <c>The_handover_calls_a_monitor_ours_exactly_where_the_planner_does</c>.
-    /// </summary>
-    private static bool IsTheEnginesOwn(
-        IEnumerable<EntKube.Web.Services.ScrapeMonitors.LiveMonitor> listed,
-        EntKube.Web.Services.ScrapeMonitors.MonitorIdentity ours, Guid clusterId)
-        => listed.Any(m => m.Identity == ours
-            && m.Labels.GetValueOrDefault(EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorManifest.OwnershipLabel)
-                == clusterId.ToString());
 
     /// <summary>
     /// The helm release the cluster's kube-prometheus-stack actually runs under — the value its
