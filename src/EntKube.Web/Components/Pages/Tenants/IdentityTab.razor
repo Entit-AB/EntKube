@@ -1951,7 +1951,8 @@ else if (selectedKeycloak is not null)
                 <KeycloakMonitoringPanel TenantId="TenantId" ClusterId="monitored.ClusterId"
                                          Namespace="@(string.IsNullOrWhiteSpace(monitored.Namespace) ? "keycloak" : monitored.Namespace)"
                                          ReleaseName="@(monitored.ReleaseName ?? monitored.Name)"
-                                         InstanceName="@selectedKeycloak.DisplayName" />
+                                         InstanceName="@selectedKeycloak.DisplayName"
+                                         Component="monitored" />
             }
             else
             {

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace EntKube.Web.Data;
 
 /// <summary>
@@ -50,7 +52,7 @@ public static class AdvisoryLock
     public static string? TryAcquireSql(string? providerName, long key, string resourceName)
         => providerName switch
         {
-            "Npgsql.EntityFrameworkCore.PostgreSQL" => $"SELECT pg_try_advisory_lock({key})",
+            "Npgsql.EntityFrameworkCore.PostgreSQL" => $"SELECT pg_try_advisory_lock({Sql(key)})",
 
             // Returns >= 0 when granted, -1 on timeout. SELECTed so ExecuteScalar can read it.
             // @LockOwner = 'Session' rather than 'Transaction' so the hold outlives the
@@ -67,11 +69,19 @@ public static class AdvisoryLock
     public static string? ReleaseSql(string? providerName, long key, string resourceName)
         => providerName switch
         {
-            "Npgsql.EntityFrameworkCore.PostgreSQL" => $"SELECT pg_advisory_unlock({key})",
+            "Npgsql.EntityFrameworkCore.PostgreSQL" => $"SELECT pg_advisory_unlock({Sql(key)})",
             "Microsoft.EntityFrameworkCore.SqlServer" =>
                 $"EXEC sp_releaseapplock @Resource = '{resourceName}', @LockOwner = 'Session';",
             _ => null,
         };
+
+    /// <summary>
+    /// A key as SQL text. ⚠️ Always invariant: the current culture is the host's, and sv-SE writes a
+    /// negative number with U+2212 (MINUS SIGN), which Postgres reads as a column name
+    /// (<c>42703: column "−5306212924162610147" does not exist</c>), so no lock with a negative key
+    /// could ever be taken there.
+    /// </summary>
+    private static string Sql(long key) => key.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Whether a provider that takes no lock is expected to, or is one nobody has taught this.

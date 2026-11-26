@@ -60,6 +60,14 @@ public sealed record ScrapeDiagnosis
     /// it will do that: <see cref="ScrapeDiagnostician.AgainstThePlan"/>.
     /// </summary>
     public ApplyExpectation RemedyExpects { get; init; }
+
+    /// <summary>
+    /// The workload no monitor selects, where that is one of the <see cref="Findings"/>: its kind of
+    /// monitor and its title. The diagnosis reads monitors only, so "Prometheus was never told to
+    /// scrape it" is what it can say; the engine's row can know better (annotations, another job),
+    /// and <see cref="ScrapeDiagnostician.AgainstThePlan"/> then rewords that one finding.
+    /// </summary>
+    public (string Kind, string Title)? Unselected { get; init; }
 }
 
 /// <summary>
@@ -196,7 +204,8 @@ public sealed record ScrapeEvidence
     /// <summary>
     /// The pods a monitor ends at. For a PodMonitor the workload's own pods. For a ServiceMonitor
     /// every pod in the workload's namespace, for following its Services to them; read only where
-    /// two monitors reach that namespace, since only then can a pod be scraped twice.
+    /// two monitors reach that namespace, since only then can a pod be scraped twice. Only the
+    /// running ones with an address count, as for the engine: Prometheus scrapes no other.
     /// </summary>
     public IReadOnlyList<V1Pod> Pods { get; init; } = [];
 
@@ -255,7 +264,7 @@ public static class ScrapeDiagnostician
             {
                 null => Instead(Nothing + "EntKube's plan for this cluster has no row for it, so it keeps no monitor for it."),
                 { } row when Does(row.Change, diagnosis.RemedyExpects) => diagnosis,
-                { } row => Instead(row.Detail),
+                { } row => Instead(row.Detail) with { Findings = Reworded(diagnosis, row.State) },
             },
         };
 
@@ -268,6 +277,35 @@ public static class ScrapeDiagnostician
             ApplyExpectation.RemovesOurs => change is MonitorChange.Remove,
             _ => false,
         };
+    }
+
+    /// <summary>What the diagnosis can say of a workload no monitor selects, from the monitors alone.</summary>
+    private static string NeverTold(string kind, string title) =>
+        $"No {kind} on this cluster selects the metrics port of {title}, so Prometheus was never told to scrape it.";
+
+    /// <summary>
+    /// The findings, with "never told to scrape it" said the engine's way where the engine's row knows
+    /// Prometheus scrapes it without a monitor: by its pods' annotations, or by another job. The
+    /// remedy beside it is that row's own sentence, and the two said opposite things. Where the row
+    /// says nothing scrapes it, the finding is true and stands.
+    /// </summary>
+    private static List<string> Reworded(ScrapeDiagnosis diagnosis, MonitorState state)
+    {
+        if (diagnosis.Unselected is not (string kind, string title)) return diagnosis.Findings;
+
+        string start = $"No {kind} on this cluster selects the metrics port of {title}";
+        string? instead = state switch
+        {
+            MonitorState.Annotated => $"{start}. Its pods ask to be scraped by their prometheus.io annotations instead, "
+                + "which the Prometheus stack's annotation job takes.",
+            MonitorState.CoveredElsewhere => $"{start}, but Prometheus already scrapes it without one.",
+            MonitorState.PartlyCovered => $"{start}, but Prometheus scrapes part of it without one.",
+            _ => null,
+        };
+        if (instead is null) return diagnosis.Findings;
+
+        string neverTold = NeverTold(kind, title);
+        return [.. diagnosis.Findings.Select(f => f == neverTold ? instead : f)];
     }
 
     /// <summary>The remedy where the engine's plan could not be read: unknown, and never the button.</summary>
@@ -345,11 +383,12 @@ public static class ScrapeDiagnostician
         {
             List<string> blind = WhyPrometheusCannotLookHere(prometheus, workload, seen);
             List<string> findings = [.. blind, .. unread];
+            bool unselected = selecting.Count == 0 && !(workload.Labels.Count == 0 && seen.Live.Count == 0);
             if (selecting.Count == 0)
             {
-                findings.Add(workload.Labels.Count == 0 && seen.Live.Count == 0
-                    ? $"Which {kind} is its own cannot be told without its Services."
-                    : $"No {kind} on this cluster selects the metrics port of {workload.Title}, so Prometheus was never told to scrape it.");
+                findings.Add(unselected
+                    ? NeverTold(kind, workload.Title)
+                    : $"Which {kind} is its own cannot be told without its Services.");
             }
             findings.AddRange(doubts);
 
@@ -364,13 +403,14 @@ public static class ScrapeDiagnostician
                 RemedyExpects = workload.EntKubeMonitor is not null && applyCanHelp
                     ? ApplyExpectation.WritesOurs
                     : ApplyExpectation.None,
+                Unselected = unselected ? (kind, workload.Title) : null,
             };
         }
 
         // Per pod: two monitors double a workload only where both end at the same pod endpoint. A
         // PodMonitor for the primary and one for the replicas both select the database and name
         // the same port, and scrape nothing twice.
-        Dictionary<JsonNode, HashSet<(string Pod, int Port, string Path)>> reached =
+        Dictionary<JsonNode, HashSet<(string Address, string Path)>> reached =
             read.ToDictionary(m => m, m => PodEndpoints(m, workload, seen));
         List<JsonNode> doubling = [.. read.Where(m => read.Any(other =>
             other != m && reached[m].Overlaps(reached[other])))];
@@ -575,90 +615,56 @@ public static class ScrapeDiagnostician
     }
 
     /// <summary>
-    /// The live pod endpoints a monitor scrapes on the workload's metrics port, as pod, port and
-    /// path. A PodMonitor ends at the workload's pods its selector matches; a ServiceMonitor at the
-    /// pods behind the workload's Services its selector matches, through the Service port it names.
-    /// Only what is certain counts: a selector that cannot be evaluated against a pod or Service
-    /// reaches nothing here, so nothing is called doubled that might not be.
+    /// The live pod endpoints a monitor scrapes on the workload's metrics port, as pod address and
+    /// path. Where it ends is the engine's answer, <see cref="ScrapedEndpoints.OfForeign"/>: a
+    /// PodMonitor at the running pods it selects that declare the port, a ServiceMonitor through the
+    /// Service port it names to the running pods behind it, and a <c>targetPort</c> held against the
+    /// POD's container port by name or number, as prometheus-operator's relabelling does
+    /// (<c>__meta_kubernetes_pod_container_port_name</c> or <c>_number</c>). The diagnosis had a copy
+    /// of those rules that read <c>targetPort</c> as the Service's, and called a broker scraped twice
+    /// wired right.
+    ///
+    /// <para>The path is the diagnosis's own: the engine's answer is per pod port, so it is asked one
+    /// endpoint at a time and the endpoint's path is kept beside it. Only what is certain counts: a
+    /// selector that cannot be evaluated reaches nothing here, so nothing is called doubled that
+    /// might not be.</para>
     /// </summary>
-    private static HashSet<(string Pod, int Port, string Path)> PodEndpoints(
+    private static HashSet<(string Address, string Path)> PodEndpoints(
         JsonNode monitor, MonitoredWorkload workload, ScrapeEvidence seen)
     {
-        HashSet<(string Pod, int Port, string Path)> reached = [];
-        JsonNode? selector = monitor["spec"]?["selector"];
+        HashSet<(string Address, string Path)> reached = [];
+        if (monitor["spec"] is not JsonObject spec || spec[workload.Type.Endpoints] is not JsonArray listed) return reached;
 
-        if (workload.Type == MonitorType.Pod)
+        MonitorIdentity identity = new(
+            workload.Type == MonitorType.Pod ? MonitorKind.PodMonitor : MonitorKind.ServiceMonitor,
+            NamespaceOf(monitor), PlainName(monitor));
+        LiveNamespace ns = new(workload.Namespace, seen.Pods, seen.Services, []);
+
+        foreach (JsonNode? endpoint in listed)
         {
-            foreach (V1Pod pod in seen.Pods.Where(p => Selects(selector, LabelsOf(p.Metadata)) == true))
+            if (endpoint is not JsonObject) continue;
+
+            JsonObject alone = (JsonObject)spec.DeepClone();
+            alone[workload.Type.Endpoints] = new JsonArray(endpoint.DeepClone());
+            LiveMonitor one = new(identity, new Dictionary<string, string>(), new Dictionary<string, string>(), alone);
+
+            string path = Text(endpoint["path"]) ?? "/metrics";
+            foreach (string address in ScrapedEndpoints.OfForeign(one, ns).Certain)
             {
-                foreach ((string port, string path) in Endpoints(monitor, workload))
-                {
-                    if (PortOn(pod, port) is int number) reached.Add((pod.Metadata.Name, number, path));
-                }
-            }
-            return reached;
-        }
-
-        if (monitor["spec"]?[workload.Type.Endpoints] is not JsonArray listed) return reached;
-
-        foreach (V1Service service in seen.Services.Where(s => Selects(selector, LabelsOf(s.Metadata)) == true))
-        {
-            foreach (JsonNode? endpoint in listed)
-            {
-                string path = Text(endpoint?["path"]) ?? "/metrics";
-                string? named = Text(endpoint?["port"]);
-                string? target = Text(endpoint?["targetPort"]);
-
-                foreach (V1ServicePort port in service.Spec?.Ports ?? [])
-                {
-                    bool taken = named is not null
-                        ? port.Name == named
-                        : target is not null
-                          && (port.TargetPort?.Value == target || port.Port.ToString(CultureInfo.InvariantCulture) == target);
-                    if (!taken) continue;
-
-                    foreach (V1Pod pod in PodsBehind(service, seen.Pods))
-                    {
-                        if (TargetPortOn(pod, port) is int number && IsMetricsPort(workload, number))
-                            reached.Add((pod.Metadata.Name, number, path));
-                    }
-                }
+                if (PortOf(address) is int number && IsMetricsPort(workload, number)) reached.Add((address, path));
             }
         }
         return reached;
     }
 
-    /// <summary>
-    /// A port on one pod: a number as it is, a name as the pod declares it. A PodMonitor's port the
-    /// pod does not declare is not scraped there.
-    /// </summary>
-    private static int? PortOn(V1Pod pod, string port) =>
-        int.TryParse(port, NumberStyles.None, CultureInfo.InvariantCulture, out int number)
-            ? number
-            : ScrapedEndpoints.DeclaredPorts(pod).FirstOrDefault(p => p.Name == port)?.ContainerPort;
-
-    /// <summary>The pod port behind a Service port: its targetPort, by number or by the pod's own name for it.</summary>
-    private static int? TargetPortOn(V1Pod pod, V1ServicePort port)
-    {
-        string? target = port.TargetPort?.Value;
-        return string.IsNullOrEmpty(target) ? port.Port : PortOn(pod, target);
-    }
+    /// <summary>The port of an "ip:port" address, IPv6 included.</summary>
+    private static int? PortOf(string address) =>
+        int.TryParse(address[(address.LastIndexOf(':') + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out int port)
+            ? port
+            : null;
 
     private static bool IsMetricsPort(MonitoredWorkload workload, int number) =>
         workload.Ports.Count == 0 || workload.Ports.Any(p => p.Number == number);
-
-    /// <summary>The pods a Service sends to. One without a selector sends to addresses written by hand, which are not looked up.</summary>
-    private static IEnumerable<V1Pod> PodsBehind(V1Service service, IReadOnlyList<V1Pod> pods)
-    {
-        IDictionary<string, string>? selector = service.Spec?.Selector;
-        return selector is null || selector.Count == 0
-            ? []
-            : pods.Where(p => selector.All(s =>
-                p.Metadata?.Labels is { } labels && labels.TryGetValue(s.Key, out string? have) && have == s.Value));
-    }
-
-    private static Dictionary<string, string> LabelsOf(V1ObjectMeta? metadata) =>
-        metadata?.Labels is { } labels ? new(labels, StringComparer.Ordinal) : [];
 
     /// <summary>
     /// The endpoints a monitor scrapes on the workload's metrics port, as port and path. The path

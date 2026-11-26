@@ -151,14 +151,22 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         return new MonitorPlanRow(key, name, kind.ToString(), ns, null, state, change, detail, []);
     }
 
-    /// <summary>The engine's row for a Keycloak release, keyed the way the engine keys an installed keycloakx chart.</summary>
-    private MonitorPlanRow KeycloakRow(string ns, string release, MonitorState state, MonitorChange change, string detail)
-    {
-        string key = ScrapeTargetCatalog.For([new EntKube.Contracts.Catalog.InstalledComponent(
-            Guid.NewGuid(), cluster.TenantId, cluster.ClusterId, "prod", Guid.NewGuid(), "keycloak", "HelmChart",
+    /// <summary>An installed keycloakx component, as Catalog records it.</summary>
+    private EntKube.Contracts.Catalog.InstalledComponent KeycloakComponent(string? ns, string? release, string name = "keycloak") =>
+        new(Guid.NewGuid(), cluster.TenantId, cluster.ClusterId, "prod", Guid.NewGuid(), name, "HelmChart",
             EntKube.Contracts.Catalog.ComponentStatus.Installed, ns, release, "keycloakx", null, "", null, null,
-            DateTime.UnixEpoch)], [])[0].Key;
-        return new MonitorPlanRow(key, release, "Keycloak", ns, null, state, change, detail, []);
+            DateTime.UnixEpoch);
+
+    /// <summary>The engine's row for a Keycloak release, keyed the way the engine keys an installed keycloakx chart.</summary>
+    private MonitorPlanRow KeycloakRow(string ns, string release, MonitorState state, MonitorChange change, string detail) =>
+        KeycloakRow(KeycloakComponent(ns, release), state, change, detail);
+
+    /// <summary>The engine's row for this component: the catalog's own key for it.</summary>
+    private static MonitorPlanRow KeycloakRow(
+        EntKube.Contracts.Catalog.InstalledComponent component, MonitorState state, MonitorChange change, string detail)
+    {
+        string key = ScrapeTargetCatalog.For([component], [])[0].Key;
+        return new MonitorPlanRow(key, component.ReleaseName ?? "", "Keycloak", component.Namespace ?? "", null, state, change, detail, []);
     }
 
     /// <summary>The remedy the web/shop card shows once "Why is it empty?" has answered.</summary>
@@ -534,7 +542,7 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
 
         IRenderedComponent<KeycloakMonitoringPanel> cut = Render<KeycloakMonitoringPanel>(ps => ps
             .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId)
-            .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso"));
+            .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso").Add(p => p.Component, KeycloakComponent("iam", "sso")));
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Why is this empty?"));
         return cut;
     }
@@ -589,6 +597,36 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
         cut.Find("pre").TextContent.Should().NotContain("Press");
     }
 
+    /// <summary>
+    /// ⭐ The panel spelled the engine's key from what the Identity tab passes for the metrics
+    /// queries: a blank namespace read as "keycloak", a release of <c>ReleaseName ?? Name</c>. The
+    /// catalog keys the component by what it records (a blank release is the component's name, a
+    /// null namespace is empty), so for those the panel said the plan had no row, where the engine's
+    /// own row said why it writes nothing. The key is now the catalog's.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "sso", "keycloak", "sso")]
+    [InlineData("iam", "", "iam", "")]
+    public void The_keycloak_panel_finds_the_engines_row_by_the_catalogs_key_for_the_component(
+        string? recordedNamespace, string recordedRelease, string queriedNamespace, string queriedRelease)
+    {
+        EntKube.Contracts.Catalog.InstalledComponent component = KeycloakComponent(recordedNamespace, recordedRelease);
+        const string Detail = "The engine's own row for this Keycloak.";
+        monitors.Answer = () => Planned(KeycloakRow(component, MonitorState.NotExposed, MonitorChange.None, Detail));
+        cluster.ServeList($"/api/v1/namespaces/{queriedNamespace}/services", Labelled(queriedNamespace, "sso-keycloakx-http",
+            $"\"app.kubernetes.io/name\":\"keycloakx\",\"app.kubernetes.io/instance\":\"{queriedRelease}\",\"app.kubernetes.io/component\":\"http\""));
+
+        // What the Identity tab passes: its defaults for the queries, and the component itself.
+        IRenderedComponent<KeycloakMonitoringPanel> cut = Render<KeycloakMonitoringPanel>(ps => ps
+            .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId)
+            .Add(p => p.Namespace, queriedNamespace).Add(p => p.ReleaseName, queriedRelease)
+            .Add(p => p.Component, component));
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("Why is this empty?"));
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
+
+        cut.WaitForAssertion(() => cut.Find("pre").TextContent.Should().Be(Detail));
+    }
+
     [Fact]
     public void A_keycloak_diagnosis_that_could_not_read_the_monitors_keeps_the_panel_and_says_so()
     {
@@ -596,7 +634,7 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
 
         IRenderedComponent<KeycloakMonitoringPanel> cut = Render<KeycloakMonitoringPanel>(ps => ps
             .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId)
-            .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso"));
+            .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso").Add(p => p.Component, KeycloakComponent("iam", "sso")));
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Why is this empty?"));
         cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
 

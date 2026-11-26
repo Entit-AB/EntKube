@@ -785,8 +785,13 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         log.Should().Contain("apply", "skipping is not failing, so there is nothing to wait for");
     }
 
+    /// <summary>
+    /// The claim is held by an apply of this cluster, whose it cannot be told: this instance's own
+    /// sweep holds it on a connection of its own just as another instance would. So the message
+    /// says an apply is running, and does not blame another instance for this one's own pass.
+    /// </summary>
     [Fact]
-    public async Task Pressing_apply_while_another_instance_writes_changes_nothing_and_says_so()
+    public async Task Pressing_apply_while_an_apply_of_the_cluster_runs_changes_nothing_and_says_so()
     {
         ADatabaseWithoutAMonitor();
         Claims claims = new();
@@ -795,7 +800,8 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         KubernetesOperationResult<ScrapeMonitorPlan> result = await Instance(claims).ApplyAsync(world.TenantId, world.ClusterId);
 
         result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Contain("Another EntKube instance").And.Contain("Nothing was changed");
+        result.Error.Should().Be(
+            "An apply of the monitors on this cluster is already running. Nothing was changed; try again in a minute.");
         log.Should().BeEmpty();
     }
 
