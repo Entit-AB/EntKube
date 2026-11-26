@@ -583,12 +583,15 @@ else
         b.Busy = true;
         try
         {
-            KubernetesOperationResult<ScrapeDiagnosis> result =
+            // Where the remedy is the button, the engine's own row for this broker decides whether
+            // the button would do anything. A broker EntKube did not install is never sent to it.
+            KubernetesOperationResult<ScrapeDiagnosis> result = await ScrapeDiagnostician.CheckedAgainstThePlanAsync(
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
                     b.TenantId, ClusterId,
                     b.IsOperatorManaged
                         ? MonitoredWorkload.RabbitMQ(b.Name, b.Namespace)
-                        : MonitoredWorkload.ExternalRabbitMQ(b.StatefulSet, b.Namespace));
+                        : MonitoredWorkload.ExternalRabbitMQ(b.StatefulSet, b.Namespace)),
+                Monitors, b.TenantId, ClusterId, MonitorsApplied.BrokerKey(b.Namespace, b.Name));
 
             b.Diagnosis = result.IsSuccess ? result.Data : null;
             b.DiagnosisError = result.IsSuccess ? null : result.Error;

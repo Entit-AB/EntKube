@@ -1,13 +1,28 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using EntKube.Web.Services.ScrapeMonitors;
+using k8s.Models;
 
 namespace EntKube.Web.Services;
+
+/// <summary>What a remedy that sends the operator to "Apply monitors now" counts on the engine to do.</summary>
+public enum ApplyExpectation
+{
+    /// <summary>The remedy is not the button.</summary>
+    None,
+
+    /// <summary>The engine writes EntKube's own monitor: creates, updates or replaces it.</summary>
+    WritesOurs,
+
+    /// <summary>The engine removes EntKube's own monitor, because another one scrapes the same endpoint.</summary>
+    RemovesOurs,
+}
 
 /// <summary>
 /// Why a workload's metrics are missing, told from what is actually in the cluster: whether a
 /// monitor selects the workload, and whether Prometheus reads that monitor.
 /// </summary>
-public class ScrapeDiagnosis
+public sealed record ScrapeDiagnosis
 {
     /// <summary>A monitor selects the workload's metrics endpoint, whether or not Prometheus reads it.</summary>
     public bool MonitorExists { get; init; }
@@ -38,6 +53,13 @@ public class ScrapeDiagnosis
 
     /// <summary>The concrete next step, when there is one.</summary>
     public string? Remedy { get; init; }
+
+    /// <summary>
+    /// What the <see cref="Remedy"/> counts on "Apply monitors now" to do. The diagnosis reads the
+    /// monitors, not the engine's verdict, so this advice stands only once the engine's own row says
+    /// it will do that: <see cref="ScrapeDiagnostician.AgainstThePlan"/>.
+    /// </summary>
+    public ApplyExpectation RemedyExpects { get; init; }
 }
 
 /// <summary>
@@ -171,6 +193,16 @@ public sealed record ScrapeEvidence
     /// <summary>Labels of the workload's live pods or Services. Empty when none are there.</summary>
     public IReadOnlyList<Dictionary<string, string>> Live { get; init; } = [];
 
+    /// <summary>
+    /// The pods a monitor ends at. For a PodMonitor the workload's own pods. For a ServiceMonitor
+    /// every pod in the workload's namespace, for following its Services to them; read only where
+    /// two monitors reach that namespace, since only then can a pod be scraped twice.
+    /// </summary>
+    public IReadOnlyList<V1Pod> Pods { get; init; } = [];
+
+    /// <summary>The workload's live Services, for a ServiceMonitor. Their labels are <see cref="Live"/>.</summary>
+    public IReadOnlyList<V1Service> Services { get; init; } = [];
+
     /// <summary>The namespace of the Prometheus EntKube queries, to tell its resource from another one's.</summary>
     public required string PrometheusNamespace { get; init; }
 
@@ -188,6 +220,97 @@ public static class ScrapeDiagnostician
     /// <summary>The one remedy for a monitor that is missing or that Prometheus does not select.</summary>
     public const string ApplyMonitors =
         "Press \"Apply monitors now\". EntKube creates its own monitor and labels it the way this Prometheus asks for.";
+
+    /// <summary>The remedy where EntKube's own monitor is one of two that scrape the same pod endpoint.</summary>
+    public const string RemoveOurs =
+        "Press \"Apply monitors now\". EntKube removes its own monitor where another one already scrapes the endpoint.";
+
+    /// <summary>
+    /// The diagnosis held against the engine's own plan for the workload's row (keyed as
+    /// <see cref="ScrapeTargetCatalog"/> keys it). The diagnosis sees monitors, not what the engine
+    /// decides: it cannot see a NetworkPolicy that keeps Prometheus out, a database with no pods,
+    /// pods scraped by annotation, or a monitor of another name in the way. In each of those the
+    /// engine writes nothing, so the button the diagnosis sent the operator to changed nothing, and
+    /// the diagnosis then said the same again.
+    ///
+    /// <para>So the button stays the remedy only where the row's change is the one the remedy counts
+    /// on. Otherwise the row's own sentence is the remedy, which says what stops it. A plan that
+    /// could not be read says so, and never sends anybody to the button.</para>
+    /// </summary>
+    public static ScrapeDiagnosis AgainstThePlan(
+        ScrapeDiagnosis diagnosis, KubernetesOperationResult<ScrapeMonitorPlan> plan, string key)
+    {
+        if (diagnosis.RemedyExpects == ApplyExpectation.None) return diagnosis;
+
+        if (!plan.IsSuccess || plan.Data is not { } planned) return Instead(PlanUnknown(plan.Error));
+
+        const string Nothing = "\"Apply monitors now\" would change nothing here: ";
+        return planned.Scope switch
+        {
+            MonitorPlanScope.NoPrometheus => Instead(Nothing
+                + "EntKube did not install Prometheus on this cluster, so it keeps no monitors here."),
+            MonitorPlanScope.NoMonitorKinds => Instead(Nothing
+                + "this cluster has no PodMonitor or ServiceMonitor resource type yet."),
+            _ => planned.Rows.FirstOrDefault(r => r.Key == key) switch
+            {
+                null => Instead(Nothing + "EntKube's plan for this cluster has no row for it, so it keeps no monitor for it."),
+                { } row when Does(row.Change, diagnosis.RemedyExpects) => diagnosis,
+                { } row => Instead(row.Detail),
+            },
+        };
+
+        ScrapeDiagnosis Instead(string remedy) =>
+            diagnosis with { Remedy = remedy, RemedyExpects = ApplyExpectation.None };
+
+        static bool Does(MonitorChange change, ApplyExpectation expected) => expected switch
+        {
+            ApplyExpectation.WritesOurs => change is MonitorChange.Create or MonitorChange.Update or MonitorChange.Replace,
+            ApplyExpectation.RemovesOurs => change is MonitorChange.Remove,
+            _ => false,
+        };
+    }
+
+    /// <summary>The remedy where the engine's plan could not be read: unknown, and never the button.</summary>
+    public static string PlanUnknown(string? why) =>
+        "Whether \"Apply monitors now\" would help could not be told: EntKube's plan for this cluster could not be read"
+        + (string.IsNullOrWhiteSpace(why) ? "." : $" ({why.Trim().TrimEnd('.')}).");
+
+    /// <summary>
+    /// What the panels show: <paramref name="diagnosed"/>, held against the engine's plan, read now,
+    /// where its remedy is the button. Only then is the plan read: it reads every target's namespace
+    /// on the cluster.
+    /// </summary>
+    public static async Task<KubernetesOperationResult<ScrapeDiagnosis>> CheckedAgainstThePlanAsync(
+        KubernetesOperationResult<ScrapeDiagnosis> diagnosed, IScrapeMonitors monitors,
+        Guid tenantId, Guid clusterId, string key, CancellationToken ct = default)
+    {
+        if (!diagnosed.IsSuccess || diagnosed.Data is not { } diagnosis || diagnosis.RemedyExpects == ApplyExpectation.None)
+            return diagnosed;
+
+        KubernetesOperationResult<ScrapeMonitorPlan> plan;
+        try
+        {
+            plan = await monitors.PlanAsync(tenantId, clusterId, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // Resolving the cluster goes through the vault, which can throw before the engine's own
+            // error handling begins. That is "could not be told", not a reason to lose the diagnosis.
+            plan = KubernetesOperationResult<ScrapeMonitorPlan>.Failure(ex.Message);
+        }
+
+        return KubernetesOperationResult<ScrapeDiagnosis>.Success(AgainstThePlan(diagnosis, plan, key));
+    }
+
+    /// <summary>
+    /// Whether the pods behind a ServiceMonitor workload's Services have to be read: only where two
+    /// monitors of its kind reach its namespace, since only then can two of them end at one pod
+    /// endpoint. Elsewhere the namespace's pods are not read at all.
+    /// </summary>
+    public static bool NeedsPodsBehindServices(MonitoredWorkload workload, IReadOnlyList<JsonNode>? monitors) =>
+        workload.Type == MonitorType.Service
+        && monitors is not null
+        && monitors.Count(m => Reaches(m, workload.Namespace)) >= 2;
 
     public static ScrapeDiagnosis Diagnose(MonitoredWorkload workload, ScrapeEvidence seen)
     {
@@ -230,18 +353,28 @@ public static class ScrapeDiagnostician
             }
             findings.AddRange(doubts);
 
+            bool applyCanHelp = blind.Count == 0;
             return new ScrapeDiagnosis
             {
                 MonitorExists = selecting.Count > 0,
                 MonitorLabels = LabelsOf(OursFirst(selecting, workload)?["metadata"]?["labels"]),
                 PrometheusSelector = LabelsOf(selector?["matchLabels"]),
                 Findings = findings,
-                Remedy = Remedy(workload, prometheus, applyCanHelp: blind.Count == 0),
+                Remedy = Remedy(workload, prometheus, applyCanHelp),
+                RemedyExpects = workload.EntKubeMonitor is not null && applyCanHelp
+                    ? ApplyExpectation.WritesOurs
+                    : ApplyExpectation.None,
             };
         }
 
+        // Per pod: two monitors double a workload only where both end at the same pod endpoint. A
+        // PodMonitor for the primary and one for the replicas both select the database and name
+        // the same port, and scrape nothing twice.
+        Dictionary<JsonNode, HashSet<(string Pod, int Port, string Path)>> reached =
+            read.ToDictionary(m => m, m => PodEndpoints(m, workload, seen));
         List<JsonNode> doubling = [.. read.Where(m => read.Any(other =>
-            other != m && Endpoints(m, workload).Overlaps(Endpoints(other, workload))))];
+            other != m && reached[m].Overlaps(reached[other])))];
+        bool oursDoubles = doubling.Any(m => IsOurs(m, workload));
 
         // A doubled workload is worse than a missing one: its numbers are shown, and wrong.
         string headline = doubling.Count > 0
@@ -260,9 +393,10 @@ public static class ScrapeDiagnostician
             Remedy = doubling.Count == 0
                 ? "Scraping should be running. If metrics are still missing, look at Prometheus → Targets: "
                   + "a target listed as down points at the workload's metrics port, not at the wiring."
-                : doubling.Any(m => IsOurs(m, workload))
-                    ? "Press \"Apply monitors now\". EntKube removes its own monitor where another one already scrapes the endpoint."
+                : oursDoubles
+                    ? RemoveOurs
                     : "Delete all but one of them.",
+            RemedyExpects = oursDoubles ? ApplyExpectation.RemovesOurs : ApplyExpectation.None,
         };
 
         static ScrapeDiagnosis Nothing(string finding, string? remedy) =>
@@ -441,13 +575,99 @@ public static class ScrapeDiagnostician
     }
 
     /// <summary>
+    /// The live pod endpoints a monitor scrapes on the workload's metrics port, as pod, port and
+    /// path. A PodMonitor ends at the workload's pods its selector matches; a ServiceMonitor at the
+    /// pods behind the workload's Services its selector matches, through the Service port it names.
+    /// Only what is certain counts: a selector that cannot be evaluated against a pod or Service
+    /// reaches nothing here, so nothing is called doubled that might not be.
+    /// </summary>
+    private static HashSet<(string Pod, int Port, string Path)> PodEndpoints(
+        JsonNode monitor, MonitoredWorkload workload, ScrapeEvidence seen)
+    {
+        HashSet<(string Pod, int Port, string Path)> reached = [];
+        JsonNode? selector = monitor["spec"]?["selector"];
+
+        if (workload.Type == MonitorType.Pod)
+        {
+            foreach (V1Pod pod in seen.Pods.Where(p => Selects(selector, LabelsOf(p.Metadata)) == true))
+            {
+                foreach ((string port, string path) in Endpoints(monitor, workload))
+                {
+                    if (PortOn(pod, port) is int number) reached.Add((pod.Metadata.Name, number, path));
+                }
+            }
+            return reached;
+        }
+
+        if (monitor["spec"]?[workload.Type.Endpoints] is not JsonArray listed) return reached;
+
+        foreach (V1Service service in seen.Services.Where(s => Selects(selector, LabelsOf(s.Metadata)) == true))
+        {
+            foreach (JsonNode? endpoint in listed)
+            {
+                string path = Text(endpoint?["path"]) ?? "/metrics";
+                string? named = Text(endpoint?["port"]);
+                string? target = Text(endpoint?["targetPort"]);
+
+                foreach (V1ServicePort port in service.Spec?.Ports ?? [])
+                {
+                    bool taken = named is not null
+                        ? port.Name == named
+                        : target is not null
+                          && (port.TargetPort?.Value == target || port.Port.ToString(CultureInfo.InvariantCulture) == target);
+                    if (!taken) continue;
+
+                    foreach (V1Pod pod in PodsBehind(service, seen.Pods))
+                    {
+                        if (TargetPortOn(pod, port) is int number && IsMetricsPort(workload, number))
+                            reached.Add((pod.Metadata.Name, number, path));
+                    }
+                }
+            }
+        }
+        return reached;
+    }
+
+    /// <summary>
+    /// A port on one pod: a number as it is, a name as the pod declares it. A PodMonitor's port the
+    /// pod does not declare is not scraped there.
+    /// </summary>
+    private static int? PortOn(V1Pod pod, string port) =>
+        int.TryParse(port, NumberStyles.None, CultureInfo.InvariantCulture, out int number)
+            ? number
+            : ScrapedEndpoints.DeclaredPorts(pod).FirstOrDefault(p => p.Name == port)?.ContainerPort;
+
+    /// <summary>The pod port behind a Service port: its targetPort, by number or by the pod's own name for it.</summary>
+    private static int? TargetPortOn(V1Pod pod, V1ServicePort port)
+    {
+        string? target = port.TargetPort?.Value;
+        return string.IsNullOrEmpty(target) ? port.Port : PortOn(pod, target);
+    }
+
+    private static bool IsMetricsPort(MonitoredWorkload workload, int number) =>
+        workload.Ports.Count == 0 || workload.Ports.Any(p => p.Number == number);
+
+    /// <summary>The pods a Service sends to. One without a selector sends to addresses written by hand, which are not looked up.</summary>
+    private static IEnumerable<V1Pod> PodsBehind(V1Service service, IReadOnlyList<V1Pod> pods)
+    {
+        IDictionary<string, string>? selector = service.Spec?.Selector;
+        return selector is null || selector.Count == 0
+            ? []
+            : pods.Where(p => selector.All(s =>
+                p.Metadata?.Labels is { } labels && labels.TryGetValue(s.Key, out string? have) && have == s.Value));
+    }
+
+    private static Dictionary<string, string> LabelsOf(V1ObjectMeta? metadata) =>
+        metadata?.Labels is { } labels ? new(labels, StringComparer.Ordinal) : [];
+
+    /// <summary>
     /// The endpoints a monitor scrapes on the workload's metrics port, as port and path. The path
     /// counts: RabbitMQ's published monitor reads <c>/metrics/detailed</c> beside
     /// <c>/metrics</c>, and a second monitor on the other path doubles nothing.
     /// </summary>
-    private static HashSet<string> Endpoints(JsonNode monitor, MonitoredWorkload workload)
+    private static HashSet<(string Port, string Path)> Endpoints(JsonNode monitor, MonitoredWorkload workload)
     {
-        HashSet<string> endpoints = new(StringComparer.Ordinal);
+        HashSet<(string Port, string Path)> endpoints = [];
         if (monitor["spec"]?[workload.Type.Endpoints] is not JsonArray listed) return endpoints;
 
         foreach (JsonNode? endpoint in listed)
@@ -466,7 +686,7 @@ public static class ScrapeDiagnostician
                 port = known[0].ToString();
             }
 
-            endpoints.Add($"{port}{Text(endpoint?["path"]) ?? "/metrics"}");
+            endpoints.Add((port, Text(endpoint?["path"]) ?? "/metrics"));
         }
         return endpoints;
     }

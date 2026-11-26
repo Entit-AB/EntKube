@@ -36,12 +36,12 @@ else
             <div>
                 <span class="bi bi-exclamation-triangle me-1"></span>
                 <strong>@duplicates.Count endpoint@(duplicates.Count == 1 ? " is" : "s are") scraped by more than one job.</strong>
-                Every sum over @(duplicates.Count == 1 ? "its" : "their") series counts the same numbers once per job.
+                Every sum over @(duplicates.Count == 1 ? "its" : "their") series counts the same numbers once per scrape.
             </div>
             <ul class="mb-0 mt-1 ps-3">
                 @foreach (DuplicateScrape d in duplicates.Take(MaxDuplicatesListed))
                 {
-                    <li><span class="font-monospace">@d.Url</span> — @string.Join(", ", d.Pools)</li>
+                    <li><span class="font-monospace">@d.Url</span> — @string.Join(", ", d.Scrapes)</li>
                 }
                 @if (duplicates.Count > MaxDuplicatesListed)
                 {

@@ -1,6 +1,8 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using EntKube.Web.Services.ScrapeMonitors
 @inject PrometheusService PrometheusService
+@inject IScrapeMonitors Monitors
 
 @* ═══════════════════════════════════════════════════════════════════════════
    KeycloakMonitoringPanel — request throughput, latency, JVM and database-pool
@@ -47,7 +49,27 @@ else if (metrics is null || !metrics.HasData)
         </div>
         <div class="text-muted">
             Keycloak serves metrics on its management port (9000). Where kube-prometheus-stack is
-            installed on the cluster, EntKube creates the ServiceMonitor that scrapes them.
+            installed on the cluster, EntKube creates the ServiceMonitor that scrapes them, and puts a
+            missing one in place by itself every few minutes.
+        </div>
+        @* The wording agrees with ScrapeDiagnostician.ApplyMonitors, the remedy the diagnosis below
+           gives; the panel tests hold the button's name to it. *@
+        <div class="mt-2 d-flex align-items-center flex-wrap gap-2" data-apply>
+            <button class="btn btn-sm btn-primary" @onclick="ApplyMonitorsAsync" disabled="@busy">
+                <span class="bi bi-arrow-repeat me-1"></span>Apply monitors now
+            </button>
+            <span class="text-muted">
+                Applies the monitors of every database and component on this Kubernetes cluster, not only
+                this Keycloak's. EntKube creates its own monitor, labelled the way this Prometheus asks for,
+                and none where another monitor already scrapes Keycloak. It writes monitors and nothing
+                else: Keycloak itself is not touched.
+            </span>
+            @if (applied is { } said)
+            {
+                <div class="w-100 text-@said.Tone">
+                    <span class="bi @(said.Tone == "success" ? "bi-check-circle" : said.Tone == "danger" ? "bi-x-circle" : "bi-exclamation-triangle") me-1"></span>@said.Text
+                </div>
+            }
         </div>
         <div class="mt-2">
             <button class="btn btn-sm btn-outline-secondary" @onclick="DiagnoseAsync" disabled="@busy">
@@ -241,6 +263,9 @@ else
     /// "Prometheus query failed", which is about the metrics and would hide the button to try again.
     /// </summary>
     private string? diagnosisError;
+
+    /// <summary>What the last "Apply monitors now" came to, shown beside the button.</summary>
+    private MonitorsApplied? applied;
     private List<ChartView> charts = [];
     private bool isLoading = true;
     private bool busy;
@@ -322,14 +347,47 @@ else
         return result;
     }
 
+    /// <summary>The engine's key for this release, as ScrapeTargetCatalog keys an installed keycloakx chart.</summary>
+    private string EngineKey => MonitorsApplied.KeycloakKey(Namespace, ReleaseName);
+
+    /// <summary>
+    /// Has the engine apply this cluster's monitors now rather than on its next pass, then diagnoses
+    /// again, so what is shown is the cluster after the apply. The engine writes ServiceMonitors and
+    /// PodMonitors only.
+    /// </summary>
+    private async Task ApplyMonitorsAsync()
+    {
+        busy = true;
+        applied = null;
+        try
+        {
+            KubernetesOperationResult<ScrapeMonitorPlan> result = await Monitors.ApplyAsync(TenantId, ClusterId);
+            applied = MonitorsApplied.From(result, EngineKey);
+        }
+        catch (Exception ex)
+        {
+            applied = MonitorsApplied.Failed(ex.Message);
+        }
+        finally
+        {
+            busy = false;
+        }
+
+        // Read-only, and worth it after a failure too: it says what is on the cluster now.
+        await DiagnoseAsync();
+    }
+
     private async Task DiagnoseAsync()
     {
         busy = true;
         try
         {
-            KubernetesOperationResult<ScrapeDiagnosis> result =
+            // Where the remedy is the button, the engine's own row for this release decides whether
+            // the button would do anything.
+            KubernetesOperationResult<ScrapeDiagnosis> result = await ScrapeDiagnostician.CheckedAgainstThePlanAsync(
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
-                    TenantId, ClusterId, MonitoredWorkload.Keycloak(ReleaseName, Namespace));
+                    TenantId, ClusterId, MonitoredWorkload.Keycloak(ReleaseName, Namespace)),
+                Monitors, TenantId, ClusterId, EngineKey);
 
             diagnosis = result.IsSuccess ? result.Data : null;
             diagnosisError = result.IsSuccess ? null : result.Error;

@@ -60,11 +60,38 @@ public sealed class DuplicateScrapeTests : BunitContext
         ]).Should().BeEmpty();
     }
 
+    private static ScrapeTarget Target(string pool, string url, string job) =>
+        new() { Pool = pool, ScrapeUrl = url, Health = "up", Labels = new() { ["job"] = job } };
+
+    /// <summary>
+    /// ⭐ One ServiceMonitor that reaches a pod port through two Services: one pool, two targets, one
+    /// job label per Service. Prometheus merges targets whose labels are all the same, so two that
+    /// it lists are two scrapes, and every sum over them doubles.
+    /// </summary>
     [Fact]
-    public void One_pool_is_never_a_duplicate_of_itself()
+    public void One_endpoint_twice_in_one_pool_is_a_duplicate()
     {
-        DuplicateScrapes.Find([Target("a", "http://10.0.0.5:9187/metrics"), Target("a", "http://10.0.0.5:9187/metrics")])
-            .Should().BeEmpty();
+        DuplicateScrape d = DuplicateScrapes.Find(
+        [
+            Target("serviceMonitor/caches/redis/0", "http://10.0.0.5:9121/metrics", "sessions-leader"),
+            Target("serviceMonitor/caches/redis/0", "http://10.0.0.5:9121/metrics", "sessions-leader-metrics"),
+            Target("serviceMonitor/caches/redis/0", "http://10.0.0.6:9121/metrics", "sessions-leader"),
+        ]).Should().ContainSingle().Subject;
+
+        d.Url.Should().Be("http://10.0.0.5:9121/metrics");
+        d.Scrapes.Should().Equal(
+            new EndpointScrape("serviceMonitor/caches/redis/0", "sessions-leader"),
+            new EndpointScrape("serviceMonitor/caches/redis/0", "sessions-leader-metrics"));
+        d.Pools.Should().Equal("serviceMonitor/caches/redis/0");
+    }
+
+    /// <summary>A pool whose job label is the pool's own name is named once: the annotation job is.</summary>
+    [Fact]
+    public void A_scrape_is_named_by_its_pool_and_by_its_job_only_where_the_two_differ()
+    {
+        new EndpointScrape("kubernetes-pods-annotated", "kubernetes-pods-annotated").ToString().Should().Be("kubernetes-pods-annotated");
+        new EndpointScrape("podMonitor/data/shop/0", null).ToString().Should().Be("podMonitor/data/shop/0");
+        new EndpointScrape("serviceMonitor/mq/a/0", "orders").ToString().Should().Be("serviceMonitor/mq/a/0 (job orders)");
     }
 
     // ──────── Reading the list ────────
@@ -106,8 +133,11 @@ public sealed class DuplicateScrapeTests : BunitContext
     }
 
     private static string Active(params (string Pool, string Url)[] targets) =>
+        Active([.. targets.Select(t => (t.Pool, t.Url, t.Pool))]);
+
+    private static string Active(params (string Pool, string Url, string Job)[] targets) =>
         "{\"status\":\"success\",\"data\":{\"activeTargets\":["
-        + string.Join(",", targets.Select(t => $"{{\"scrapePool\":\"{t.Pool}\",\"scrapeUrl\":\"{t.Url}\",\"health\":\"up\",\"labels\":{{}}}}"))
+        + string.Join(",", targets.Select(t => $"{{\"scrapePool\":\"{t.Pool}\",\"scrapeUrl\":\"{t.Url}\",\"health\":\"up\",\"labels\":{{\"job\":\"{t.Job}\"}}}}"))
         + "]}}";
 
     [Fact]
@@ -122,6 +152,21 @@ public sealed class DuplicateScrapeTests : BunitContext
         banner.Should().Contain("1 endpoint is scraped by more than one job")
             .And.Contain("http://10.0.0.7:15692/metrics")
             .And.Contain("serviceMonitor/mq/orders-metrics/0").And.Contain("kubernetes-pods-annotated");
+    }
+
+    /// <summary>Each scrape is named by its pool and its job: in one pool, the job is what tells them apart.</summary>
+    [Fact]
+    public void The_panel_names_both_jobs_of_an_endpoint_doubled_inside_one_pool()
+    {
+        cluster.Targets = Active(
+            ("serviceMonitor/caches/redis/0", "http://10.0.0.5:9121/metrics", "sessions-leader"),
+            ("serviceMonitor/caches/redis/0", "http://10.0.0.5:9121/metrics", "sessions-leader-metrics"));
+
+        string banner = Panel().Find("[data-duplicates]").TextContent;
+
+        banner.Should().Contain("1 endpoint is scraped by more than one job")
+            .And.Contain("serviceMonitor/caches/redis/0 (job sessions-leader)")
+            .And.Contain("serviceMonitor/caches/redis/0 (job sessions-leader-metrics)");
     }
 
     [Fact]

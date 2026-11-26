@@ -1290,11 +1290,24 @@ public class PrometheusService(
 
         Task<List<JsonNode>?> monitors = ListMonitoringResourcesAsync(k8s, type.Plural, $"the {type.Kind}s", ct);
         Task<List<JsonNode>?> prometheuses = ListMonitoringResourcesAsync(k8s, "prometheuses", "the Prometheus resource", ct);
-        Task<List<Dictionary<string, string>>> live = type == MonitorType.Pod
-            ? ReadPodLabelsAsync(k8s, workload, ct)
-            : ReadServiceLabelsAsync(k8s, workload, ct);
+        Task<List<V1Pod>> workloadPods = type == MonitorType.Pod
+            ? ReadWorkloadPodsAsync(k8s, workload, ct)
+            : Task.FromResult<List<V1Pod>>([]);
+        Task<List<V1Service>> services = type == MonitorType.Service
+            ? ReadWorkloadServicesAsync(k8s, workload, ct)
+            : Task.FromResult<List<V1Service>>([]);
 
-        await Task.WhenAll(monitors, prometheuses, live);
+        await Task.WhenAll(monitors, prometheuses, workloadPods, services);
+
+        // A ServiceMonitor's pods are behind its Services, and only matter where two monitors could
+        // end at the same one. They are read only then, so no other diagnosis pays for the list call.
+        List<V1Pod> pods = await workloadPods;
+        if (ScrapeDiagnostician.NeedsPodsBehindServices(workload, await monitors))
+        {
+            V1PodList inNamespace = await ReadAsync($"the pods in {workload.Namespace}",
+                () => k8s.CoreV1.ListNamespacedPodAsync(workload.Namespace, cancellationToken: ct), ct);
+            pods = [.. inNamespace.Items];
+        }
 
         // Only a selector that asks for namespace labels needs them; a kubeconfig that may not
         // list namespaces still gets its answer on every other cluster.
@@ -1312,7 +1325,11 @@ public class PrometheusService(
             Monitors = await monitors,
             Prometheuses = await prometheuses,
             NamespaceLabels = namespaceLabels,
-            Live = await live,
+            Live = type == MonitorType.Pod
+                ? [.. pods.Select(p => LabelsOf(p.Metadata))]
+                : [.. (await services).Select(s => LabelsOf(s.Metadata))],
+            Pods = pods,
+            Services = await services,
             PrometheusNamespace = config.Namespace,
             PrometheusService = config.ServiceName,
         };
@@ -1342,7 +1359,7 @@ public class PrometheusService(
             }
         }, ct);
 
-    private static async Task<List<Dictionary<string, string>>> ReadPodLabelsAsync(
+    private static async Task<List<V1Pod>> ReadWorkloadPodsAsync(
         Kubernetes k8s, MonitoredWorkload workload, CancellationToken ct)
     {
         V1PodList pods = await ReadAsync($"the pods in {workload.Namespace}",
@@ -1351,14 +1368,14 @@ public class PrometheusService(
                 labelSelector: string.Join(",", workload.Labels.Select(l => $"{l.Key}={l.Value}")),
                 cancellationToken: ct), ct);
 
-        return [.. pods.Items.Select(p => LabelsOf(p.Metadata))];
+        return [.. pods.Items];
     }
 
     /// <summary>
     /// The workload's Services: those carrying its labels, or — where only its own chart knows the
     /// labels — those that send traffic to its StatefulSet's pods.
     /// </summary>
-    private static async Task<List<Dictionary<string, string>>> ReadServiceLabelsAsync(
+    private static async Task<List<V1Service>> ReadWorkloadServicesAsync(
         Kubernetes k8s, MonitoredWorkload workload, CancellationToken ct)
     {
         V1ServiceList services = await ReadAsync($"the Services in {workload.Namespace}",
@@ -1367,8 +1384,7 @@ public class PrometheusService(
         if (workload.StatefulSet is not { } statefulSet)
         {
             return [.. services.Items
-                .Select(s => LabelsOf(s.Metadata))
-                .Where(labels => workload.Labels.All(l => labels.GetValueOrDefault(l.Key) == l.Value))];
+                .Where(s => workload.Labels.All(l => LabelsOf(s.Metadata).GetValueOrDefault(l.Key) == l.Value))];
         }
 
         Dictionary<string, string>? podLabels = await ReadAsync($"StatefulSet {statefulSet}", async () =>
@@ -1389,8 +1405,7 @@ public class PrometheusService(
             ? []
             : [.. services.Items
                 .Where(s => s.Spec?.Selector is { Count: > 0 } selector
-                            && selector.All(l => podLabels.GetValueOrDefault(l.Key) == l.Value))
-                .Select(s => LabelsOf(s.Metadata))];
+                            && selector.All(l => podLabels.GetValueOrDefault(l.Key) == l.Value))];
     }
 
     private static Dictionary<string, string> LabelsOf(V1ObjectMeta? metadata) =>
