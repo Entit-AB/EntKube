@@ -64,9 +64,12 @@ public static class ScrapeTargetCatalog
             [
                 // podRole is not decoration: PgBouncer pooler pods carry the same cnpg.io/cluster
                 // and a port of the same name, so without it their metrics mix into the database's.
+                // The job is the one the operator's own PodMonitor gives (namespace/cluster), so the
+                // series stay the same ones when ours takes over from it.
                 Data(service, "cnpg", "PostgreSQL", MonitorKind.PodMonitor, $"entkube-cnpg-{service.Name}",
                     LabelSelector.Of(("cnpg.io/cluster", service.Name), ("cnpg.io/podRole", "instance")),
-                    new ScrapeEndpointSpec("metrics", HttpsWhenContainerArgument: "--metrics-port-tls")),
+                    new ScrapeEndpointSpec("metrics", HttpsWhenContainerArgument: "--metrics-port-tls", Relabelings:
+                        [new ScrapeRelabeling(TargetLabel: "job", Replacement: $"{service.Namespace}/{service.Name}")])),
             ],
 
             ManagedServiceKind.Redis =>

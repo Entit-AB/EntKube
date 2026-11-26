@@ -161,6 +161,7 @@ public static partial class ScrapeMonitorManifest
                 }
 
                 if (relabeling.TargetLabel is not null) rule["targetLabel"] = relabeling.TargetLabel;
+                if (relabeling.Replacement is not null) rule["replacement"] = relabeling.Replacement;
 
                 rules.Add(rule);
             }

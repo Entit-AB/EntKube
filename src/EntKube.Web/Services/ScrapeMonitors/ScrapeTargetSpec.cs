@@ -21,7 +21,8 @@ public sealed record ScrapeRelabeling(
     IReadOnlyList<string>? SourceLabels = null,
     string? TargetLabel = null,
     string? Regex = null,
-    string? Action = null);
+    string? Action = null,
+    string? Replacement = null);
 
 /// <summary>One port of a target, and how it is scraped.</summary>
 /// <param name="Port">
