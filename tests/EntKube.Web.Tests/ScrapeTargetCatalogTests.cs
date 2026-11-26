@@ -29,7 +29,7 @@ public class ScrapeTargetCatalogTests
     private const string C = "app.kubernetes.io/component";
 
     [Theory]
-    [InlineData(ManagedServiceKind.Postgres, "cnpg.io/cluster=x, cnpg.io/podRole=instance", "PodMonitor", "entkube-cnpg-x", "metrics/metrics")]
+    [InlineData(ManagedServiceKind.Postgres, "cnpg.io/cluster=x, cnpg.io/podRole=instance", "PodMonitor", "entkube-cnpg-x", "metrics/metrics relabel")]
     [InlineData(ManagedServiceKind.Redis, "redis_setup_type=cluster, app in (x-leader, x-follower)", "PodMonitor", "entkube-redis-x", "redis-exporter/metrics")]
     [InlineData(ManagedServiceKind.RabbitMq, $"{N}=x, {C}=rabbitmq", "ServiceMonitor", "x-metrics", "prometheus/metrics + prometheus-tls/metrics https")]
     [InlineData(ManagedServiceKind.Kafka, "strimzi.io/cluster=x, strimzi.io/kind=Kafka", "PodMonitor", "entkube-kafka-x", "tcp-prometheus/metrics relabel")]

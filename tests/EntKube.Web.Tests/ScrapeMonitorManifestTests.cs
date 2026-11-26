@@ -129,6 +129,48 @@ public class ScrapeMonitorManifestTests
         world.Plan().HasChanges.Should().BeFalse();
     }
 
+    /// <summary>
+    /// When the CNPG operator's own PodMonitor is switched off, ours takes over, and the series keep
+    /// who they are: prometheus-operator names a PodMonitor's job namespace/name, which for the
+    /// operator's is namespace/cluster (live: <c>job="databases/orders"</c> for orders in databases).
+    /// Ours would be databases/entkube-cnpg-orders, a new series for every query and every rate()
+    /// across the handover. A relabelling of job runs after the operator's own, so it wins.
+    /// </summary>
+    [Fact]
+    public void The_CNPG_monitor_gives_its_series_the_job_the_operators_own_monitor_gives_them()
+    {
+        Applied();
+        LiveMonitor operators = world.CnpgOperatorsPodMonitor("orders");
+
+        JsonArray rules = desired["spec"]!["podMetricsEndpoints"]![0]!["relabelings"]!.AsArray();
+
+        rules.Should().ContainSingle();
+        rules[0]!.ToJsonString().Should().Be("""{"targetLabel":"job","replacement":"databases/orders"}""");
+        rules[0]!["replacement"]!.GetValue<string>()
+            .Should().Be($"{operators.Identity.Namespace}/{operators.Identity.Name}");
+        ScrapeMonitorManifest.Render([desired]).Should().Contain("replacement: \"databases/orders\"");
+    }
+
+    /// <summary>The API server fills in action: replace on it; that is no difference.</summary>
+    [Fact]
+    public void The_CNPG_monitor_with_the_API_servers_default_is_not_applied_again()
+    {
+        LiveMonitor live = Applied();
+
+        live.Spec["podMetricsEndpoints"]![0]!["relabelings"]![0]!["action"]!.GetValue<string>().Should().Be("replace");
+        Difference(live).Should().Be(MonitorDifference.None);
+        world.Plan().HasChanges.Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_CNPG_monitor_whose_job_was_changed_is_noticed()
+    {
+        LiveMonitor live = Applied();
+        live.Spec["podMetricsEndpoints"]![0]!["relabelings"]![0]!["replacement"] = "databases/entkube-cnpg-orders";
+
+        Difference(live).Should().Be(MonitorDifference.Apply);
+    }
+
     [Fact]
     public void Nor_is_one_an_operator_has_tuned()
     {
