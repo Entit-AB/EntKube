@@ -258,11 +258,25 @@ public class ScrapeMonitorService(
     /// <summary>
     /// The cluster's Prometheus as the release Catalog records. The namespace is the one its queries
     /// go to, which a component's configuration can move.
+    ///
+    /// <para><b>Whether that namespace is recorded at all.</b> GetPrometheusConfig fills a column that is
+    /// not there with its default (monitoring), and the engine looks for Prometheus there. A SeaweedFS apply
+    /// does not: it opens its metrics port to Prometheus only by a namespace somebody recorded, the column
+    /// or a namespace in the component's configuration, and to nothing otherwise. That is asked here the
+    /// way the apply asks it (ComponentLifecycleService.PrometheusNamespaceToAdmit), before the default is
+    /// filled in, so a row never advises a re-apply that opens nothing.</para>
     /// </summary>
     private static PrometheusRelease ReleaseOf(InstalledComponent prometheus)
-        => new(
+    {
+        string column = string.IsNullOrWhiteSpace(prometheus.Namespace) ? "" : prometheus.Namespace;
+        bool recorded = !string.IsNullOrWhiteSpace(
+            PrometheusService.GetPrometheusConfig(prometheus with { Namespace = column }).Namespace);
+
+        return new(
             PrometheusService.GetPrometheusConfig(prometheus).Namespace,
-            string.IsNullOrWhiteSpace(prometheus.ReleaseName) ? prometheus.Name : prometheus.ReleaseName);
+            string.IsNullOrWhiteSpace(prometheus.ReleaseName) ? prometheus.Name : prometheus.ReleaseName,
+            recorded);
+    }
 
     /// <summary>
     /// Deletes, then applies: one call each, and only for what differs.
@@ -404,10 +418,11 @@ public static class ScrapeMonitorClaim
     /// The Postgres key for one cluster. Derived and not stored, so every instance asks for the same
     /// number; from SHA-256 and not <c>GetHashCode</c>, which is different in every process.
     ///
-    /// <para><b>Never negative.</b> <see cref="AdvisoryLock"/> writes the key into the statement in
-    /// the current culture, and Swedish writes a minus as U+2212, which Postgres reads as the name of
-    /// a column: half of all clusters could never be claimed. A key without a sign reads the same in
-    /// every culture.</para>
+    /// <para><b>Never negative.</b> <see cref="AdvisoryLock"/> writes the key into the statement as
+    /// text, in the invariant culture. It used the current one, and Swedish writes a minus as U+2212,
+    /// which Postgres reads as the name of a column, so half of all clusters could never be claimed.
+    /// The sign bit stays clear all the same: a key without a sign is the same text whoever formats
+    /// it.</para>
     /// </summary>
     public static long Key(Guid clusterId)
         => BinaryPrimitives.ReadInt64BigEndian(SHA256.HashData(Encoding.UTF8.GetBytes(Resource(clusterId))))

@@ -47,6 +47,16 @@ public static class ScrapeTargetCatalog
         ];
 
     /// <summary>
+    /// The targets of one component, whatever its status: what its monitors are called does not depend
+    /// on it. None for a component the cluster provides. For <see cref="ScrapeMonitorIdentity"/>.
+    /// </summary>
+    internal static IEnumerable<ScrapeTargetSpec> PartsOf(InstalledComponent component)
+        => component.ComponentType == ClusterProvidedComponents.ComponentType ? [] : InstalledPart(component);
+
+    /// <summary>The targets of one data service, whatever its status. For <see cref="ScrapeMonitorIdentity"/>.</summary>
+    internal static IEnumerable<ScrapeTargetSpec> PartsOf(ManagedServiceSummary service) => DataService(service);
+
+    /// <summary>
     /// Whether a component is one whose labels follow from EntKube's own install. A component the
     /// cluster provides (a managed Kubernetes' own metrics-server) is somebody else's release under
     /// a name EntKube recorded, so no chart convention holds for it.
@@ -382,10 +392,11 @@ public static class ScrapeTargetCatalog
         {
             // The chart owns its NetworkPolicies. What opens them to Prometheus is the rule EntKube adds
             // to the release's values when SeaweedFS is applied on a cluster with Prometheus, which a
-            // SeaweedFS installed before Prometheus never got.
+            // SeaweedFS installed before Prometheus never got. Whether that apply would open it to the
+            // Prometheus that runs is the planner's to say: it knows what Catalog records and what is live.
             WhenBlocked = "The SeaweedFS chart owns that policy, and an edit to it by hand is undone by its next "
-                + "upgrade. Re-apply SeaweedFS and EntKube adds the rule that lets Prometheus in, then picks it up "
-                + "by itself.",
+                + "upgrade.",
+            OpenedByApplyOf = "SeaweedFS",
         };
 
     private static ScrapeTargetSpec Part(

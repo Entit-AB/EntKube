@@ -293,14 +293,17 @@ public class ScrapeTargetCatalogTests
 
     /// <summary>
     /// SeaweedFS's chart owns its NetworkPolicies and undoes an edit to them on its next upgrade. What
-    /// lets Prometheus in is the rule EntKube adds when SeaweedFS is applied, so that is the remedy.
+    /// lets Prometheus in is the rule EntKube adds when SeaweedFS is applied; whether a re-apply would add
+    /// one that lets the running Prometheus in is the planner's to say (it knows what Catalog records and
+    /// what is live), so the catalog names the component and says only who owns the policy.
     /// </summary>
     [Fact]
-    public void Every_part_of_SeaweedFS_says_to_re_apply_it_when_Prometheus_is_kept_out()
+    public void Every_part_of_SeaweedFS_is_opened_by_applying_it_when_Prometheus_is_kept_out()
     {
         world.Component("seaweedfs", "seaweedfs", "seaweedfs");
 
-        world.Specs().Should().HaveCount(4).And.OnlyContain(t => t.WhenBlocked != null
-            && t.WhenBlocked.Contains("Re-apply SeaweedFS") && t.WhenBlocked.EndsWith('.'));
+        world.Specs().Should().HaveCount(4).And.OnlyContain(t => t.OpenedByApplyOf == "SeaweedFS"
+            && t.WhenBlocked != null && t.WhenBlocked.Contains("owns that policy") && t.WhenBlocked.EndsWith('.')
+            && !t.WhenBlocked.Contains("Re-apply"));
     }
 }

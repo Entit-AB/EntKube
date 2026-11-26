@@ -128,6 +128,53 @@ public class ScrapeMonitorPlannerTests
         metadata["annotations"]!["entkube.io/scrape-owner"]!.GetValue<string>().Should().Be("cnpg/databases/orders");
     }
 
+    /// <summary>
+    /// owned-rule: the labels that make a monitor EntKube's are not a Prometheus selector's to set. One that
+    /// selects monitors by app.kubernetes.io/managed-by=helm would have had ours written as helm's, and a
+    /// handover that looks for EntKube's by those labels would not find it. EntKube writes no monitor that
+    /// gives them up; the row says why and what to change, and one of ours already there stays as it is.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"matchLabels":{"app.kubernetes.io/managed-by":"helm"}}""", "app.kubernetes.io/managed-by")]
+    [InlineData("""{"matchExpressions":[{"key":"app.kubernetes.io/managed-by","operator":"In","values":["Helm"]}]}""",
+        "app.kubernetes.io/managed-by")]
+    [InlineData("""{"matchLabels":{"entkube.io/scrape-monitor":"another-cluster"}}""", "entkube.io/scrape-monitor")]
+    [InlineData("""{"matchExpressions":[{"key":"entkube.io/scrape-monitor","operator":"DoesNotExist"}]}""", "entkube.io/scrape-monitor")]
+    public void A_Prometheus_that_selects_by_a_label_EntKube_owns_its_monitors_by_gets_none_of_ours(string selector, string label)
+    {
+        world.Prometheus($$"""
+            {"serviceMonitorSelector":{},"serviceMonitorNamespaceSelector":{},"podMonitorNamespaceSelector":{},
+             "podMonitorSelector":{{selector}}}
+            """);
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        MonitorPlanRow row = OnlyRow(plan);
+        row.State.Should().Be(MonitorState.NotSelectable);
+        row.Change.Should().Be(MonitorChange.None);
+        row.Detail.Should().Contain(label).And.Contain("how EntKube tells its own monitors");
+        plan.Apply.Should().BeEmpty();
+
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+        world.Plan().HasChanges.Should().BeFalse("one of ours already there is neither rewritten nor removed");
+    }
+
+    /// <summary>A selector that asks for EntKube's own values of those labels is no conflict.</summary>
+    [Fact]
+    public void A_Prometheus_that_selects_by_EntKubes_own_values_of_them_gets_ours()
+    {
+        world.Prometheus("""
+            {"serviceMonitorSelector":{},"serviceMonitorNamespaceSelector":{},"podMonitorNamespaceSelector":{},
+             "podMonitorSelector":{"matchLabels":{"app.kubernetes.io/managed-by":"entkube"}}}
+            """);
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+
+        OnlyRow(world.Plan()).Change.Should().Be(MonitorChange.Create);
+    }
+
     [Fact]
     public void Each_kind_of_monitor_gets_its_own_selectors_labels()
     {
@@ -619,6 +666,79 @@ public class ScrapeMonitorPlannerTests
         plan.HasChanges.Should().BeFalse();
     }
 
+    /// <summary>
+    /// istio-keys: pilot-agent reads the record with Go's encoding/json, which matches a key to a field
+    /// ignoring case (decode.go, "preferring an exact match but also accepting a case-insensitive match";
+    /// fold.go folds as bytes.EqualFold does, so the long s is an s). A record whose Scrape is "false" is
+    /// one the agent merges nothing for, and ours is the scrape and stays.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"Scrape":"false","port":"9187"}""", "Scrape is the scrape field to Go")]
+    [InlineData("""{"SCRAPE":"false","path":"/metrics","port":"9187"}""", "any case is the field")]
+    [InlineData("""{"\u017Fcrape":"false","port":"9187"}""", "Go folds the long s to S, as bytes.EqualFold does")]
+    public void Istio_reads_the_records_keys_as_go_does_and_merges_nothing_said_false_to(string original, string because)
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), original);
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed, because);
+        plan.Prune.Should().BeEmpty(because);
+    }
+
+    /// <summary>The same rule the other way: a port or a target given in another case is still the one merged.</summary>
+    [Theory]
+    [InlineData("""{"scrape":"true","Port":"9187"}""", "Port is the port field to Go")]
+    [InlineData("""{"Targets":[{"Port":"9187","PATH":"/metrics"},{"port":"8000"}]}""", "Targets and their fields in any case")]
+    public void Istio_merges_a_port_its_record_gives_in_any_case(string original, string because)
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), original);
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere, because);
+        plan.Prune.Should().Equal([Pods("databases", "entkube-cnpg-orders")], because);
+    }
+
+    /// <summary>
+    /// istio-keys: a record that gives one field twice, in one spelling or in two that Go takes for the same
+    /// field, is not read as anything. Go would decode it (a later string is written over an earlier one, and
+    /// a later target list is decoded into the earlier one element by element), but that is the decoder's
+    /// accident, not anything the record says, and EntKube does not copy it. The parser used to throw on an
+    /// exact repeat, which failed the whole cluster's plan. Now it is unknown for that pod only: its row
+    /// says so, ours is neither made nor removed for it, and every other target is planned as ever.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"scrape":"true","scrape":"false","port":"9187"}""")]
+    [InlineData("""{"scrape":"false","Scrape":"true","port":"9187"}""")]
+    [InlineData("""{"port":"9187","targets":[{"port":"9187","Port":"8000"}]}""")]
+    [InlineData("""{"port":"9187","targets":[],"Targets":[{"port":"9187"}]}""")]
+    public void A_record_that_says_a_field_twice_is_unknown_for_its_pod_alone(string original)
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), original);
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+        world.DataService(ManagedServiceKind.Postgres, "databases", "billing");
+        world.CnpgPod("billing");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        MonitorPlanRow orders = plan.Rows.Single(r => r.Title == "orders");
+        orders.State.Should().Be(MonitorState.NotSelectable);
+        orders.Change.Should().Be(MonitorChange.None);
+        orders.Detail.Should().Contain("Istio's agent in pod orders-1").And.Contain("cannot be read");
+        plan.Prune.Should().BeEmpty("ours stays while whether the agent doubles it cannot be told");
+        plan.Rows.Single(r => r.Title == "billing").State.Should().Be(MonitorState.Managed);
+        plan.Apply.Select(a => a.Identity).Should().Equal(Pods("databases", "entkube-cnpg-billing"));
+    }
+
     [Fact]
     public void A_pod_that_asks_not_to_be_scraped_is_not_annotated()
     {
@@ -734,6 +854,65 @@ public class ScrapeMonitorPlannerTests
                          "ports":[{"port":9327,"protocol":"TCP"}]}]}
             """);
         Filer().State.Should().Be(MonitorState.Managed, "what one policy opens, no other closes");
+    }
+
+    /// <summary>The filer behind the chart's own policy, which lets in only the release's own pods.</summary>
+    private MonitorPlanRow BlockedFiler()
+    {
+        world.Component("seaweedfs", "seaweedfs", "seaweedfs");
+        world.SeaweedFiler();
+        world.Policy("seaweedfs", """
+            {"podSelector":{"matchLabels":{"app.kubernetes.io/component":"filer"}},"policyTypes":["Ingress"],
+             "ingress":[{"from":[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"seaweedfs"}}}],
+                         "ports":[{"port":8888,"protocol":"TCP"},{"port":9327,"protocol":"TCP"}]}]}
+            """);
+        ScrapeMonitorPlan plan = world.Plan();
+        plan.HasChanges.Should().BeFalse();
+        return plan.Rows.Single(r => r.Kind == "SeaweedFS filer");
+    }
+
+    /// <summary>
+    /// seaweed-row-text: with no namespace recorded for the kube-prometheus-stack component, a SeaweedFS apply
+    /// opens nothing (a guessed namespace would let somebody else's pods at the port that serves pprof). The
+    /// row must not send the operator to a re-apply that does nothing, but to the record that is missing.
+    /// </summary>
+    [Fact]
+    public void A_blocked_SeaweedFS_where_no_Prometheus_namespace_is_recorded_is_not_sent_to_a_reapply()
+    {
+        world.RecordedPrometheus = new PrometheusRelease("monitoring", ScrapeWorld.Release, NamespaceRecorded: false);
+
+        MonitorPlanRow filer = BlockedFiler();
+
+        filer.State.Should().Be(MonitorState.BlockedByNetworkPolicy);
+        filer.Detail.Should().NotContain("Re-apply SeaweedFS and EntKube adds the rule")
+            .And.Contain("does not know which namespace Prometheus runs in")
+            .And.Contain("opens nothing")
+            .And.Contain("Record the namespace on the kube-prometheus-stack component");
+    }
+
+    /// <summary>
+    /// seaweed-row-text: the rule a SeaweedFS apply adds names the namespace recorded for Prometheus. Where the
+    /// live Prometheus runs elsewhere, that rule lets in nobody that scrapes, and the row says which two
+    /// namespaces disagree rather than advise the re-apply.
+    /// </summary>
+    [Fact]
+    public void A_blocked_SeaweedFS_whose_recorded_Prometheus_namespace_is_not_where_it_runs_is_told_so()
+    {
+        world.RecordedPrometheus = new PrometheusRelease("observability", ScrapeWorld.Release);
+
+        MonitorPlanRow filer = BlockedFiler();
+
+        filer.State.Should().Be(MonitorState.BlockedByNetworkPolicy);
+        filer.Detail.Should().NotContain("Re-apply SeaweedFS and EntKube adds the rule")
+            .And.Contain("observability").And.Contain("runs in monitoring")
+            .And.Contain("Correct the namespace recorded on the kube-prometheus-stack component");
+    }
+
+    /// <summary>Where the record and the live Prometheus agree, the re-apply is what adds the rule.</summary>
+    [Fact]
+    public void A_blocked_SeaweedFS_where_the_record_is_right_is_sent_to_the_reapply()
+    {
+        BlockedFiler().Detail.Should().Contain("Re-apply SeaweedFS and EntKube adds the rule that lets Prometheus in");
     }
 
     [Theory]
@@ -1323,6 +1502,36 @@ public class ScrapeMonitorPlannerTests
 
         world.Plan().Rows.Single(r => r.Kind == "Tetragon agent").Endpoints
             .Should().Equal(new PlannedEndpoint("tetragon-abcde", $"{pod.Status.PodIP}:2112", "/metrics"));
+    }
+
+    /// <summary>
+    /// undeclared-targetport: a foreign ServiceMonitor whose endpoint names a <c>targetPort</c> number keeps
+    /// a target only where <c>__meta_kubernetes_pod_container_port_number</c> is that number
+    /// (prometheus-operator, pkg/prometheus/promcfg.go, generateServiceMonitorConfig), and Prometheus's
+    /// endpoints discovery sets the label only from a port a container of the pod declares
+    /// (discovery/kubernetes/endpoints.go, buildEndpoints). Tetragon declares none, so that monitor scrapes
+    /// nothing and is no reason for ours to stand aside.
+    /// </summary>
+    [Theory]
+    [InlineData(false, MonitorState.Managed, "no container declares 2112, so Prometheus drops the other monitor's target")]
+    [InlineData(true, MonitorState.CoveredElsewhere, "a container declares 2112, so the other monitor's target is kept")]
+    public void A_foreign_monitor_by_a_target_port_number_counts_only_where_a_container_declares_it(
+        bool declared, MonitorState expected, string because)
+    {
+        world.Component("tetragon", "tetragon", "tetragon");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(
+            ("app.kubernetes.io/name", "tetragon"), ("app.kubernetes.io/instance", "tetragon"));
+        world.Pod("tetragon", "tetragon-abcde", labels,
+            declared ? ScrapeWorld.Container("tetragon", ("metrics", 2112)) : ScrapeWorld.Container("tetragon"));
+        world.Service("tetragon", "tetragon", labels, labels, ("metrics", 2112, "2112"));
+        world.Monitor(MonitorKind.ServiceMonitor, "tetragon", "tetragon-by-number",
+            """{"selector":{"matchLabels":{"app.kubernetes.io/name":"tetragon"}},"endpoints":[{"targetPort":2112}]}""");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        plan.Rows.Single(r => r.Kind == "Tetragon agent").State.Should().Be(expected, because);
+        plan.Apply.Select(a => a.Identity).Should().Equal(
+            declared ? [] : [Services("tetragon", "entkube-tetragon-tetragon")], because);
     }
 
     [Theory]

@@ -400,6 +400,40 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         log.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// seaweed-row-text: whether Catalog records the namespace of the cluster's Prometheus is the same question
+    /// a SeaweedFS apply asks before it opens the metrics port (the namespace column, or a namespace in the
+    /// component's configuration). Where it does not, the engine still looks in the default namespace, but the
+    /// row of a SeaweedFS that its own policy keeps Prometheus out of says that a re-apply opens nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(null, null, false)]
+    [InlineData("  ", null, false)]
+    [InlineData("monitoring", null, true)]
+    [InlineData(null, "{\"namespace\":\"monitoring\"}", true)]
+    public async Task The_plan_knows_whether_the_namespace_of_Prometheus_is_recorded(
+        string? column, string? configuration, bool recorded)
+    {
+        prometheus = world.InstalledComponent(PrometheusPresence.HelmChartName, column, ScrapeWorld.Release)
+            with { Configuration = configuration };
+        world.Component("seaweedfs", "seaweedfs", "seaweedfs");
+        world.SeaweedFiler();
+        world.Policy("seaweedfs", """
+            {"podSelector":{"matchLabels":{"app.kubernetes.io/component":"filer"}},"policyTypes":["Ingress"],
+             "ingress":[{"from":[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"seaweedfs"}}}],
+                         "ports":[{"port":9327,"protocol":"TCP"}]}]}
+            """);
+
+        ScrapeMonitorPlan plan = (await Service().PlanAsync(world.TenantId, world.ClusterId)).Data!;
+
+        MonitorPlanRow filer = plan.Rows.Single(r => r.Kind == "SeaweedFS filer");
+        filer.State.Should().Be(MonitorState.BlockedByNetworkPolicy);
+        filer.Detail.Contains("does not know which namespace Prometheus runs in", StringComparison.Ordinal)
+            .Should().Be(!recorded, filer.Detail);
+        filer.Detail.Contains("Re-apply SeaweedFS and EntKube adds the rule", StringComparison.Ordinal)
+            .Should().Be(recorded, filer.Detail);
+    }
+
     [Fact]
     public async Task A_cluster_without_the_monitor_kinds_is_left_alone()
     {

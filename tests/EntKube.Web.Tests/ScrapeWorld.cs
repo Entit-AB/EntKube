@@ -214,8 +214,10 @@ internal sealed class ScrapeWorld
             [.. services.Where(s => s.Metadata.NamespaceProperty == n)],
             [.. policies.Where(p => p.Metadata.NamespaceProperty == n)])));
 
-    public LiveScrapeState Live() => new(
-        ClusterId, new PrometheusRelease("monitoring", Release), Monitoring(), Workloads());
+    /// <summary>The cluster's Prometheus as Catalog records it: in monitoring, with its namespace recorded.</summary>
+    public PrometheusRelease RecordedPrometheus = new("monitoring", Release);
+
+    public LiveScrapeState Live() => new(ClusterId, RecordedPrometheus, Monitoring(), Workloads());
 
     public ScrapeMonitorPlan Plan() => ScrapeMonitorPlanner.Plan(Specs(), Live());
 

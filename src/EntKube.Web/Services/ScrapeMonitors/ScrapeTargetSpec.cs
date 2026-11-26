@@ -108,6 +108,13 @@ public sealed record ScrapeTargetSpec(
     public string? WhenBlocked { get; init; }
 
     /// <summary>
+    /// The component whose apply adds the rule that lets the cluster's Prometheus through that policy, by the
+    /// namespace Catalog records for Prometheus (SeaweedFS). Whether a re-apply would do that depends on the
+    /// record and on where the live Prometheus runs, which the planner knows and the catalog does not.
+    /// </summary>
+    public string? OpenedByApplyOf { get; init; }
+
+    /// <summary>
     /// True where its chart annotates its pods with <c>prometheus.io/scrape</c> for an annotation scrape job
     /// to take, so EntKube makes no monitor of its own. Whether such a job is there is for the planner to
     /// say, from what Prometheus lists; the catalog cannot know.

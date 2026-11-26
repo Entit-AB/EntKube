@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using k8s.Models;
@@ -220,17 +221,41 @@ public static class ScrapedEndpoints
         return true;
     }
 
-    /// <summary>The same for a ServiceMonitor endpoint's <c>targetPort</c>, which is about the pod.</summary>
+    /// <summary>
+    /// The same for a ServiceMonitor endpoint's <c>targetPort</c>, which is about the pod, not the Service.
+    ///
+    /// <para>prometheus-operator (pkg/prometheus/promcfg.go, generateServiceMonitorConfig, at 9ead22a3) keeps
+    /// the target where <c>__meta_kubernetes_pod_container_port_name</c> is the name, or
+    /// <c>__meta_kubernetes_pod_container_port_number</c> the number. Prometheus's discovery sets those labels
+    /// only from a container port of the pod with the endpoint's number (discovery/kubernetes/endpoints.go,
+    /// buildEndpoints, and endpointslice.go alike, at e56aabdc; see <see cref="PortDiscoverySees"/>). A
+    /// number the pod does not declare has no such label, so the target is dropped: the Service reaches the
+    /// port, the monitor scrapes nothing.</para>
+    /// </summary>
     private static bool TakesTargetPort(JsonObject endpoint, V1Pod pod, int port)
     {
         if (Text(endpoint["port"]) is not null) return true;
-        if (Number(endpoint["targetPort"]) is { } number) return port == number;
-        if (Text(endpoint["targetPort"]) is { } name)
-        {
-            return DeclaredPorts(pod).Any(p => p.Name == name && p.ContainerPort == port);
-        }
+        if (Number(endpoint["targetPort"]) is { } number) return port == number && PortDiscoverySees(pod, port) is not null;
+        if (Text(endpoint["targetPort"]) is { } name) return PortDiscoverySees(pod, port)?.Name == name;
 
         return true;
+    }
+
+    /// <summary>
+    /// The container port Prometheus's endpoints discovery labels a target on this pod port with, or null where
+    /// it labels none. As buildEndpoints does it: the pod's containers and then its init containers, whatever
+    /// their restart policy or the port's protocol; in each the first port of that number, and a later
+    /// container's over an earlier one's (its <c>break</c> leaves only the inner loop).
+    /// </summary>
+    private static V1ContainerPort? PortDiscoverySees(V1Pod pod, int port)
+    {
+        V1ContainerPort? seen = null;
+        foreach (V1Container container in (pod.Spec?.Containers ?? []).Concat(pod.Spec?.InitContainers ?? []))
+        {
+            if ((container.Ports ?? []).FirstOrDefault(p => p.ContainerPort == port) is { } declared) seen = declared;
+        }
+
+        return seen;
     }
 
     /// <summary>
@@ -408,41 +433,49 @@ public static class ScrapedEndpoints
 
     /// <summary>
     /// <c>ISTIO_PROMETHEUS_ANNOTATIONS</c> as pilot-agent unmarshals it into its
-    /// <c>PrometheusScrapeConfiguration</c>: strings, or absent (null is absent to Go), and a list of
-    /// targets. Anything else is a record the agent cannot read and refuses to start over; which of that
-    /// and a record EntKube misreads it is cannot be told, so it is null.
+    /// <c>PrometheusScrapeConfiguration</c> with Go's encoding/json (v1): strings, or absent (null is absent
+    /// to Go), and a list of targets. Anything else is a record the agent cannot read and refuses to start
+    /// over; which of that and a record EntKube misreads it is cannot be told, so it is null.
+    ///
+    /// <para><b>Keys are matched as Go matches them.</b> Go takes a key for a field whatever its case
+    /// (decode.go: "preferring an exact match but also accepting a case-insensitive match"), folding as
+    /// <c>bytes.EqualFold</c> does (fold.go, <c>foldName</c>), so <c>Scrape</c>, <c>SCRAPE</c> and
+    /// <c>ſcrape</c> are all the scrape field, and a key no field folds to is ignored. Read case by case, a
+    /// record with <c>Scrape: "false"</c> was merged here and not by the agent, and ours was pruned.</para>
+    ///
+    /// <para><b>A field given twice is unknown.</b> Go decodes that too: a later string over an earlier one, a
+    /// later target list into the earlier one element by element, a null over a list. That is how its decoder
+    /// happens to work, not what the record says, and the injector never writes it: so it is not copied
+    /// here. Null, and the pod's merge cannot be told, which changes nothing for that pod alone. The JSON
+    /// parser used to throw on an exact repeat, and the whole cluster's plan failed with it.</para>
     /// </summary>
     private sealed record IstioRecord(string Scrape, string Path, string Port, IReadOnlyList<(string Port, string Path)> Targets)
     {
+        private static readonly string[] RecordFields = ["scrape", "path", "port", "targets"];
+        private static readonly string[] TargetFields = ["port", "path"];
+
         public static IstioRecord? Read(string? json)
         {
-            JsonObject? record;
             try
             {
-                record = JsonNode.Parse(json ?? "") as JsonObject;
-            }
-            catch (JsonException)
-            {
-                return null;
-            }
+                using JsonDocument document = JsonDocument.Parse(json ?? "");
 
-            if (record is null
-                || !Field(record, "scrape", out string scrape)
-                || !Field(record, "path", out string path)
-                || !Field(record, "port", out string port))
-            {
-                return null;
-            }
+                if (Fields(document.RootElement, RecordFields) is not { } record
+                    || !Field(record, "scrape", out string scrape)
+                    || !Field(record, "path", out string path)
+                    || !Field(record, "port", out string port))
+                {
+                    return null;
+                }
 
-            List<(string, string)> targets = [];
-            switch (record["targets"])
-            {
-                case null:
-                    break;
-                case JsonArray list:
-                    foreach (JsonNode? item in list)
+                List<(string, string)> targets = [];
+                if (record.TryGetValue("targets", out JsonElement list) && list.ValueKind != JsonValueKind.Null)
+                {
+                    if (list.ValueKind != JsonValueKind.Array) return null;
+
+                    foreach (JsonElement item in list.EnumerateArray())
                     {
-                        if (item is not JsonObject target
+                        if (Fields(item, TargetFields) is not { } target
                             || !Field(target, "port", out string targetPort)
                             || !Field(target, "path", out string targetPath))
                         {
@@ -451,23 +484,66 @@ public static class ScrapedEndpoints
 
                         targets.Add((targetPort, targetPath));
                     }
+                }
 
-                    break;
-                default:
-                    return null;
+                return new IstioRecord(scrape, path, port, targets);
             }
-
-            return new IstioRecord(scrape, path, port, targets);
+            catch (JsonException)
+            {
+                return null;
+            }
         }
 
-        private static bool Field(JsonObject record, string name, out string value)
+        /// <summary>
+        /// An object's members by the field each is for, as Go's decoder pairs them; null where it is not an
+        /// object, or where two members are for one field.
+        /// </summary>
+        private static Dictionary<string, JsonElement>? Fields(JsonElement value, string[] fields)
+        {
+            if (value.ValueKind != JsonValueKind.Object) return null;
+
+            Dictionary<string, JsonElement> found = new(StringComparer.Ordinal);
+            foreach (JsonProperty member in value.EnumerateObject())
+            {
+                string folded = GoFold(member.Name);
+                if (fields.FirstOrDefault(f => GoFold(f) == folded) is not { } field) continue;
+                if (!found.TryAdd(field, member.Value.Clone())) return null;
+            }
+
+            return found;
+        }
+
+        private static bool Field(Dictionary<string, JsonElement> record, string name, out string value)
         {
             value = "";
-            JsonNode? node = record[name];
-            if (node is null) return true;
-            if (Text(node) is not { } text) return false;
-            value = text;
+            if (!record.TryGetValue(name, out JsonElement node) || node.ValueKind == JsonValueKind.Null) return true;
+            if (node.ValueKind != JsonValueKind.String) return false;
+            value = node.GetString()!;
             return true;
+        }
+
+        /// <summary>
+        /// A key folded as Go's encoding/json folds it (fold.go, <c>foldName</c>): ASCII to upper case, any other
+        /// rune to the smallest of its simple case folding orbit. The only runes outside ASCII whose orbit holds
+        /// an ASCII letter are the long s (U+017F, with s and S) and the Kelvin sign (U+212A, with k and K), so
+        /// against field names of ASCII letters those two are all there is to it; every other rune folds to
+        /// something that is not ASCII, and is kept as it is.
+        /// </summary>
+        private static string GoFold(string key)
+        {
+            StringBuilder folded = new(key.Length);
+            foreach (Rune rune in key.EnumerateRunes())
+            {
+                folded.Append(rune.Value switch
+                {
+                    0x017F => "S",
+                    0x212A => "K",
+                    >= 'a' and <= 'z' => ((char)(rune.Value - ('a' - 'A'))).ToString(),
+                    _ => rune.ToString(),
+                });
+            }
+
+            return folded.ToString();
         }
     }
 

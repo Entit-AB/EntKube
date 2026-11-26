@@ -8,7 +8,7 @@ namespace EntKube.Web.Services.ScrapeMonitors;
 /// A cluster's Prometheus as EntKube installed it: where the release is and what it is called. Which
 /// of the live <see cref="LivePrometheus"/> objects that is, the planner decides.
 /// </summary>
-public sealed record PrometheusRelease(string Namespace, string Name);
+public sealed record PrometheusRelease(string Namespace, string Name, bool NamespaceRecorded = true);
 
 /// <summary>One <c>Prometheus</c> object, with the parts that say what it selects.</summary>
 public sealed record LivePrometheus(

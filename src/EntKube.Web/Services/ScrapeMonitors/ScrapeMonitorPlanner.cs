@@ -270,12 +270,48 @@ public static class ScrapeMonitorPlanner
             {
                 return Row(target, MonitorState.BlockedByNetworkPolicy, MonitorChange.None,
                     $"A NetworkPolicy in {target.Namespace} keeps Prometheus out of port {shut[0].Port}. "
-                    + (target.WhenBlocked
-                       ?? $"Allow it in from namespace {prometheus!.Namespace} and EntKube picks it up by itself."),
-                    resolved);
+                    + WhatOpensIt(target), resolved);
             }
 
             return Manage(target, monitor, existing, labels, resolved, shut.Count, notes);
+        }
+
+        /// <summary>
+        /// What lets Prometheus in, for a target a NetworkPolicy keeps it out of. Where a component's apply
+        /// adds the rule (SeaweedFS), the rule names the namespace Catalog records for Prometheus, so the
+        /// re-apply is the advice only where that is recorded and is where the live Prometheus runs. With
+        /// nothing recorded the apply opens nothing, on purpose: a guessed namespace would let somebody
+        /// else's pods in. With another recorded, it opens the door to a namespace nothing scrapes from.
+        /// </summary>
+        private string WhatOpensIt(ScrapeTargetSpec target)
+        {
+            string at = prometheus!.Namespace;
+            if (target.OpenedByApplyOf is not { } component)
+            {
+                return target.WhenBlocked ?? $"Allow it in from namespace {at} and EntKube picks it up by itself.";
+            }
+
+            string owner = target.WhenBlocked is { } owns ? owns + " " : "";
+            const string record = "kube-prometheus-stack component";
+
+            if (!live.Release.NamespaceRecorded)
+            {
+                return owner + $"EntKube does not know which namespace Prometheus runs in, because none is recorded on "
+                    + $"the {record}, so applying {component} opens nothing for it: a guessed namespace would let "
+                    + $"somebody else's pods in. Record the namespace on the {record} ({at}, where it runs), then "
+                    + $"re-apply {component}, and EntKube picks it up by itself.";
+            }
+
+            if (live.Release.Namespace != at)
+            {
+                return owner + $"The {record} is recorded in namespace {live.Release.Namespace}, but Prometheus "
+                    + $"{prometheus.Name} runs in {at}, so the rule applying {component} adds lets in a namespace "
+                    + $"nothing scrapes from. Correct the namespace recorded on the {record}, then re-apply "
+                    + $"{component}, and EntKube picks it up by itself.";
+            }
+
+            return owner + $"Re-apply {component} and EntKube adds the rule that lets Prometheus in, then picks it "
+                + "up by itself.";
         }
 
         /// <summary>
@@ -359,9 +395,8 @@ public static class ScrapeMonitorPlanner
 
         // ── Whose ─────────────────────────────────────────────────────────────
 
-        /// <summary>Written by EntKube for this very cluster registration.</summary>
-        private bool IsOurs(LiveMonitor monitor)
-            => monitor.Labels.GetValueOrDefault(ScrapeMonitorManifest.OwnershipLabel) == live.ClusterId.ToString();
+        /// <summary>Written by EntKube for this very cluster registration: <see cref="ScrapeMonitorIdentity.IsOurs"/>.</summary>
+        private bool IsOurs(LiveMonitor monitor) => ScrapeMonitorIdentity.IsOurs(monitor.Labels, live.ClusterId);
 
         /// <summary>
         /// Whether the live monitor of this name is the one EntKube wrote before it labelled them:
@@ -729,6 +764,17 @@ public static class ScrapeMonitorPlanner
                     + "changed, because what the others scrape cannot be told.";
             }
 
+            // The labels that make a monitor ours are not the selector's to set: a monitor that gave them up
+            // would be one EntKube no longer knows for its own, or one that calls itself somebody else's.
+            if (ScrapeMonitorIdentity.ConflictWith(prometheus.MonitorSelector(monitor.Kind), live.ClusterId) is { } owned)
+            {
+                return $"{name} selects only {monitor.Kind}s whose {owned} is not what EntKube writes there "
+                    + $"({owned}={ScrapeMonitorIdentity.Labels(live.ClusterId)[owned]}). That label is how EntKube tells "
+                    + "its own monitors from everybody else's, so it gives it up for no selector, and makes no monitor "
+                    + $"while that is so. Take {owned} out of the {monitor.Kind} selector in the Prometheus stack's values "
+                    + "and EntKube picks it up by itself.";
+            }
+
             labels = LabelsFor(monitor.Kind);
 
             if (PrometheusSelects(monitor, labels) is not { } selects)
@@ -749,15 +795,12 @@ public static class ScrapeMonitorPlanner
         /// <summary>
         /// Every label a monitor carries: whose it is, the release it was made for, and what this
         /// Prometheus selects that kind of monitor by. The selector's own labels win over EntKube's
-        /// except for ownership, which nothing may take over.
+        /// except for the ones that make it EntKube's (<see cref="ScrapeMonitorIdentity.Labels"/>), which
+        /// nothing may take over; a selector that demands otherwise has been refused before this.
         /// </summary>
         private IReadOnlyDictionary<string, string> LabelsFor(MonitorKind kind)
         {
-            Dictionary<string, string> labels = new(StringComparer.Ordinal)
-            {
-                ["app.kubernetes.io/managed-by"] = "entkube",
-                ["release"] = live.Release.Name,
-            };
+            Dictionary<string, string> labels = new(StringComparer.Ordinal) { ["release"] = live.Release.Name };
 
             foreach ((string key, string value) in prometheus?.MonitorSelector(kind)?.MatchLabels
                      ?? new Dictionary<string, string>())
@@ -765,7 +808,7 @@ public static class ScrapeMonitorPlanner
                 labels[key] = value;
             }
 
-            labels[ScrapeMonitorManifest.OwnershipLabel] = live.ClusterId.ToString();
+            foreach ((string key, string value) in ScrapeMonitorIdentity.Labels(live.ClusterId)) labels[key] = value;
 
             return labels;
         }
