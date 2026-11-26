@@ -17,9 +17,6 @@ public sealed record MonitorsApplied(string Tone, string Text)
     /// <summary>The engine's key for a RabbitMQ broker.</summary>
     public static string BrokerKey(string ns, string name) => $"rabbitmq/{ns}/{name}";
 
-    /// <summary>The engine's key for a Keycloak release (the keycloakx chart): its namespace and its release.</summary>
-    public static string KeycloakKey(string ns, string release) => $"keycloak/{ns}/{release}";
-
     public static MonitorsApplied Failed(string? error) =>
         new("danger", string.IsNullOrWhiteSpace(error) ? "The monitors could not be applied." : error);
 

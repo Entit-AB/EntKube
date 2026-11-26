@@ -553,6 +553,60 @@ public sealed class ScrapeDiagnosisTests
         (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).SelectedTwice.Should().BeFalse();
     }
 
+    /// <summary>
+    /// params-double: the engine's rule for "does a foreign monitor give our series" leaves out a scrape
+    /// that asks with parameters. That is no answer to "do two monitors double each other": two that ask
+    /// the same port, path and parameters are the same scrape twice, and every sum over it is doubled.
+    /// Parameters are compared as a set: the order of the keys and of a key's values does not make
+    /// another scrape, another value does.
+    /// </summary>
+    [Theory]
+    [InlineData("/metrics/detailed", """{"family":["queue_coarse_metrics"]}""", """{"family":["queue_coarse_metrics"]}""", true,
+        "both ask /metrics/detailed for the same family")]
+    [InlineData("/metrics/detailed", """{"family":["queue_coarse_metrics","queue_consumer_count"],"vhost":["/"]}""",
+        """{"vhost":["/"],"family":["queue_consumer_count","queue_coarse_metrics"]}""", true,
+        "the same parameters in another order are the same query")]
+    [InlineData("/metrics/detailed", """{"family":["queue_coarse_metrics"]}""", """{"family":["queue_consumer_count"]}""", false,
+        "another family is other series")]
+    [InlineData("/probe", """{"target":["db:5432"]}""", """{"target":["db:5432"]}""", true,
+        "two monitors probing the same address through the same exporter are one probe twice")]
+    public async Task Two_monitors_that_ask_with_the_same_parameters_double_one_broker(
+        string path, string first, string second, bool doubled, string because)
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "queues-a", OrdersServices,
+                endpoints: $$$"""{"port":"prometheus","path":"{{{path}}}","params":{{{first}}}}"""),
+            ServiceMonitor("mq", "queues-b", OrdersServices,
+                endpoints: $$$"""{"port":"prometheus","path":"{{{path}}}","params":{{{second}}}}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().Be(doubled, because);
+        if (doubled) d.Findings[0].Should().Contain("mq/queues-a").And.Contain("mq/queues-b");
+    }
+
+    /// <summary>
+    /// undeclared-targetport: a ServiceMonitor endpoint's numeric <c>targetPort</c> keeps a target only where
+    /// <c>__meta_kubernetes_pod_container_port_number</c> equals it (prometheus-operator promcfg.go), and
+    /// Prometheus's endpoints discovery sets that label only from a container port the pod declares with
+    /// that number. The Service still reaches the port by number, so the monitor by Service port scrapes it;
+    /// the one by targetPort scrapes nothing, and nothing is doubled.
+    /// </summary>
+    [Fact]
+    public async Task A_target_port_number_the_pod_does_not_declare_doubles_nothing()
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/pods",
+            """{"metadata":{"name":"orders-server-0","namespace":"mq","labels":{"app.kubernetes.io/name":"orders"}},"spec":{"containers":[{"name":"rabbitmq"}]},"status":{"phase":"Running","podIP":"10.0.1.10"}}""");
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "by-port", OrdersServices),
+            ServiceMonitor("mq", "by-target", OrdersServices, endpoints: """{"targetPort":15692}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeFalse("Prometheus drops the targetPort target: no container declares 15692");
+        d.WiringIsRight.Should().BeTrue();
+    }
+
     [Fact]
     public async Task Two_monitors_of_which_prometheus_reads_one_do_not_double_anything()
     {

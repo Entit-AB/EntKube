@@ -410,7 +410,7 @@ public static class ScrapeDiagnostician
         // Per pod: two monitors double a workload only where both end at the same pod endpoint. A
         // PodMonitor for the primary and one for the replicas both select the database and name
         // the same port, and scrape nothing twice.
-        Dictionary<JsonNode, HashSet<(string Address, string Path)>> reached =
+        Dictionary<JsonNode, HashSet<(string Address, string Path, string Params)>> reached =
             read.ToDictionary(m => m, m => PodEndpoints(m, workload, seen));
         List<JsonNode> doubling = [.. read.Where(m => read.Any(other =>
             other != m && reached[m].Overlaps(reached[other])))];
@@ -615,8 +615,8 @@ public static class ScrapeDiagnostician
     }
 
     /// <summary>
-    /// The live pod endpoints a monitor scrapes on the workload's metrics port, as pod address and
-    /// path. Where it ends is the engine's answer, <see cref="ScrapedEndpoints.OfForeign"/>: a
+    /// The live pod endpoints a monitor scrapes on the workload's metrics port, as pod address, path and
+    /// parameters. Where it ends is the engine's answer, <see cref="ScrapedEndpoints.OfForeign"/>: a
     /// PodMonitor at the running pods it selects that declare the port, a ServiceMonitor through the
     /// Service port it names to the running pods behind it, and a <c>targetPort</c> held against the
     /// POD's container port by name or number, as prometheus-operator's relabelling does
@@ -624,15 +624,22 @@ public static class ScrapeDiagnostician
     /// of those rules that read <c>targetPort</c> as the Service's, and called a broker scraped twice
     /// wired right.
     ///
-    /// <para>The path is the diagnosis's own: the engine's answer is per pod port, so it is asked one
-    /// endpoint at a time and the endpoint's path is kept beside it. Only what is certain counts: a
-    /// selector that cannot be evaluated reaches nothing here, so nothing is called doubled that
-    /// might not be.</para>
+    /// <para><b>Where, not what.</b> The engine's answer is per pod port, so it is asked one endpoint at a
+    /// time, and of that endpoint without its path and parameters: they say what is asked of the port, not
+    /// which port. The engine leaves out an endpoint that asks with parameters or probes, by its rule for
+    /// "does somebody else's monitor give our series" (<see cref="ScrapedEndpoints.ServesItsOwnMetrics"/>),
+    /// and that is no answer to "do two monitors scrape the same thing": two that ask the same port the same
+    /// question are one scrape twice. So the path and the parameters are kept beside each address, the
+    /// parameters as a set (<see cref="Canonical"/>): the same ones in another order are the same query,
+    /// other ones are other series.</para>
+    ///
+    /// <para>Only what is certain counts: a selector that cannot be evaluated reaches nothing here, so
+    /// nothing is called doubled that might not be.</para>
     /// </summary>
-    private static HashSet<(string Address, string Path)> PodEndpoints(
+    private static HashSet<(string Address, string Path, string Params)> PodEndpoints(
         JsonNode monitor, MonitoredWorkload workload, ScrapeEvidence seen)
     {
-        HashSet<(string Address, string Path)> reached = [];
+        HashSet<(string Address, string Path, string Params)> reached = [];
         if (monitor["spec"] is not JsonObject spec || spec[workload.Type.Endpoints] is not JsonArray listed) return reached;
 
         MonitorIdentity identity = new(
@@ -642,19 +649,48 @@ public static class ScrapeDiagnostician
 
         foreach (JsonNode? endpoint in listed)
         {
-            if (endpoint is not JsonObject) continue;
+            if (endpoint is not JsonObject asked) continue;
+
+            JsonObject where = (JsonObject)asked.DeepClone();
+            where.Remove("path");
+            where.Remove("params");
 
             JsonObject alone = (JsonObject)spec.DeepClone();
-            alone[workload.Type.Endpoints] = new JsonArray(endpoint.DeepClone());
+            alone[workload.Type.Endpoints] = new JsonArray(where);
             LiveMonitor one = new(identity, new Dictionary<string, string>(), new Dictionary<string, string>(), alone);
 
-            string path = Text(endpoint["path"]) ?? "/metrics";
+            string path = Text(asked["path"]) ?? "/metrics";
+            string query = Canonical(asked["params"]);
             foreach (string address in ScrapedEndpoints.OfForeign(one, ns).Certain)
             {
-                if (PortOf(address) is int number && IsMetricsPort(workload, number)) reached.Add((address, path));
+                if (PortOf(address) is int number && IsMetricsPort(workload, number)) reached.Add((address, path, query));
             }
         }
         return reached;
+    }
+
+    /// <summary>
+    /// An endpoint's <c>params</c> (a map of names to lists of values) as one string that is the same for
+    /// the same parameters: names and each name's values in ordinal order, written as JSON so no name or
+    /// value can run into the next. None, and an empty map, are no parameters at all. What is not shaped
+    /// like a map is kept as written, so it equals only itself.
+    /// </summary>
+    private static string Canonical(JsonNode? parameters)
+    {
+        if (parameters is null) return "";
+        if (parameters is not JsonObject map) return parameters.ToJsonString();
+        if (map.Count == 0) return "";
+
+        JsonObject sorted = [];
+        foreach (KeyValuePair<string, JsonNode?> pair in map.OrderBy(p => p.Key, StringComparer.Ordinal))
+        {
+            sorted[pair.Key] = pair.Value is JsonArray values
+                ? new JsonArray([.. values.Select(v => v?.ToJsonString() ?? "null")
+                    .Order(StringComparer.Ordinal)
+                    .Select(v => (JsonNode?)JsonValue.Create(v))])
+                : pair.Value?.DeepClone();
+        }
+        return sorted.ToJsonString();
     }
 
     /// <summary>The port of an "ip:port" address, IPv6 included.</summary>

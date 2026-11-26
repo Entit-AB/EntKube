@@ -28,12 +28,8 @@ public enum MonitorDifference
 /// </summary>
 public static partial class ScrapeMonitorManifest
 {
-    /// <summary>The label that makes a monitor EntKube's, carrying the id of the cluster it was written for.</summary>
-    /// <remarks>
-    /// The id and not just "yes": one physical cluster can be registered under two tenants, or in two
-    /// EntKube installations, and each would otherwise prune the other's monitors.
-    /// </remarks>
-    public const string OwnershipLabel = "entkube.io/scrape-monitor";
+    /// <summary>The label that makes a monitor EntKube's: <see cref="ScrapeMonitorIdentity.OwnershipLabel"/>, which says why.</summary>
+    public const string OwnershipLabel = ScrapeMonitorIdentity.OwnershipLabel;
 
     /// <summary>What the monitor is for: the target's key, for a person reading the object.</summary>
     public const string OwnerAnnotation = "entkube.io/scrape-owner";
