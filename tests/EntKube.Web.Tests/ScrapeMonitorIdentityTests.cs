@@ -82,6 +82,92 @@ public sealed class ScrapeMonitorIdentityTests
             .Should().Be(label);
     }
 
+    /// <summary>
+    /// handover-identity: the whole rule, the one the planner keeps and prunes by and the handovers ask through
+    /// <see cref="ScrapeMonitorIdentity.Stands"/>. Labelled for this registration is ours; so is the unlabelled monitor
+    /// that one the engine wants takes over (RabbitMQ's old <c>{name}-metrics</c>, still selecting exactly what ours
+    /// selects); nothing else is.
+    /// </summary>
+    [Theory]
+    [InlineData("labelled", true, true)]
+    [InlineData("labelled", false, true)]
+    [InlineData("unlabelled", true, true)]
+    [InlineData("unlabelled", false, false)]
+    [InlineData("unlabelled, selecting something else", true, false)]
+    [InlineData("labelled for another registration", true, false)]
+    [InlineData("an empty ownership label", true, false)]
+    public void Ours_is_labelled_or_taken_over(string which, bool takesOverUnlabelled, bool ours)
+    {
+        ManagedServiceSummary events = new(Guid.NewGuid(), world.TenantId, world.ClusterId, ManagedServiceKind.RabbitMq,
+            "events", "queues", ManagedServiceStatus.Running, IsOperatorManaged: true, IsInCluster: true, HasExporter: false);
+        MonitorSpec wanted = ScrapeMonitorIdentity.MonitorsFor(events).Single() with { TakesOverUnlabelled = takesOverUnlabelled };
+        LiveMonitor old = world.OldRabbitMonitor("events");
+        LiveMonitor live = which switch
+        {
+            "labelled" => old with { Labels = ScrapeWorld.Labels(("entkube.io/scrape-monitor", world.ClusterId.ToString())) },
+            "unlabelled" => old,
+            "unlabelled, selecting something else" => old with
+            {
+                Spec = ScrapeWorld.Json("""{"selector":{"matchLabels":{"app.kubernetes.io/name":"events"}}}"""),
+            },
+            "labelled for another registration" => old with
+            {
+                Labels = ScrapeWorld.Labels(("entkube.io/scrape-monitor", Other.ToString())),
+            },
+            "an empty ownership label" => old with { Labels = ScrapeWorld.Labels(("entkube.io/scrape-monitor", "")) },
+            _ => throw new ArgumentOutOfRangeException(nameof(which)),
+        };
+
+        ScrapeMonitorIdentity.IsOurs(live, [wanted], world.ClusterId).Should().Be(ours);
+        ScrapeMonitorIdentity.Stands([live], wanted, world.ClusterId).Should().Be(ours);
+        ScrapeMonitorIdentity.TakesOver(wanted, live).Should().Be(ours && which == "unlabelled");
+    }
+
+    /// <summary>Standing is about the wanted monitor's own name: ours of another name, or in another namespace, is not it.</summary>
+    [Fact]
+    public void Only_the_wanted_name_stands_for_it()
+    {
+        MonitorSpec wanted = new(new MonitorIdentity(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders"),
+            LabelSelector.Of(("cnpg.io/cluster", "orders")), []);
+
+        ScrapeMonitorIdentity.Stands([world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-billing")],
+            wanted, world.ClusterId).Should().BeFalse();
+        ScrapeMonitorIdentity.Stands([world.OurMonitor(MonitorKind.PodMonitor, "elsewhere", "entkube-cnpg-orders")],
+            wanted, world.ClusterId).Should().BeFalse();
+        ScrapeMonitorIdentity.Stands([world.OurMonitor(MonitorKind.ServiceMonitor, "databases", "entkube-cnpg-orders")],
+            wanted, world.ClusterId).Should().BeFalse();
+        ScrapeMonitorIdentity.Stands([world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders")],
+            wanted, world.ClusterId).Should().BeTrue();
+        ScrapeMonitorIdentity.Stands([], wanted, world.ClusterId).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The planner takes over by the same function: the unlabelled monitor the rule calls ours is rewritten as ours,
+    /// and with the flag off the same monitor is somebody else's, left alone.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void The_planner_takes_over_exactly_what_the_rule_calls_ours(bool selectsWhatOursDoes)
+    {
+        world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
+        world.RabbitBroker("events");
+        LiveMonitor old = world.OldRabbitMonitor("events");
+        if (!selectsWhatOursDoes)
+        {
+            world.Monitors[world.Monitors.IndexOf(old)] = old = old with
+            {
+                Spec = ScrapeWorld.Json("""{"selector":{"matchLabels":{"app.kubernetes.io/name":"events"}},"endpoints":[{"port":"prometheus"}]}"""),
+            };
+        }
+
+        ScrapeMonitorPlan plan = world.Plan();
+        bool rule = ScrapeMonitorIdentity.IsOurs(old, world.Specs().Select(s => s.Monitor).OfType<MonitorSpec>(), world.ClusterId);
+
+        rule.Should().Be(selectsWhatOursDoes);
+        plan.Apply.Any(a => a.Identity == old.Identity).Should().Be(rule, "ours is rewritten with our labels; theirs is not touched");
+    }
+
     [Fact]
     public void No_selector_demands_anything()
         => ScrapeMonitorIdentity.ConflictWith(null, world.ClusterId).Should().BeNull();

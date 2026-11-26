@@ -38,6 +38,39 @@ public static class ScrapeMonitorIdentity
            && labels.TryGetValue(OwnershipLabel, out string? owner)
            && owner == clusterId.ToString();
 
+    /// <summary>
+    /// Whether a live monitor is the engine's own, the whole rule the planner keeps, rewrites and prunes by: labelled
+    /// for this registration (<see cref="IsOurs(IReadOnlyDictionary{string, string}?, Guid)"/>), or the unlabelled one
+    /// that a monitor the engine wants takes over (<see cref="TakesOver"/>).
+    /// </summary>
+    /// <param name="monitor">The live monitor.</param>
+    /// <param name="wanted">The monitors the engine wants, of which only one of the same name can take this one over.</param>
+    /// <param name="clusterId">The cluster registration asking.</param>
+    public static bool IsOurs(LiveMonitor monitor, IEnumerable<MonitorSpec> wanted, Guid clusterId)
+        => IsOurs(monitor.Labels, clusterId) || wanted.Any(w => TakesOver(w, monitor));
+
+    /// <summary>
+    /// Whether the live monitor of a name is the one the engine wrote before it labelled what it writes, and so
+    /// taken over by <paramref name="wanted"/>: the same name, no ownership label at all, and selecting exactly what
+    /// <paramref name="wanted"/> selects. Only a monitor marked <see cref="MonitorSpec.TakesOverUnlabelled"/> takes
+    /// one over (RabbitMQ's <c>{name}-metrics</c>, from the old "Enable metrics" button).
+    /// </summary>
+    public static bool TakesOver(MonitorSpec wanted, LiveMonitor existing)
+        => wanted.TakesOverUnlabelled
+           && existing.Identity == wanted.Identity
+           && !existing.Labels.ContainsKey(OwnershipLabel)
+           && System.Text.Json.Nodes.JsonNode.DeepEquals(existing.Spec["selector"], wanted.Selector.ToJson());
+
+    /// <summary>
+    /// Whether the engine's monitor <paramref name="wanted"/> stands among those <paramref name="listed"/> on the
+    /// cluster registered as <paramref name="clusterId"/>: a monitor of its name that is ours by
+    /// <see cref="IsOurs(LiveMonitor, IEnumerable{MonitorSpec}, Guid)"/>, the planner's own rule. This is what the
+    /// CNPG and Keycloak handovers ask before they switch an operator's or a chart's own monitor off, so they hand
+    /// over to exactly the monitors the planner keeps.
+    /// </summary>
+    public static bool Stands(IEnumerable<LiveMonitor> listed, MonitorSpec wanted, Guid clusterId)
+        => listed.Any(m => m.Identity == wanted.Identity && IsOurs(m, [wanted], clusterId));
+
     /// <summary>The labels every monitor of the engine's carries, which no selector's labels are written over.</summary>
     public static IReadOnlyDictionary<string, string> Labels(Guid clusterId)
         => new Dictionary<string, string>(StringComparer.Ordinal)
@@ -84,12 +117,20 @@ public static class ScrapeMonitorIdentity
     /// makes none (no namespace recorded, a chart it does not monitor, a component the cluster provides).
     /// </summary>
     public static IReadOnlyList<MonitorIdentity> For(InstalledComponent component)
-        => Identities(ScrapeTargetCatalog.PartsOf(component));
+        => Identities(MonitorsFor(component));
 
     /// <summary>The monitors the engine gives a data service, as the catalog names them, whatever its status.</summary>
     public static IReadOnlyList<MonitorIdentity> For(ManagedServiceSummary service)
-        => Identities(ScrapeTargetCatalog.PartsOf(service));
+        => Identities(MonitorsFor(service));
 
-    private static IReadOnlyList<MonitorIdentity> Identities(IEnumerable<ScrapeTargetSpec> targets)
-        => [.. targets.Select(t => t.Monitor?.Identity).OfType<MonitorIdentity>().Distinct()];
+    /// <summary>The monitors the engine gives an installed component, whole, as the planner is given them; see <see cref="For(InstalledComponent)"/>.</summary>
+    public static IReadOnlyList<MonitorSpec> MonitorsFor(InstalledComponent component)
+        => [.. ScrapeTargetCatalog.PartsOf(component).Select(t => t.Monitor).OfType<MonitorSpec>()];
+
+    /// <summary>The monitors the engine gives a data service, whole, as the planner is given them.</summary>
+    public static IReadOnlyList<MonitorSpec> MonitorsFor(ManagedServiceSummary service)
+        => [.. ScrapeTargetCatalog.PartsOf(service).Select(t => t.Monitor).OfType<MonitorSpec>()];
+
+    private static IReadOnlyList<MonitorIdentity> Identities(IEnumerable<MonitorSpec> monitors)
+        => [.. monitors.Select(m => m.Identity).Distinct()];
 }

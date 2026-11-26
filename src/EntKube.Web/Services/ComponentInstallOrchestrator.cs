@@ -28,7 +28,9 @@ public sealed record ComponentApplyOptions
 /// it holds no state of its own. It throws <see cref="InvalidOperationException"/>
 /// on validation failures (e.g. unmet dependencies) so callers can surface them;
 /// a non-throwing Helm failure is returned as a <see cref="HelmExecutionResult"/>
-/// with <c>Success = false</c>.
+/// with <c>Success = false</c>. Anything thrown after the component is marked Installing and
+/// before helm's result is recorded first marks it Failed with the exception's message, so no
+/// throw leaves a component Installing; cancellation is the one exception.
 /// </summary>
 public class ComponentInstallOrchestrator(
     IDbContextFactory<CatalogDbContext> dbFactory,
@@ -106,88 +108,101 @@ public class ComponentInstallOrchestrator(
             await lifecycleService.PrepareInstallAsync(tenantId, componentId, ct);
         }
 
-        // Refresh Keycloak DB config into HelmValues from the stored config (if any).
-        await keycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(tenantId, componentId);
-        // Grant all schema privileges to the database owner so Liquibase can run on install.
-        await keycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(tenantId, componentId);
-        // Release any stuck Liquibase lock so migrations can proceed on startup.
-        await keycloakService.ReleaseLiquibaseLockIfConfiguredAsync(tenantId, componentId);
-        // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
-        await keycloakService.FixRealmUrlsIfConfiguredAsync(tenantId, componentId);
-        // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
-        await harborService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
-        // Regenerate OpenLDAP Helm values + seed LDIF from the authored directory.
-        await openLdapService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
-        // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
-        // install so the StatefulSet's init container can mount it (chart does not self-sign).
-        await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
-        // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
-        await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
-        // Regenerate the mail components' manifests from what the operator authored, so an install
-        // deploys the current configuration rather than whatever was rendered when it was added.
-        await stalwartService.RefreshManifestIfConfiguredAsync(tenantId, componentId);
-        await stalwartService.RefreshRspamdManifestAsync(tenantId, componentId, ct);
-        await stalwartService.RefreshRoundcubeManifestAsync(tenantId, componentId, ct);
-        await stalwartService.RefreshSnappyMailManifestAsync(tenantId, componentId, ct);
-        // Same reason as OpenLDAP: the StatefulSet mounts the TLS Secret, so a pod started before
-        // cert-manager has issued it sits in ContainerCreating until somebody looks.
-        await stalwartService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId, ct);
-        // Turning high availability on or off changes whether the StatefulSet has a local data
-        // volume, and volumeClaimTemplates is immutable — so the install would be refused on a field
-        // nobody edited. No-op unless that boundary is actually being crossed.
-        await stalwartService.PrepareStorageShapeIfNeededAsync(tenantId, componentId, ct);
-
-        HelmCommand command;
+        // From here on the component is Installing, and a throw would leave it so: no install running, and every later
+        // one refused as "an operation in progress". So whatever is thrown before helm's answer is recorded ends the
+        // component as a helm that failed does, Failed with the reason, and is thrown on: the caller shows it as it
+        // always has, and ComponentUpgradeRunner puts an upgrade whose release did not change back to Installed.
+        // Cancellation is left alone: it is not the install failing, and it goes on up as it is.
+        HelmExecutionResult result;
         try
         {
-            command = await lifecycleService.GetInstallCommandAsync(tenantId, componentId, ct);
-        }
-        catch (MonitorHandoverUnknownException unknown)
-        {
-            // The component is Installing from here on, and a throw would leave it so: no install running, and
-            // every later one refused as "an operation in progress". The cluster could not say whether the
-            // chart's own monitor may go to helm, so helm is not run, and the apply ends as a helm that failed
-            // does: Failed, with the reason. (ComponentUpgradeRunner then puts an upgrade back to Installed where
-            // it finds the release's revision unchanged, the reason kept, as it does for any unstarted upgrade.)
-            await lifecycleService.MarkInstallResultAsync(tenantId, componentId, false, unknown.Message, ct);
-            return new HelmExecutionResult { Success = false, Output = unknown.Message };
-        }
-        command.NoWait = options.NoWait;
+            // Refresh Keycloak DB config into HelmValues from the stored config (if any).
+            await keycloakService.RefreshDatabaseHelmValuesIfConfiguredAsync(tenantId, componentId);
+            // Grant all schema privileges to the database owner so Liquibase can run on install.
+            await keycloakService.GrantDatabaseOwnerPermissionsIfConfiguredAsync(tenantId, componentId);
+            // Release any stuck Liquibase lock so migrations can proceed on startup.
+            await keycloakService.ReleaseLiquibaseLockIfConfiguredAsync(tenantId, componentId);
+            // Update realm frontendUrl to match the configured admin URL (fixes restored-database URL mismatch).
+            await keycloakService.FixRealmUrlsIfConfiguredAsync(tenantId, componentId);
+            // Refresh Harbor CNPG + S3 credentials in Helm values before install/upgrade.
+            await harborService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
+            // Regenerate OpenLDAP Helm values + seed LDIF from the authored directory.
+            await openLdapService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId);
+            // For ClusterIssuer TLS, provision the cert-manager Certificate → tls Secret BEFORE the
+            // install so the StatefulSet's init container can mount it (chart does not self-sign).
+            await openLdapService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId);
+            // Refresh Velero's S3 backup-target values + credentials before install/upgrade.
+            await veleroService.RefreshHelmValuesIfConfiguredAsync(tenantId, componentId, ct);
+            // Regenerate the mail components' manifests from what the operator authored, so an install
+            // deploys the current configuration rather than whatever was rendered when it was added.
+            await stalwartService.RefreshManifestIfConfiguredAsync(tenantId, componentId);
+            await stalwartService.RefreshRspamdManifestAsync(tenantId, componentId, ct);
+            await stalwartService.RefreshRoundcubeManifestAsync(tenantId, componentId, ct);
+            await stalwartService.RefreshSnappyMailManifestAsync(tenantId, componentId, ct);
+            // Same reason as OpenLDAP: the StatefulSet mounts the TLS Secret, so a pod started before
+            // cert-manager has issued it sits in ContainerCreating until somebody looks.
+            await stalwartService.ApplyTlsCertificateIfNeededAsync(tenantId, componentId, ct);
+            // Turning high availability on or off changes whether the StatefulSet has a local data
+            // volume, and volumeClaimTemplates is immutable — so the install would be refused on a field
+            // nobody edited. No-op unless that boundary is actually being crossed.
+            await stalwartService.PrepareStorageShapeIfNeededAsync(tenantId, componentId, ct);
 
-        // Pre-sync component secrets so they exist in K8s before the pod starts.
-        // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
-        // which happens during Helm's --wait phase, so the secret must exist first.
-        HelmExecutionResult preSyncResult = await lifecycleService.SyncComponentSecretsAsync(tenantId, componentId);
-
-        HelmExecutionResult result = await lifecycleService.ExecuteHelmAsync(tenantId, componentId, command, ct);
-
-        // Prepend pre-sync output so the caller can see exactly how many keys were synced.
-        if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
-        {
-            result = new HelmExecutionResult
+            HelmCommand command;
+            try
             {
-                Success = result.Success,
-                ExitCode = result.ExitCode,
-                Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
-            };
-        }
+                command = await lifecycleService.GetInstallCommandAsync(tenantId, componentId, ct);
+            }
+            catch (MonitorHandoverUnknownException unknown)
+            {
+                // The cluster could not say whether the chart's own monitor may go to helm, so helm is not run, and
+                // the apply ends as a helm that failed does: Failed, with the reason, and returned as helm's result
+                // would be rather than thrown. (ComponentUpgradeRunner then puts an upgrade back to Installed where
+                // it finds the release's revision unchanged, the reason kept, as it does for any unstarted upgrade.)
+                await lifecycleService.MarkInstallResultAsync(tenantId, componentId, false, unknown.Message, ct);
+                return new HelmExecutionResult { Success = false, Output = unknown.Message };
+            }
+            command.NoWait = options.NoWait;
 
-        if (result.Success)
-        {
-            HelmExecutionResult subchartResult = await lifecycleService.InstallSubchartsAsync(tenantId, componentId);
+            // Pre-sync component secrets so they exist in K8s before the pod starts.
+            // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
+            // which happens during Helm's --wait phase, so the secret must exist first.
+            HelmExecutionResult preSyncResult = await lifecycleService.SyncComponentSecretsAsync(tenantId, componentId);
 
-            if (!string.IsNullOrWhiteSpace(subchartResult.Output))
+            result = await lifecycleService.ExecuteHelmAsync(tenantId, componentId, command, ct);
+
+            // Prepend pre-sync output so the caller can see exactly how many keys were synced.
+            if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
             {
                 result = new HelmExecutionResult
                 {
-                    Success = result.Success && subchartResult.Success,
-                    Output = result.Output + "\n" + subchartResult.Output
+                    Success = result.Success,
+                    ExitCode = result.ExitCode,
+                    Output = $"--- Pre-install Secret Sync ---\n{preSyncResult.Output}\n\n{result.Output}"
                 };
             }
-        }
 
-        await lifecycleService.MarkInstallResultAsync(
-            tenantId, componentId, result.Success, result.Success ? null : result.Output, ct);
+            if (result.Success)
+            {
+                HelmExecutionResult subchartResult = await lifecycleService.InstallSubchartsAsync(tenantId, componentId);
+
+                if (!string.IsNullOrWhiteSpace(subchartResult.Output))
+                {
+                    result = new HelmExecutionResult
+                    {
+                        Success = result.Success && subchartResult.Success,
+                        Output = result.Output + "\n" + subchartResult.Output
+                    };
+                }
+            }
+
+            await lifecycleService.MarkInstallResultAsync(
+                tenantId, componentId, result.Success, result.Success ? null : result.Output, ct);
+        }
+        catch (Exception thrown) when (thrown is not OperationCanceledException)
+        {
+            await lifecycleService.MarkInstallResultAsync(tenantId, componentId, false, thrown.Message, CancellationToken.None);
+            throw;
+        }
 
         // After successful install, sync any secrets marked for K8s sync.
 

@@ -121,23 +121,80 @@ public static class ScrapedEndpoints
             bool? selected = LabelSelector.Selects(selector, Labels(service));
             if (selected is false) continue;
 
+            List<DiscoveredTarget> discovered = [.. DiscoveredThrough(service, ns)];
+
             foreach (JsonObject endpoint in EndpointsIn(monitor, "endpoints"))
             {
-                foreach (V1ServicePort port in service.Spec?.Ports ?? [])
+                foreach (DiscoveredTarget target in discovered.Where(t => Keeps(endpoint, t)))
                 {
-                    if (Text(endpoint["port"]) is { } name && port.Name != name) continue;
-
-                    foreach ((V1Pod pod, int number) in Behind(service, port, ns))
-                    {
-                        if (!TakesTargetPort(endpoint, pod, number)) continue;
-
-                        (selected is true ? certain : possible).Add(Address(pod, number));
-                    }
+                    (selected is true ? certain : possible).Add(Address(target.Pod, target.Port));
                 }
             }
         }
 
         return (certain, possible);
+    }
+
+    /// <summary>
+    /// One target Prometheus's endpoints (or endpointslice) discovery makes for a Service, with the two things
+    /// prometheus-operator's relabelling keeps or drops it by.
+    /// </summary>
+    /// <param name="Pod">The pod it is on.</param>
+    /// <param name="Port">The pod port.</param>
+    /// <param name="EndpointPortName">
+    /// <c>__meta_kubernetes_endpoint_port_name</c>: the Service port's name, for a target the Endpoints object
+    /// carries; null for one discovery adds of its own.
+    /// </param>
+    /// <param name="ContainerPort">
+    /// The container port whose <c>__meta_kubernetes_pod_container_port_name</c> and <c>_number</c> it carries; null
+    /// where it carries none.
+    /// </param>
+    private sealed record DiscoveredTarget(V1Pod Pod, int Port, string? EndpointPortName, V1ContainerPort? ContainerPort);
+
+    /// <summary>
+    /// The targets Prometheus's discovery makes for one Service, as prometheus/discovery/kubernetes/endpoints.go
+    /// (buildEndpoints) and endpointslice.go (buildEndpointSlice) make them, at e56aabdc:
+    ///
+    /// <list type="number">
+    /// <item>One for each address and port the Endpoints object carries: every running pod behind the Service on each
+    /// port of it that leads to that pod (<see cref="Behind"/>, as the endpoints controller resolves a target port).
+    /// It carries the Service port's name, and the container port of that number where a container declares one
+    /// (<see cref="PortDiscoverySees"/>).</item>
+    /// <item>Then, for every pod the Endpoints object carries at all, one for each port its containers and init
+    /// containers declare, whatever the protocol, that is not among the ports the Endpoints object carries for that
+    /// pod (the loop over <c>seenPods</c>: "For all seen pods, check all container ports. If they were not covered by
+    /// one of the service endpoints, generate targets for them."). It carries that container port, and no endpoint
+    /// port name. A pod the Service leads to on no port is in no Endpoints object, and gets none.</item>
+    /// </list>
+    /// </summary>
+    private static IEnumerable<DiscoveredTarget> DiscoveredThrough(V1Service service, LiveNamespace ns)
+    {
+        Dictionary<string, (V1Pod Pod, HashSet<int> Ports)> seen = new(StringComparer.Ordinal);
+
+        foreach (V1ServicePort port in service.Spec?.Ports ?? [])
+        {
+            foreach ((V1Pod pod, int number) in Behind(service, port, ns))
+            {
+                if (!seen.TryGetValue(pod.Metadata.Name, out (V1Pod Pod, HashSet<int> Ports) entry))
+                {
+                    seen[pod.Metadata.Name] = entry = (pod, []);
+                }
+                entry.Ports.Add(number);
+
+                yield return new DiscoveredTarget(pod, number, port.Name, PortDiscoverySees(pod, number));
+            }
+        }
+
+        foreach ((V1Pod pod, HashSet<int> carried) in seen.Values)
+        {
+            foreach (V1ContainerPort declared in (pod.Spec?.Containers ?? []).Concat(pod.Spec?.InitContainers ?? [])
+                         .SelectMany(c => c.Ports ?? []))
+            {
+                if (carried.Contains(declared.ContainerPort)) continue;
+
+                yield return new DiscoveredTarget(pod, declared.ContainerPort, null, declared);
+            }
+        }
     }
 
     /// <summary>A pod port as the target list spells it.</summary>
@@ -222,21 +279,25 @@ public static class ScrapedEndpoints
     }
 
     /// <summary>
-    /// The same for a ServiceMonitor endpoint's <c>targetPort</c>, which is about the pod, not the Service.
+    /// Whether a ServiceMonitor endpoint keeps a discovered target, as prometheus-operator's relabelling decides
+    /// (pkg/prometheus/promcfg.go, generateServiceMonitorConfig, "Filter targets based on correct port for the
+    /// endpoint", at 9ead22a3):
     ///
-    /// <para>prometheus-operator (pkg/prometheus/promcfg.go, generateServiceMonitorConfig, at 9ead22a3) keeps
-    /// the target where <c>__meta_kubernetes_pod_container_port_name</c> is the name, or
-    /// <c>__meta_kubernetes_pod_container_port_number</c> the number. Prometheus's discovery sets those labels
-    /// only from a container port of the pod with the endpoint's number (discovery/kubernetes/endpoints.go,
-    /// buildEndpoints, and endpointslice.go alike, at e56aabdc; see <see cref="PortDiscoverySees"/>). A
-    /// number the pod does not declare has no such label, so the target is dropped: the Service reaches the
-    /// port, the monitor scrapes nothing.</para>
+    /// <list type="bullet">
+    /// <item>A <c>port</c> that is not empty keeps the targets whose <c>__meta_kubernetes_endpoint_port_name</c> is it,
+    /// and so none that discovery adds of its own, which have no endpoint port name.</item>
+    /// <item>Otherwise a <c>targetPort</c> name that is not empty keeps those whose
+    /// <c>__meta_kubernetes_pod_container_port_name</c> is it, and a number that is not 0 those whose
+    /// <c>__meta_kubernetes_pod_container_port_number</c> is it. A target port number no container declares has no
+    /// such label, so the Service reaches the port and the monitor scrapes nothing there.</item>
+    /// <item>Otherwise (neither, an empty port, targetPort 0 or "") every target is kept.</item>
+    /// </list>
     /// </summary>
-    private static bool TakesTargetPort(JsonObject endpoint, V1Pod pod, int port)
+    private static bool Keeps(JsonObject endpoint, DiscoveredTarget target)
     {
-        if (Text(endpoint["port"]) is not null) return true;
-        if (Number(endpoint["targetPort"]) is { } number) return port == number && PortDiscoverySees(pod, port) is not null;
-        if (Text(endpoint["targetPort"]) is { } name) return PortDiscoverySees(pod, port)?.Name == name;
+        if (Text(endpoint["port"]) is { Length: > 0 } name) return target.EndpointPortName == name;
+        if (Text(endpoint["targetPort"]) is { Length: > 0 } byName) return target.ContainerPort?.Name == byName;
+        if (Number(endpoint["targetPort"]) is { } number and not 0) return target.ContainerPort?.ContainerPort == number;
 
         return true;
     }
@@ -448,6 +509,13 @@ public static class ScrapedEndpoints
     /// happens to work, not what the record says, and the injector never writes it: so it is not copied
     /// here. Null, and the pod's merge cannot be told, which changes nothing for that pod alone. The JSON
     /// parser used to throw on an exact repeat, and the whole cluster's plan failed with it.</para>
+    ///
+    /// <para><b>Half a surrogate pair is U+FFFD.</b> A <c>\u</c> escape of a lone half is valid JSON, and Go reads it
+    /// as the replacement character and goes on (decode.go, <c>unquote</c>: "Invalid surrogate; fall back to
+    /// replacement rune"); System.Text.Json has no such setting and refuses to hand the string back at all. So the
+    /// text is first given Go's reading of those escapes (<see cref="AsGoDecodesSurrogates"/>). Whatever else the
+    /// parser cannot read is null like any other record that cannot be read: unknown for that pod, never a throw
+    /// that fails every other target on the cluster.</para>
     /// </summary>
     private sealed record IstioRecord(string Scrape, string Path, string Port, IReadOnlyList<(string Port, string Path)> Targets)
     {
@@ -458,7 +526,7 @@ public static class ScrapedEndpoints
         {
             try
             {
-                using JsonDocument document = JsonDocument.Parse(json ?? "");
+                using JsonDocument document = JsonDocument.Parse(AsGoDecodesSurrogates(json ?? ""));
 
                 if (Fields(document.RootElement, RecordFields) is not { } record
                     || !Field(record, "scrape", out string scrape)
@@ -488,11 +556,91 @@ public static class ScrapedEndpoints
 
                 return new IstioRecord(scrape, path, port, targets);
             }
-            catch (JsonException)
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentException)
             {
+                // ArgumentException: text that cannot be made UTF-8. InvalidOperationException: a string the parser
+                // will not hand back. Neither is left after AsGoDecodesSurrogates; caught all the same, because
+                // what this record says is one pod's question, and the answer to every other target must not hang on it.
                 return null;
             }
         }
+
+        private const string Replacement = "\\uFFFD";
+
+        /// <summary>
+        /// The record with every half of a surrogate pair that is not part of a whole one written as U+FFFD, which is
+        /// how Go's decoder reads it (decode.go, <c>unquote</c>, case <c>'u'</c>): an escaped half followed by an escape
+        /// of the half that completes it is the character they spell; any other escaped half is U+FFFD, and what
+        /// follows it is read on its own. A half in the text itself, unescaped, is U+FFFD too (Go reads bytes that are
+        /// not UTF-8 so; such a value cannot reach EntKube from the API server, which writes them so). An escaped
+        /// backslash is passed over whole, so the <c>u</c> after it is a letter, not an escape.
+        /// </summary>
+        private static string AsGoDecodesSurrogates(string json)
+        {
+            StringBuilder? read = null;
+
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+
+                if (c == '\\' && i + 1 < json.Length)
+                {
+                    if (json[i + 1] != 'u' || EscapedUnit(json, i) is not { } unit)
+                    {
+                        read?.Append(c).Append(json[i + 1]);
+                        i++;
+                        continue;
+                    }
+
+                    if (!char.IsSurrogate(unit))
+                    {
+                        read?.Append(json, i, 6);
+                        i += 5;
+                        continue;
+                    }
+
+                    if (char.IsHighSurrogate(unit) && EscapedUnit(json, i + 6) is { } low && char.IsLowSurrogate(low))
+                    {
+                        read?.Append(json, i, 12);
+                        i += 11;
+                        continue;
+                    }
+
+                    read ??= new StringBuilder(json, 0, i, json.Length + 8);
+                    read.Append(Replacement);
+                    i += 5;
+                    continue;
+                }
+
+                if (char.IsHighSurrogate(c) && i + 1 < json.Length && char.IsLowSurrogate(json[i + 1]))
+                {
+                    read?.Append(c).Append(json[i + 1]);
+                    i++;
+                    continue;
+                }
+
+                if (char.IsSurrogate(c))
+                {
+                    read ??= new StringBuilder(json, 0, i, json.Length + 8);
+                    read.Append('�');
+                    continue;
+                }
+
+                read?.Append(c);
+            }
+
+            return read?.ToString() ?? json;
+        }
+
+        /// <summary>The UTF-16 unit a <c>\uXXXX</c> escape at <paramref name="at"/> spells; null where there is none.</summary>
+        private static char? EscapedUnit(string json, int at)
+            => at + 6 <= json.Length
+               && json[at] == '\\'
+               && json[at + 1] == 'u'
+               && ushort.TryParse(json.AsSpan(at + 2, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture,
+                   out ushort unit)
+                ? (char)unit
+                : null;
 
         /// <summary>
         /// An object's members by the field each is for, as Go's decoder pairs them; null where it is not an

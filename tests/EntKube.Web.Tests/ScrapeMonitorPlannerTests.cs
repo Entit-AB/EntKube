@@ -739,6 +739,55 @@ public class ScrapeMonitorPlannerTests
         plan.Apply.Select(a => a.Identity).Should().Equal(Pods("databases", "entkube-cnpg-billing"));
     }
 
+    /// <summary>
+    /// istio-decode: a <c>\u</c> escape of half a surrogate pair, alone, is valid JSON, and Go's encoding/json
+    /// (decode.go, <c>unquote</c>: "Invalid surrogate; fall back to replacement rune") reads it as U+FFFD and goes
+    /// on. System.Text.Json refused to give such a string back at all (InvalidOperationException, "incomplete
+    /// UTF-16"), which escaped the planner and failed the whole cluster's plan. Read as Go reads it: a value is
+    /// then not <c>"false"</c> (so the agent merges), a key is one no field folds to (so it is ignored), and a
+    /// valid pair after a lone half is still the character it spells.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"scrape":"false\ud800","port":"9187"}""", true, "Go reads false and U+FFFD, which is not false")]
+    [InlineData("""{"scrape":"\udc00","port":"9187"}""", true, "a lone low half is U+FFFD too")]
+    [InlineData("""{"\ud800scrape":"false","port":"9187"}""", true, "a key that starts with U+FFFD is no field's, and is ignored")]
+    [InlineData("""{"scrape":"\ud800😀","port":"9187"}""", true, "a lone half, then a whole pair")]
+    [InlineData("""{"scrape":"false","path":"/metrics\ud83d","port":"9187"}""", false, "said false, whatever the path")]
+    [InlineData("""{"scrape":"false","path":"\\ud800","port":"9187"}""", false, "an escaped backslash is not an escape")]
+    public void A_record_with_half_a_surrogate_pair_is_read_as_go_reads_it(string original, bool merged, string because)
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), original);
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(merged ? MonitorState.CoveredElsewhere : MonitorState.Managed, because);
+        plan.Prune.Should().Equal(merged ? [Pods("databases", "entkube-cnpg-orders")] : [], because);
+    }
+
+    /// <summary>
+    /// istio-decode: half a surrogate pair in the record's text itself, not escaped. The API server never sends one
+    /// (Go writes what is not UTF-8 as U+FFFD), and it is read the same way: as U+FFFD, never as a throw that fails
+    /// every other target on the cluster.
+    /// </summary>
+    [Fact]
+    public void A_record_with_half_a_surrogate_pair_unescaped_is_read_as_go_reads_it()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), "{\"scrape\":\"false" + (char)0xD800 + "\",\"port\":\"9187\"}");
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+        world.DataService(ManagedServiceKind.Postgres, "databases", "billing");
+        world.CnpgPod("billing");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        plan.Rows.Single(r => r.Title == "orders").State.Should().Be(MonitorState.CoveredElsewhere);
+        plan.Rows.Single(r => r.Title == "billing").State.Should().Be(MonitorState.Managed);
+    }
+
     [Fact]
     public void A_pod_that_asks_not_to_be_scraped_is_not_annotated()
     {
@@ -1532,6 +1581,49 @@ public class ScrapeMonitorPlannerTests
         plan.Rows.Single(r => r.Kind == "Tetragon agent").State.Should().Be(expected, because);
         plan.Apply.Select(a => a.Identity).Should().Equal(
             declared ? [] : [Services("tetragon", "entkube-tetragon-tetragon")], because);
+    }
+
+    /// <summary>
+    /// sd-extra-targets: Prometheus's endpoints and endpointslice discovery make, for every pod an Endpoints object
+    /// carries, a target on each port the pod's containers declare that the Endpoints object does not
+    /// (discovery/kubernetes/endpoints.go and endpointslice.go, the loop over seenPods after the addresses). Such a
+    /// target has the container port's labels and no endpoint port name, so prometheus-operator's relabelling
+    /// (promcfg.go, generateServiceMonitorConfig) keeps it for an endpoint by <c>targetPort</c> that names or numbers
+    /// that container port, and for one with neither <c>port</c> nor <c>targetPort</c>; one by <c>port</c> keeps only
+    /// targets of that endpoint port name, and so none of these.
+    ///
+    /// <para>Here Tetragon declares 2112, our monitor scrapes it through the Service for metrics, and somebody else's
+    /// selects a Service in front of the same pod that leads only to 54321. Where theirs keeps the extra target on 2112,
+    /// it scrapes what ours would: a double, so ours stands aside. A pod that Service cannot lead to (a named target
+    /// it does not declare) is in no Endpoints object, and gets no extra targets.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("54321", """{"targetPort":2112}""", MonitorState.CoveredElsewhere, "a targetPort number the pod declares")]
+    [InlineData("54321", """{"targetPort":"metrics"}""", MonitorState.CoveredElsewhere, "a targetPort name the pod declares")]
+    [InlineData("54321", """{}""", MonitorState.CoveredElsewhere, "an endpoint without a port keeps every target")]
+    [InlineData("54321", """{"targetPort":0}""", MonitorState.CoveredElsewhere, "targetPort 0 filters nothing (IntVal != 0)")]
+    [InlineData("54321", """{"port":""}""", MonitorState.CoveredElsewhere, "an empty port filters nothing (Port != \"\")")]
+    [InlineData("54321", """{"port":"grpc"}""", MonitorState.Managed, "by port, only that endpoint port name is kept")]
+    [InlineData("54321", """{"targetPort":54321}""", MonitorState.Managed, "the other container port is dropped")]
+    [InlineData("grpc-undeclared", """{"targetPort":2112}""", MonitorState.Managed, "the pod is in no Endpoints object")]
+    public void A_foreign_monitor_keeps_the_targets_discovery_adds_for_the_pods_other_ports(
+        string grpcTarget, string endpoint, MonitorState expected, string because)
+    {
+        world.Component("tetragon", "tetragon", "tetragon");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(
+            ("app.kubernetes.io/name", "tetragon"), ("app.kubernetes.io/instance", "tetragon"));
+        world.Pod("tetragon", "tetragon-abcde", labels, ScrapeWorld.Container("tetragon", ("metrics", 2112)));
+        world.Service("tetragon", "tetragon", labels, labels, ("metrics", 2112, "2112"));
+        world.Service("tetragon", "tetragon-grpc", ScrapeWorld.Labels(("app.kubernetes.io/name", "tetragon-grpc")), labels,
+            ("grpc", 54321, grpcTarget));
+        world.Monitor(MonitorKind.ServiceMonitor, "tetragon", "grpc-and-more",
+            $$$"""{"selector":{"matchLabels":{"app.kubernetes.io/name":"tetragon-grpc"}},"endpoints":[{{{endpoint}}}]}""");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        plan.Rows.Single(r => r.Kind == "Tetragon agent").State.Should().Be(expected, because);
+        plan.Apply.Select(a => a.Identity).Should().Equal(
+            expected == MonitorState.Managed ? [Services("tetragon", "entkube-tetragon-tetragon")] : [], because);
     }
 
     [Theory]

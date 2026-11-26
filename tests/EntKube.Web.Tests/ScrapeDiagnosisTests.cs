@@ -607,6 +607,33 @@ public sealed class ScrapeDiagnosisTests
         d.WiringIsRight.Should().BeTrue();
     }
 
+    /// <summary>
+    /// sd-extra-targets: a Service that leads to the broker only on AMQP still has the broker pod in its Endpoints,
+    /// and Prometheus's endpoints discovery adds a target for each port the pod declares that the Endpoints object
+    /// does not carry (discovery/kubernetes/endpoints.go, the seenPods loop). A monitor by <c>targetPort</c> 15692, or
+    /// with no port at all, keeps the one on 15692 (prometheus-operator promcfg.go), so with a monitor by port through
+    /// the broker's own Service the broker is scraped twice; one by <c>port</c> keeps no such target.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"targetPort":15692}""", true)]
+    [InlineData("""{"targetPort":"prometheus"}""", true)]
+    [InlineData("""{}""", true)]
+    [InlineData("""{"port":"amqp"}""", false)]
+    public async Task A_monitor_through_a_service_without_the_metrics_port_still_reaches_it(string endpoint, bool doubled)
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            BrokerService("orders"),
+            $$$"""{"metadata":{"name":"orders-amqp","namespace":"mq","labels":{{{{OrdersLabels}}},"plane":"amqp"}},"spec":{"selector":{"app.kubernetes.io/name":"orders"},"ports":[{"name":"amqp","port":5672,"targetPort":5672}]}}""");
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "by-port", OrdersServices),
+            ServiceMonitor("mq", "by-amqp", """{"matchLabels":{"plane":"amqp"}}""", endpoints: endpoint));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().Be(doubled);
+        if (doubled) Said(d).Should().Contain("mq/by-port").And.Contain("mq/by-amqp");
+    }
+
     [Fact]
     public async Task Two_monitors_of_which_prometheus_reads_one_do_not_double_anything()
     {

@@ -107,6 +107,9 @@ public static class ScrapeMonitorPlanner
         private readonly Dictionary<MonitorIdentity, LiveMonitor> liveMonitors;
         private readonly HashSet<MonitorIdentity> ours;
 
+        /// <summary>The monitors the targets want, which is what an unlabelled monitor can be taken over by.</summary>
+        private readonly IReadOnlyList<MonitorSpec> wanted;
+
         /// <summary>Why Prometheus's list of targets cannot be taken as the whole of it yet; null when it can.</summary>
         private readonly string? starting;
 
@@ -126,11 +129,8 @@ public static class ScrapeMonitorPlanner
             prometheus = ChoosePrometheus(live);
             admission = AdmissionOf(prometheus, live.Workloads);
             liveMonitors = live.Monitoring.Monitors.ToDictionary(m => m.Identity);
-            ours =
-            [
-                .. live.Monitoring.Monitors.Where(IsOurs).Select(m => m.Identity),
-                .. targets.Select(t => t.Monitor).OfType<MonitorSpec>().Where(TakesOver).Select(m => m.Identity),
-            ];
+            wanted = [.. targets.Select(t => t.Monitor).OfType<MonitorSpec>()];
+            ours = [.. live.Monitoring.Monitors.Where(IsOurs).Select(m => m.Identity)];
             starting = prometheus is null ? null : WhyNotSettled(prometheus);
             annotationJobRuns = live.Monitoring.Targets.Any(t => t.Pool == ScrapedEndpoints.AnnotationJob);
         }
@@ -395,23 +395,12 @@ public static class ScrapeMonitorPlanner
 
         // ── Whose ─────────────────────────────────────────────────────────────
 
-        /// <summary>Written by EntKube for this very cluster registration: <see cref="ScrapeMonitorIdentity.IsOurs"/>.</summary>
-        private bool IsOurs(LiveMonitor monitor) => ScrapeMonitorIdentity.IsOurs(monitor.Labels, live.ClusterId);
-
         /// <summary>
-        /// Whether the live monitor of this name is the one EntKube wrote before it labelled them:
-        /// unlabelled, and selecting exactly what it did then.
+        /// The engine's own, by the one rule the handovers ask too: written by EntKube for this very cluster
+        /// registration, or the unlabelled one a wanted monitor takes over
+        /// (<see cref="ScrapeMonitorIdentity.IsOurs(LiveMonitor, IEnumerable{MonitorSpec}, Guid)"/>).
         /// </summary>
-        private bool TakesOver(MonitorSpec monitor)
-        {
-            if (!monitor.TakesOverUnlabelled || liveMonitors.GetValueOrDefault(monitor.Identity) is not { } existing)
-            {
-                return false;
-            }
-
-            return !existing.Labels.ContainsKey(ScrapeMonitorManifest.OwnershipLabel)
-                && JsonNode.DeepEquals(existing.Spec["selector"], monitor.Selector.ToJson());
-        }
+        private bool IsOurs(LiveMonitor monitor) => ScrapeMonitorIdentity.IsOurs(monitor, wanted, live.ClusterId);
 
         // ── Whether Prometheus's list is the whole of it ──────────────────────
 
