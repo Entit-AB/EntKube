@@ -127,7 +127,7 @@ public static class ScrapeMonitorPlanner
 
             // From here on it is a question of who scrapes these endpoints. What Prometheus itself
             // says comes first: an active target is evidence, whatever any selector reads like.
-            if (OtherPoolOn(resolved) is { } pool)
+            if (OtherPoolOn(monitor, resolved) is { } pool)
             {
                 return Yield(target, monitor, MonitorState.CoveredElsewhere, existingIsOurs, resolved,
                     $"Prometheus already scrapes it through {pool}. EntKube adds no monitor of its own, because two "
@@ -162,6 +162,21 @@ public static class ScrapeMonitorPlanner
                 return Row(target, MonitorState.NotSelectable, MonitorChange.None,
                     $"Whether {unclear.Identity} already scrapes it cannot be told, because its selector uses "
                     + "something EntKube does not understand. Nothing is changed while that is so.", resolved);
+            }
+
+            // Our own monitor would be the second job. Ours goes if there is one: a gap the row
+            // explains is better than every sum over those pods silently twice what it is.
+            if (resolved.Twice is [TwiceScrapedEndpoint twice, ..])
+            {
+                if (existingIsOurs) prune.Add(monitor.Identity);
+
+                return Row(target, MonitorState.NotSelectable,
+                    existingIsOurs ? MonitorChange.Remove : MonitorChange.None,
+                    $"Pod {twice.Endpoint.PodName} is behind {string.Join(" and ", twice.Services)}, both with port "
+                    + $"{twice.Endpoint.Port}, so a ServiceMonitor would scrape it twice and double every sum. EntKube "
+                    + (existingIsOurs ? "removes its monitor" : "makes no monitor")
+                    + " while that is so; remove the extra Service, or label it apart, and EntKube picks it up by itself.",
+                    resolved);
             }
 
             if (WhyPrometheusWouldNotSelect(monitor.Identity, out IReadOnlyDictionary<string, string> labels) is { } why)
@@ -256,14 +271,21 @@ public static class ScrapeMonitorPlanner
 
         // ── Who scrapes it already ────────────────────────────────────────────
 
-        /// <summary>A scrape job, not one of ours, with an active target on one of these endpoints.</summary>
-        private string? OtherPoolOn(ResolvedTargets resolved)
+        /// <summary>
+        /// A scrape job, not one of ours, with an active target on one of these endpoints.
+        ///
+        /// <para>The job of the monitor being decided is ours when nothing of that name is live: it
+        /// is what Prometheus keeps of one of ours that was just removed, until its next reload. The
+        /// same name is the same job, so writing the monitor again scrapes nothing twice.</para>
+        /// </summary>
+        private string? OtherPoolOn(MonitorSpec wanted, ResolvedTargets resolved)
         {
             HashSet<(string, int, string)> endpoints = [.. resolved.Endpoints.Select(e => (e.PodIp, e.Port, e.Path))];
 
             return live.Monitoring.Targets
                 .FirstOrDefault(t => endpoints.Contains((t.Host, t.Port, t.Path))
-                    && (t.Monitor is not { } monitor || !ours.Contains(monitor)))
+                    && (t.Monitor is not { } monitor
+                        || !(ours.Contains(monitor) || (monitor == wanted.Identity && !liveMonitors.ContainsKey(monitor)))))
                 ?.Pool;
         }
 

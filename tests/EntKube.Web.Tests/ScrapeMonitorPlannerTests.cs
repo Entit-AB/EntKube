@@ -669,6 +669,59 @@ public class ScrapeMonitorPlannerTests
         world.Plan().HasChanges.Should().BeFalse();
     }
 
+    /// <summary>
+    /// Prometheus lets go of a pool when it next reloads, about a minute after the monitor is
+    /// deleted. Until then the pool of a monitor of ours that was just removed (pruned while its
+    /// row was briefly missing, or deleted by hand) is still in the target list, and it is the pool
+    /// of the very monitor about to be written: the same name is the same job, so writing it again
+    /// scrapes nothing twice. Seen on kind, where it held the monitor back for a whole pass.
+    /// </summary>
+    [Fact]
+    public void The_pool_our_removed_monitor_left_behind_does_not_keep_it_from_being_made_again()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Scraped("podMonitor/databases/entkube-cnpg-orders/0", pod, 9187);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.Create);
+        plan.Apply.Should().ContainSingle().Which.Identity.Should().Be(Pods("databases", "entkube-cnpg-orders"));
+    }
+
+    /// <summary>Only our own name: the pool another deleted monitor left behind still scrapes the pod.</summary>
+    [Fact]
+    public void The_pool_somebody_elses_removed_monitor_left_behind_still_covers_it()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Scraped("podMonitor/databases/orders/0", pod, 9187);
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.CoveredElsewhere);
+        world.Plan().HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Only while nothing of our name is live: a live one that is somebody else's owns its pool,
+    /// and Prometheus saying it scrapes the pod outweighs a selector that reads as if it did not.
+    /// </summary>
+    [Fact]
+    public void The_pool_of_somebody_elses_live_monitor_under_our_name_is_theirs()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = world.CnpgPod("orders");
+        world.Monitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders", "{}",
+            (ScrapeMonitorManifest.OwnershipLabel, Guid.NewGuid().ToString()));
+        world.Scraped("podMonitor/databases/entkube-cnpg-orders/0", pod, 9187);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere);
+        OnlyRow(plan).Detail.Should().Contain("podMonitor/databases/entkube-cnpg-orders/0");
+        plan.HasChanges.Should().BeFalse();
+    }
+
     [Fact]
     public void A_monitor_somebody_made_under_our_name_is_not_overwritten()
     {
@@ -747,6 +800,73 @@ public class ScrapeMonitorPlannerTests
     }
 
     // ── One pod, once ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Kyverno's admission controller behind kyverno-svc-metrics and a second Service with the same
+    /// labels and port name, as a chart upgrade or a hand-made Service puts it. A ServiceMonitor gets
+    /// one target per Service, each with its own job label, so every sum over those pods is twice
+    /// what it is. Seen on kind: 9 targets for the 6 endpoints the row claimed.
+    /// </summary>
+    private V1Pod KyvernoAdmissionBehindTwoServices()
+    {
+        world.Component("kyverno", "kyverno", "kyverno");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(
+            ("app.kubernetes.io/instance", "kyverno"), ("app.kubernetes.io/part-of", "kyverno"),
+            ("app.kubernetes.io/component", "admission-controller"));
+        V1Pod pod = world.Pod("kyverno", "kyverno-admission-controller-0", labels,
+            ScrapeWorld.Container("kyverno", ("https", 9443), ("metrics-port", 8000)));
+        world.Service("kyverno", "kyverno-svc-metrics", labels, labels, ("metrics-port", 8000, "8000"));
+        world.Service("kyverno", "kyverno-svc-metrics-extra", labels, labels, ("metrics-port", 8000, "8000"));
+        return pod;
+    }
+
+    [Fact]
+    public void A_pod_two_Services_lead_to_gets_no_ServiceMonitor_that_would_scrape_it_twice()
+    {
+        KyvernoAdmissionBehindTwoServices();
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.NotSelectable);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.None);
+        OnlyRow(plan).Detail.Should().Contain("kyverno-svc-metrics").And.Contain("kyverno-svc-metrics-extra")
+            .And.Contain("twice");
+        plan.HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>Ours is what counts it twice, so ours goes: a visible gap rather than a silent double.</summary>
+    [Fact]
+    public void Our_ServiceMonitor_goes_when_a_second_Service_makes_it_scrape_a_pod_twice()
+    {
+        KyvernoAdmissionBehindTwoServices();
+        world.OurMonitor(MonitorKind.ServiceMonitor, "kyverno", "entkube-kyverno-kyverno");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).Change.Should().Be(MonitorChange.Remove);
+        plan.Prune.Should().Equal(Services("kyverno", "entkube-kyverno-kyverno"));
+        plan.Apply.Should().BeEmpty();
+    }
+
+    /// <summary>Two Services in front of different pods are two endpoints, not one twice.</summary>
+    [Fact]
+    public void Two_Services_in_front_of_different_pods_are_scraped_once_each()
+    {
+        world.Component("kyverno", "kyverno", "kyverno");
+        foreach (string controller in (string[])["admission-controller", "reports-controller"])
+        {
+            Dictionary<string, string> labels = ScrapeWorld.Labels(
+                ("app.kubernetes.io/instance", "kyverno"), ("app.kubernetes.io/part-of", "kyverno"),
+                ("app.kubernetes.io/component", controller));
+            world.Pod("kyverno", $"kyverno-{controller}-0", labels, ScrapeWorld.Container("kyverno", ("metrics", 8000)));
+            world.Service("kyverno", $"kyverno-{controller}-metrics", labels, labels, ("metrics-port", 8000, "8000"));
+        }
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
+        OnlyRow(plan).Endpoints.Should().HaveCount(2);
+    }
 
     /// <summary>
     /// Two headless Services in front of the same filer pods, both with the port. Only one carries
