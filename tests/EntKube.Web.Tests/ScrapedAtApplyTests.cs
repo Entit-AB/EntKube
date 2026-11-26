@@ -3,6 +3,7 @@ using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Moq;
 using YamlDotNet.RepresentationModel;
 
 namespace EntKube.Web.Tests;
@@ -47,8 +48,93 @@ public abstract class ValuesAtApply : IDisposable
         VaultService vault = new(factory,
             new VaultEncryptionService(Convert.FromBase64String(TestServices.TestRootKeyBase64)),
             TestServices.NoClusterAccess);
-        sut = TestServices.BuildLifecycle(factory, vault);
+
+        // The tenant's own cluster answers through the seam; the stranger's is not reachable from this tenant.
+        Cluster.SetupGet(c => c.ClusterId).Returns(ClusterId);
+        Cluster.SetupGet(c => c.ClusterName).Returns("ours");
+        ServesMonitorKinds(true);
+        Mock<EntKube.Web.Services.Clusters.IClusterClientFactory> clusters = new();
+        clusters.Setup(f => f.ForAsync(TenantId, ClusterId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => Reachable ? Cluster.Object : null);
+
+        Microsoft.Extensions.Configuration.IConfiguration config = TestServices.TestConfiguration();
+        IngestTokenService tokens = new(config);
+        sut = new ComponentLifecycleService(
+            factory, vault, TestServices.BuildKeycloak(factory, vault), tokens,
+            new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, tokens,
+                new EntKube.Web.Modules.Api.CatalogApi(factory), config),
+            config, clusters.Object,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
     }
+
+    /// <summary>The tenant's cluster as the cluster-client seam hands it out.</summary>
+    protected Mock<EntKube.Web.Services.Clusters.IClusterClient> Cluster { get; } = new();
+
+    /// <summary>Whether the seam can reach the cluster at all (a stored kubeconfig, this tenant's).</summary>
+    protected bool Reachable { get; set; } = true;
+
+    /// <summary>Monitors the cluster holds, as the API server lists them: (kind resource, JSON object).</summary>
+    protected List<(string Resource, string Json)> LiveMonitors { get; } = [];
+
+    protected const string CrdResource = "customresourcedefinitions.apiextensions.k8s.io";
+    protected const string ServiceMonitors = "servicemonitors.monitoring.coreos.com";
+    protected const string PodMonitors = "podmonitors.monitoring.coreos.com";
+
+    /// <summary>Whether the cluster serves the Prometheus Operator's kinds (its CRDs are installed).</summary>
+    protected void ServesMonitorKinds(bool served)
+    {
+        foreach (string crd in new[] { ServiceMonitors, PodMonitors })
+        {
+            Cluster.Setup(c => c.ResourceExistsAsync(CrdResource, crd, "", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(served);
+        }
+
+        foreach (string kind in new[] { ServiceMonitors, PodMonitors })
+        {
+            Cluster.Setup(c => c.GetJsonAsync(kind, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string resource, string ns, string selector, CancellationToken _) =>
+                    served ? ListOf(resource, ns, selector)
+                           : throw new InvalidOperationException($"error: the server doesn't have a resource type \"{resource}\""));
+        }
+    }
+
+    /// <summary>What <c>kubectl get &lt;resource&gt; -n ns -l a=b,c=d -o json</c> answers.</summary>
+    private string ListOf(string resource, string ns, string selector)
+    {
+        Dictionary<string, string> wanted = selector.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('=', 2)).ToDictionary(p => p[0], p => p[1]);
+        System.Text.Json.Nodes.JsonArray items = [];
+        foreach ((string kind, string json) in LiveMonitors.Where(m => m.Resource == resource))
+        {
+            System.Text.Json.Nodes.JsonNode item = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+            if ((string?)item["metadata"]!["namespace"] != ns) continue;
+            System.Text.Json.Nodes.JsonObject labels = item["metadata"]!["labels"]!.AsObject();
+            if (!wanted.All(w => labels.TryGetPropertyValue(w.Key, out System.Text.Json.Nodes.JsonNode? v)
+                                 && (string?)v == w.Value)) continue;
+            items.Add(item);
+        }
+        return new System.Text.Json.Nodes.JsonObject { ["kind"] = "List", ["items"] = items }.ToJsonString();
+    }
+
+    /// <summary>A monitor as the API server lists it. By default the monitor engine's, for this tenant's cluster.</summary>
+    protected string Monitor(string kind, string name, string ns, Guid? labelledFor = null, bool managedBy = true)
+    {
+        System.Text.Json.Nodes.JsonObject labels = new()
+        {
+            ["entkube.io/scrape-monitor"] = (labelledFor ?? ClusterId).ToString(),
+        };
+        if (managedBy) labels["app.kubernetes.io/managed-by"] = "entkube";
+        return new System.Text.Json.Nodes.JsonObject
+        {
+            ["apiVersion"] = "monitoring.coreos.com/v1",
+            ["kind"] = kind,
+            ["metadata"] = new System.Text.Json.Nodes.JsonObject { ["name"] = name, ["namespace"] = ns, ["labels"] = labels },
+        }.ToJsonString();
+    }
+
+    /// <summary>The monitor engine's own ServiceMonitor for the catalog's Keycloak (release keycloak, namespace keycloak).</summary>
+    protected void EnginesKeycloakMonitorStands(string release = "keycloak", string ns = "keycloak")
+        => LiveMonitors.Add((ServiceMonitors, Monitor("ServiceMonitor", $"entkube-keycloak-{release}", ns)));
 
     public void Dispose()
     {
@@ -153,11 +239,13 @@ public abstract class ValuesAtApply : IDisposable
 }
 
 /// <summary>
-/// Keycloak's metrics are scraped through EntKube's own ServiceMonitor, so the chart's has to stop.
+/// Keycloak's metrics are scraped through EntKube's own ServiceMonitor where the engine made one, so there the
+/// chart's has to stop.
 ///
 /// <para>The catalog turned the chart's on for every install. Its kind exists only where the Prometheus
 /// Operator is, so on a cluster without it helm refused the whole release and Keycloak did not install.
-/// And where it did install, EntKube's monitor beside it would have doubled every number.</para>
+/// And where EntKube's own monitor stands beside it, every number would be doubled. Everywhere else the chart's
+/// may be the only monitor there is, and is handed to helm as stored.</para>
 /// </summary>
 public class KeycloakMonitorHandoverTests : ValuesAtApply
 {
@@ -198,6 +286,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task A_new_keycloak_installs_without_the_charts_monitor_whether_or_not_there_is_a_prometheus(bool prometheus)
     {
         if (prometheus) InstallPrometheus();
+        else ServesMonitorKinds(false);
 
         string values = await ApplyAsync(Install("keycloak", CatalogDefaults("keycloak")));
 
@@ -205,13 +294,17 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     }
 
     /// <summary>
-    /// Where EntKube's own Prometheus serves the cluster, its engine makes Keycloak's monitor, and the chart's
-    /// beside it would be a second scrape of the same pods.
+    /// Where the monitor engine's own ServiceMonitor for this Keycloak already stands, the chart's beside it would
+    /// be a second scrape of the same pods. Read from the cluster, whatever Catalog says: here no
+    /// kube-prometheus-stack is registered at all (it may be uninstalling, or its row gone) and ours still runs.
     /// </summary>
-    [Fact]
-    public async Task Where_entkubes_prometheus_serves_the_cluster_the_old_catalog_block_is_turned_off()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Where_the_engines_own_monitor_stands_the_old_catalog_block_is_turned_off(bool catalogPrometheus)
     {
-        InstallPrometheus();
+        if (catalogPrometheus) InstallPrometheus();
+        EnginesKeycloakMonitorStands();
 
         string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
 
@@ -220,24 +313,130 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     }
 
     /// <summary>
-    /// Everywhere else the engine makes nothing: it runs only where Catalog's kube-prometheus-stack serves the
-    /// cluster. A Prometheus Operator EntKube did not install (the customer's own, Rancher's) may be the one
-    /// scraping the chart's monitor, and turning it off would leave Keycloak unscraped with nothing to say so.
-    /// So the block is handed to helm as it was stored.
+    /// The skeptic's case (a): EntKube's Prometheus serves the cluster (or another Prometheus does, or one EntKube
+    /// is still installing), but the engine made nothing for this Keycloak: Prometheus selects the chart's monitor
+    /// and the planner sees it covered, or it is sharded, ambiguous, unreadable. The chart's may be the only monitor
+    /// there is, so the block is handed to helm as it was stored.
     /// </summary>
     [Theory]
     [InlineData(null)]
+    [InlineData(ComponentStatus.Installed)]
     [InlineData(ComponentStatus.NotInstalled)]
     [InlineData(ComponentStatus.Failed)]
     [InlineData(ComponentStatus.Installing)]
-    public async Task Where_entkubes_prometheus_does_not_serve_the_cluster_the_block_is_left_as_stored(ComponentStatus? status)
+    public async Task Where_no_monitor_of_ours_stands_the_block_is_left_as_stored(ComponentStatus? status)
     {
         if (status is { } prometheus) InstallPrometheus(status: prometheus);
 
         string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
 
         Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}",
-            "no EntKube monitor follows here, so the chart's is the only one there is");
+            "nothing of EntKube's scrapes this Keycloak, so the chart's is the only monitor there is");
+    }
+
+    /// <summary>
+    /// Only the engine's own monitor for this release counts: its name, its namespace, both ownership labels, this
+    /// cluster's id. A same-named monitor somebody else wrote is not ours, nor one for another release.
+    /// </summary>
+    [Theory]
+    [InlineData("for another release")]
+    [InlineData("in another namespace")]
+    [InlineData("labelled for another cluster")]
+    [InlineData("not managed by entkube")]
+    [InlineData("a PodMonitor of that name")]
+    public async Task A_monitor_that_is_not_wholly_ours_does_not_hand_keycloak_over(string which)
+    {
+        InstallPrometheus();
+        LiveMonitors.Add(which switch
+        {
+            "for another release" => (ServiceMonitors, Monitor("ServiceMonitor", "entkube-keycloak-other", "keycloak")),
+            "in another namespace" => (ServiceMonitors, Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "identity")),
+            "labelled for another cluster" => (ServiceMonitors,
+                Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", labelledFor: StrangersClusterId)),
+            "not managed by entkube" => (ServiceMonitors,
+                Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", managedBy: false)),
+            "a PodMonitor of that name" => (PodMonitors, Monitor("PodMonitor", "entkube-keycloak-keycloak", "keycloak")),
+            _ => throw new ArgumentOutOfRangeException(nameof(which)),
+        });
+
+        string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
+
+        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}");
+    }
+
+    /// <summary>
+    /// keycloak-crdless-regression: on a cluster without the Prometheus Operator's CRDs the chart's ServiceMonitor
+    /// cannot be created, and helm refuses the whole release ("no matches for kind ServiceMonitor"). So the
+    /// catalog's block is turned off there, whatever the handover would say, with or without a Prometheus row.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(ComponentStatus.Installed)]
+    [InlineData(ComponentStatus.Uninstalling)]
+    public async Task Where_the_cluster_has_no_servicemonitor_kind_the_block_is_turned_off_so_helm_can_install(
+        ComponentStatus? status)
+    {
+        if (status is { } prometheus) InstallPrometheus(status: prometheus);
+        ServesMonitorKinds(false);
+
+        string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
+
+        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:false}",
+            "a ServiceMonitor helm cannot create fails the release, and Keycloak with it");
+    }
+
+    /// <summary>
+    /// Unknown means do nothing: a cluster that cannot be reached, a CRD probe or a monitor list that fails. Each of
+    /// a refused release, a double scrape and a lost one is on the table, so the apply fails before helm is given
+    /// anything rather than guess.
+    /// </summary>
+    [Theory]
+    [InlineData("unreachable")]
+    [InlineData("kind")]
+    [InlineData("list")]
+    [InlineData("garbage")]
+    public async Task Where_the_cluster_cannot_say_the_apply_fails_before_helm_is_given_anything(string failure)
+    {
+        InstallPrometheus();
+        string expected = "*cluster unreachable*";
+        switch (failure)
+        {
+            case "unreachable":
+                Reachable = false;
+                expected = "*cannot be told*";
+                break;
+            case "kind":
+                Cluster.Setup(c => c.ResourceExistsAsync(CrdResource, ServiceMonitors, "", It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "list":
+                Cluster.Setup(c => c.GetJsonAsync(ServiceMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "garbage":
+                Cluster.Setup(c => c.GetJsonAsync(ServiceMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ReturnsAsync("Unable to connect to the server");
+                expected = "*could not be read*";
+                break;
+        }
+        Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
+
+        Func<Task> act = () => ApplyAsync(keycloak);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(expected);
+    }
+
+    /// <summary>The cluster is asked only where the answer can change something: a Keycloak without the block is not read for.</summary>
+    [Fact]
+    public async Task A_keycloak_without_the_catalogs_block_asks_the_cluster_nothing()
+    {
+        InstallPrometheus();
+        Reachable = false;
+
+        string values = await ApplyAsync(Install("keycloak", CatalogDefaults("keycloak")));
+
+        At(Parse(values), "serviceMonitor").Should().BeNull();
+        Cluster.Invocations.Should().BeEmpty();
     }
 
     [Fact]
@@ -257,6 +456,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task The_same_block_written_another_way_is_still_the_catalogs(string block)
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", "metrics:\n  enabled: true\n" + block + "\n");
 
         Scalar(await ApplyAsync(keycloak), "serviceMonitor", "enabled").Should().Be("false");
@@ -272,6 +472,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task A_block_the_operator_made_theirs_is_kept_to_the_letter(string block)
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         string stored = CatalogDefaults("keycloak") + "\n# ours\n" + block + "\n";
 
         (await ApplyAsync(Install("keycloak", stored))).Should().Be(stored);
@@ -281,6 +482,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task An_install_older_than_the_block_is_not_given_one()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", "database:\n  vendor: postgres\nhttp:\n  relativePath: /auth\n");
 
         string values = await ApplyAsync(keycloak);
@@ -294,6 +496,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task Turning_it_off_leaves_one_serviceMonitor_key_and_the_rest_as_it_was()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
 
         string values = await ApplyAsync(keycloak);
@@ -320,6 +523,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task A_keycloak_with_themes_and_volumes_of_its_own_is_handed_over_too()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog + "\nextraVolumes: |\n  - name: ours\n    emptyDir: {}\n");
         KeycloakComponentConfig config = new()
         {
@@ -351,6 +555,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task Certificates_and_manifests_kept_in_the_values_come_through_whole()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog + """
 
             secrets:
@@ -387,6 +592,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task The_last_text_in_the_document_keeps_its_newline()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", CatalogDefaults("keycloak")
             + "\nserviceMonitor:\n  enabled: true\nstartupScripts:\n  init.sh: |\n    #!/bin/sh\n    echo ready\n");
 
@@ -400,6 +606,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     public async Task The_stored_values_are_not_rewritten()
     {
         InstallPrometheus();
+        EnginesKeycloakMonitorStands();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
 
         await ApplyAsync(keycloak);
@@ -685,6 +892,85 @@ public class SeaweedFsLetsPrometheusInTests : ValuesAtApply
 
         (await ApplyAsync(Install("seaweedfs", stored))).Should().Be(stored,
             "a guessed namespace would admit somebody else's pods to the port that serves pprof");
+    }
+
+    /// <summary>
+    /// seaweedfs-default-namespace: the two halves agree. The engine judges admission by the policies it reads
+    /// (<see cref="EntKube.Web.Services.ScrapeMonitors.PrometheusAdmission"/>) against the Prometheus it finds
+    /// live; the apply writes the rule. Fed the policy the chart renders from the values the apply hands helm,
+    /// the engine lets Prometheus in exactly where the apply opened the port to it.
+    ///
+    /// <para><b>A blank namespace is unknown on both sides.</b> The engine looks for Prometheus in its default
+    /// (monitoring) and may well find it there, but the apply opened nothing for a namespace nobody recorded, and
+    /// the engine, reading the policy rather than the record, sees the port shut: BlockedByNetworkPolicy, no
+    /// monitor made, nothing guessed open to pods that only call themselves prometheus.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("monitoring", null, "monitoring", true)]
+    [InlineData("monitoring", "{\"namespace\":\"observability\"}", "observability", true)]
+    [InlineData("monitoring", null, "observability", false)]
+    [InlineData(null, null, "monitoring", false)]
+    [InlineData("  ", null, "monitoring", false)]
+    public async Task The_engine_lets_prometheus_in_exactly_where_the_apply_opened_the_port(
+        string? column, string? configuration, string livePrometheusNamespace, bool admitted)
+    {
+        InstallPrometheus(@namespace: column, configuration: configuration);
+
+        string values = await ApplyAsync(Install("seaweedfs", CatalogDefaults("seaweedfs")));
+
+        k8s.Models.V1Pod filer = new()
+        {
+            Metadata = new k8s.Models.V1ObjectMeta
+            {
+                Name = "seaweedfs-filer-0", NamespaceProperty = "storage",
+                Labels = new Dictionary<string, string>
+                {
+                    ["app.kubernetes.io/name"] = "seaweedfs", ["app.kubernetes.io/component"] = "filer",
+                },
+            },
+            Spec = new k8s.Models.V1PodSpec
+            {
+                Containers =
+                [
+                    new k8s.Models.V1Container
+                    {
+                        Name = "seaweedfs",
+                        Ports = [new k8s.Models.V1ContainerPort { Name = "metrics", ContainerPort = 9327 }],
+                    },
+                ],
+            },
+            Status = new k8s.Models.V1PodStatus { PodIP = "10.0.0.5" },
+        };
+        EntKube.Web.Services.ScrapeMonitors.PrometheusAdmission engine = new(
+            livePrometheusNamespace,
+            new Dictionary<string, string> { ["kubernetes.io/metadata.name"] = livePrometheusNamespace },
+            [new Dictionary<string, string> { ["app.kubernetes.io/name"] = "prometheus" }]);
+
+        engine.Admits(
+                new EntKube.Web.Services.ScrapeMonitors.ScrapedEndpoint(filer, 9327, "/metrics"),
+                new EntKube.Web.Services.ScrapeMonitors.LiveNamespace("storage", [filer], [], [TheChartsPolicy(values)]))
+            .Should().Be(admitted);
+    }
+
+    /// <summary>
+    /// The policy the chart renders for a server: its own rule (the S3 port) and every networkPolicy.extraIngress
+    /// rule, over all of the release's pods.
+    /// </summary>
+    private static k8s.Models.V1NetworkPolicy TheChartsPolicy(string values)
+    {
+        YamlMappingNode policy = new(
+            new YamlScalarNode("apiVersion"), new YamlScalarNode("networking.k8s.io/v1"),
+            new YamlScalarNode("kind"), new YamlScalarNode("NetworkPolicy"),
+            new YamlScalarNode("metadata"), new YamlMappingNode(
+                new YamlScalarNode("name"), new YamlScalarNode("seaweedfs-filer"),
+                new YamlScalarNode("namespace"), new YamlScalarNode("storage")),
+            new YamlScalarNode("spec"), new YamlMappingNode(
+                new YamlScalarNode("podSelector"), new YamlMappingNode(),
+                new YamlScalarNode("policyTypes"), new YamlSequenceNode(new YamlScalarNode("Ingress")),
+                new YamlScalarNode("ingress"), At(Parse(values), "networkPolicy", "extraIngress")!));
+        using StringWriter text = new();
+        new YamlStream(new YamlDocument(policy)).Save(text, assignAnchors: false);
+        return k8s.KubernetesYaml.Deserialize<k8s.Models.V1NetworkPolicy>(text.ToString().TrimEnd('.', '\n', '\r'));
     }
 
     /// <summary>

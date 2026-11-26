@@ -3260,9 +3260,10 @@ public static class ComponentCatalog
                 # serviceMonitor is deliberately not turned on: it fails the install on a cluster
                 # without the Prometheus Operator, and where EntKube's own kube-prometheus-stack
                 # serves the cluster EntKube makes the monitor itself. Where some other Prometheus
-                # should scrape Keycloak, turn the chart's on yourself. To run the chart's beside
-                # EntKube's Prometheus instead, give its block a setting of your
-                # own (an interval, say) beside enabled: true; EntKube then leaves it alone.
+                # should scrape Keycloak, turn the chart's on yourself. A bare enabled: true is
+                # turned off at apply only where the cluster has no ServiceMonitor kind, or where
+                # EntKube's own monitor for this Keycloak already runs; give the block a setting of
+                # your own (an interval, say) beside it and EntKube leaves it alone everywhere.
                 metrics:
                   enabled: true
                 health:
