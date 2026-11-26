@@ -375,7 +375,15 @@ public static class ScrapeTargetCatalog
         InstalledComponent c, string component, string what, params (string Key, string Value)[] more)
         => Services(c, $"seaweedfs-{component}", what,
             LabelSelector.Of([(Name, "seaweedfs"), (Instance, Release(c)), (Component, component), .. more]),
-            new ScrapeEndpointSpec("metrics"));
+            new ScrapeEndpointSpec("metrics")) with
+        {
+            // The chart owns its NetworkPolicies. What opens them to Prometheus is the rule EntKube adds
+            // to the release's values when SeaweedFS is applied on a cluster with Prometheus, which a
+            // SeaweedFS installed before Prometheus never got.
+            WhenBlocked = "The SeaweedFS chart owns that policy, and an edit to it by hand is undone by its next "
+                + "upgrade. Re-apply SeaweedFS and EntKube adds the rule that lets Prometheus in, then picks it up "
+                + "by itself.",
+        };
 
     private static ScrapeTargetSpec Part(
         InstalledComponent c, string slug, string what, MonitorKind kind, LabelSelector selector,

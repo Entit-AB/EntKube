@@ -264,4 +264,17 @@ public class ScrapeTargetCatalogTests
 
         world.Specs().Should().ContainSingle().Which.Key.Should().Be("cnpg/data/x");
     }
+
+    /// <summary>
+    /// SeaweedFS's chart owns its NetworkPolicies and undoes an edit to them on its next upgrade. What
+    /// lets Prometheus in is the rule EntKube adds when SeaweedFS is applied, so that is the remedy.
+    /// </summary>
+    [Fact]
+    public void Every_part_of_SeaweedFS_says_to_re_apply_it_when_Prometheus_is_kept_out()
+    {
+        world.Component("seaweedfs", "seaweedfs", "seaweedfs");
+
+        world.Specs().Should().HaveCount(4).And.OnlyContain(t => t.WhenBlocked != null
+            && t.WhenBlocked.Contains("Re-apply SeaweedFS") && t.WhenBlocked.EndsWith('.'));
+    }
 }

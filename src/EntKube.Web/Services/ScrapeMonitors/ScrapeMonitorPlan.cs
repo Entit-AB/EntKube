@@ -8,14 +8,33 @@ public enum MonitorState
     /// <summary>EntKube's monitor scrapes it, or will as soon as it is applied.</summary>
     Managed,
 
-    /// <summary>Something else scrapes the same endpoint already. Ours, if there is one, is removed.</summary>
+    /// <summary>
+    /// Something else scrapes every one of its endpoints already: Prometheus lists a target on each,
+    /// or a monitor it selects was made too recently to have one yet. Ours, if there is one, is removed.
+    /// </summary>
     CoveredElsewhere,
 
     /// <summary>
-    /// Its pods ask to be scraped by annotation, which the stack's own job honours. Ours, if there is
-    /// one, is removed.
+    /// Its pods ask to be scraped by annotation, the stack's annotation job is there and takes them by
+    /// its own rules, and they started too recently for Prometheus to list them yet. Not proof that
+    /// anything scrapes them: once Prometheus does list them, the row says <see cref="CoveredElsewhere"/>,
+    /// and if it still has not after a while, the annotation is not counted. Ours, if there is one, is
+    /// removed.
     /// </summary>
     Annotated,
+
+    /// <summary>
+    /// Something else scrapes some of its endpoints and nothing scrapes the rest. Ours would scrape all of
+    /// them, so it is neither made nor kept: a gap the row names beats a silent double. Ours, if there is
+    /// one, is removed.
+    /// </summary>
+    PartlyCovered,
+
+    /// <summary>
+    /// Prometheus started too recently for its list of targets to be the whole of what it scrapes, or how
+    /// long it has run cannot be told. Nothing is created, changed or removed on that pass.
+    /// </summary>
+    PrometheusStarting,
 
     /// <summary>No pods of it are running. Nothing is created; ours, if there is one, stays.</summary>
     NotRunning,
@@ -105,6 +124,7 @@ public enum MonitorPlanScope
 /// <param name="Apply">Only the monitors that differ from what they should be.</param>
 /// <param name="Prune">
 /// Monitors of ours to remove: their owner is gone, or something else scrapes the same endpoint.
+/// Empty while Prometheus is starting.
 /// </param>
 public sealed record ScrapeMonitorPlan(
     IReadOnlyList<MonitorPlanRow> Rows,

@@ -98,4 +98,11 @@ public sealed record ScrapeTargetSpec(
     string ServiceKind,
     string Namespace,
     MonitorSpec? Monitor = null,
-    string? Info = null);
+    string? Info = null)
+{
+    /// <summary>
+    /// What to do when a NetworkPolicy keeps Prometheus out, as a full sentence, where it is not the
+    /// usual "let it in": a chart that owns its policies undoes an edit to them by hand.
+    /// </summary>
+    public string? WhenBlocked { get; init; }
+}

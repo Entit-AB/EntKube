@@ -21,6 +21,11 @@ internal sealed class ScrapeWorld
     public readonly Guid ClusterId = Guid.Parse("7a1e5f0c-94c9-4f0e-8f5c-0a8f9b5a6d11");
     public readonly Guid TenantId = Guid.Parse("5b1e5f0c-94c9-4f0e-8f5c-0a8f9b5a6d22");
 
+    /// <summary>When the cluster is read. Every pod, Prometheus's own included, has run for an hour by then.</summary>
+    public DateTimeOffset Now = new(2026, 11, 26, 12, 0, 0, TimeSpan.Zero);
+
+    public static readonly TimeSpan AnHour = TimeSpan.FromHours(1);
+
     public readonly List<LivePrometheus> Prometheuses = [];
     public readonly List<LiveMonitor> Monitors = [];
     public readonly List<ActiveTarget> Targets = [];
@@ -37,9 +42,27 @@ internal sealed class ScrapeWorld
     {
         Namespace("monitoring");
         Prometheus("""{"serviceMonitorSelector":{},"podMonitorSelector":{},"serviceMonitorNamespaceSelector":{},"podMonitorNamespaceSelector":{}}""");
-        Pod("monitoring", "prometheus-kps-0", Labels(
+        PrometheusPod = Pod("monitoring", "prometheus-kps-0", Labels(
             ("app.kubernetes.io/name", "prometheus"), ("operator.prometheus.io/name", $"{Release}-prometheus")),
             Container("prometheus", ("http-web", 9090)));
+        PrometheusStarted(Now - AnHour);
+    }
+
+    /// <summary>The pod the operator runs the Prometheus in.</summary>
+    public V1Pod PrometheusPod { get; }
+
+    /// <summary>The Prometheus container (re)started then, as the kubelet reports it.</summary>
+    public ScrapeWorld PrometheusStarted(DateTimeOffset at)
+    {
+        PrometheusPod.Status.ContainerStatuses =
+        [
+            new V1ContainerStatus
+            {
+                Name = "prometheus", Ready = true, Image = "prometheus", ImageID = "", RestartCount = 0,
+                State = new V1ContainerState { Running = new V1ContainerStateRunning { StartedAt = at.UtcDateTime } },
+            },
+        ];
+        return this;
     }
 
     // ── What is live ──────────────────────────────────────────────────────────
@@ -70,7 +93,10 @@ internal sealed class ScrapeWorld
         {
             Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns, Labels = labels },
             Spec = new V1PodSpec { Containers = [.. containers] },
-            Status = new V1PodStatus { Phase = "Running", PodIP = $"10.0.0.{++lastAddress}" },
+            Status = new V1PodStatus
+            {
+                Phase = "Running", PodIP = $"10.0.0.{++lastAddress}", StartTime = (Now - AnHour).UtcDateTime,
+            },
         };
 
         pods.Add(pod);
@@ -104,12 +130,21 @@ internal sealed class ScrapeWorld
         return this;
     }
 
-    /// <summary>A monitor somebody made. Not EntKube's unless the labels say so.</summary>
+    /// <summary>
+    /// A monitor somebody made a moment ago, so Prometheus may not have loaded it yet. Not EntKube's
+    /// unless the labels say so.
+    /// </summary>
     public LiveMonitor Monitor(
         MonitorKind kind, string ns, string name, string spec, params (string Key, string Value)[] labels)
+        => MonitorMade(Now, kind, ns, name, spec, labels);
+
+    /// <summary>A monitor somebody made then; null where the API server did not say.</summary>
+    public LiveMonitor MonitorMade(
+        DateTimeOffset? at, MonitorKind kind, string ns, string name, string spec,
+        params (string Key, string Value)[] labels)
     {
         LiveMonitor monitor = new(
-            new MonitorIdentity(kind, ns, name), Labels(labels), new Dictionary<string, string>(), Json(spec));
+            new MonitorIdentity(kind, ns, name), Labels(labels), new Dictionary<string, string>(), Json(spec), at);
         Monitors.Add(monitor);
         return monitor;
     }
@@ -119,9 +154,10 @@ internal sealed class ScrapeWorld
         => Monitor(kind, ns, name, "{}", (ScrapeMonitorManifest.OwnershipLabel, ClusterId.ToString()));
 
     /// <summary>Prometheus scrapes this pod's port through that pool.</summary>
-    public ScrapeWorld Scraped(string pool, V1Pod pod, int port, string path = "/metrics", bool up = true)
+    public ScrapeWorld Scraped(
+        string pool, V1Pod pod, int port, string path = "/metrics", bool up = true, string query = "")
     {
-        Targets.Add(new ActiveTarget(pool, pod.Status.PodIP, port, path, up));
+        Targets.Add(new ActiveTarget(pool, pod.Status.PodIP, port, path, up, query));
         return this;
     }
 
@@ -157,7 +193,7 @@ internal sealed class ScrapeWorld
 
     public IReadOnlyList<ScrapeTargetSpec> Specs() => ScrapeTargetCatalog.For(Components, Services);
 
-    public LiveMonitoring Monitoring() => new([.. Prometheuses], [.. Monitors], [.. Targets]);
+    public LiveMonitoring Monitoring() => new([.. Prometheuses], [.. Monitors], [.. Targets], Now);
 
     public LiveWorkloads Workloads() => new(
         namespaceLabels.ToDictionary(n => n.Key, n => (IReadOnlyDictionary<string, string>)n.Value),
@@ -193,7 +229,7 @@ internal sealed class ScrapeWorld
             }
 
             Monitors.Add(new LiveMonitor(
-                planned.Identity, Pairs(metadata["labels"]!), Pairs(metadata["annotations"]!), spec));
+                planned.Identity, Pairs(metadata["labels"]!), Pairs(metadata["annotations"]!), spec, Now));
         }
 
         return this;
