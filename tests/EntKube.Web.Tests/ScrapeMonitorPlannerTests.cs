@@ -1817,7 +1817,11 @@ public class ScrapeMonitorPlannerTests
 
         row.State.Should().Be(MonitorState.Managed);
         row.Change.Should().Be(MonitorChange.Create);
-        row.Detail.Should().Contain("PodMonitor databases/orders").And.Contain("nothing through it");
+        row.Detail.Should().Contain("PodMonitor databases/orders").And.Contain("60 minutes ago");
+        // Only today's target list is seen: on kind the same monitor had been scraped through until a moment
+        // before (Prometheus's selector had just been widened), and the row said it never had been.
+        row.Detail.Should().Contain("lists no target through it on these pods now")
+            .And.NotContain("since it was made");
     }
 
     [Fact]

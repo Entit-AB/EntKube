@@ -555,9 +555,11 @@ public static class ScrapeMonitorPlanner
 
             foreach (MonitorIdentity monitor in stale.OrderBy(m => m.ToString(), StringComparer.Ordinal))
             {
-                notes.Add($"{monitor}, which EntKube did not create, selects it too, but Prometheus has scraped "
-                    + $"nothing through it on these pods in the {Since(live.Monitoring.ReadAt - liveMonitors[monitor].Created!.Value)} "
-                    + "since it was made, so it is not counted.");
+                // Only today's target list is known, never its history: a Prometheus selector widened a moment ago
+                // makes a long-scraped monitor look like this too, so the sentence claims nothing about the past.
+                notes.Add($"{monitor}, which EntKube did not create, selects it too, but Prometheus lists no target "
+                    + $"through it on these pods now, and it was made {Since(live.Monitoring.ReadAt - liveMonitors[monitor].Created!.Value)} "
+                    + "ago, so it is not counted.");
             }
 
             if (annotatedNotTaken.Count > 0)
