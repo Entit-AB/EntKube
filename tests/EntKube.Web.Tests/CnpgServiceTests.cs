@@ -1349,7 +1349,8 @@ public class CnpgServiceTests : IDisposable
     /// <c>kubectl get -n ns -l a=b,c=d -o json</c> answers. <paramref name="honourSelector"/> false hands back
     /// the whole namespace, to show the answer is checked and not only the question.
     /// </summary>
-    private void PodMonitorsOnTheCluster(bool kindServed, string[] monitors, bool honourSelector = true)
+    /// <remarks>Read at every list, so a test can change what stands part-way through an action.</remarks>
+    private void PodMonitorsOnTheCluster(bool kindServed, IEnumerable<string> monitors, bool honourSelector = true)
     {
         k8sFactory.Setup(f => f.ResourceExistsAsync(
                 CrdResource, PodMonitors, "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -1459,15 +1460,15 @@ public class CnpgServiceTests : IDisposable
     }
 
     /// <summary>
-    /// Only the engine's own monitor for this database counts: its name, its namespace, both ownership labels,
-    /// this cluster's id. Anything less is somebody else's (or another registration's), which the engine would
-    /// not keep, so the operator's stays on. Listed without the selector, so it is the answer that is checked.
+    /// Only the engine's own monitor for this database counts: its name, its namespace, and the engine's ownership
+    /// label carrying this cluster's id. Anything less is somebody else's (or another registration's), which the
+    /// engine would not keep, so the operator's stays on. Listed without the selector, so it is the answer that is
+    /// checked. Which labels make a monitor ours is the planner's rule, pinned below.
     /// </summary>
     [Theory]
     [InlineData("another database's")]
     [InlineData("in another namespace")]
     [InlineData("labelled for another cluster")]
-    [InlineData("not managed by entkube")]
     [InlineData("without the ownership label")]
     public async Task AMonitorThatIsNotWhollyOursDoesNotCount(string which)
     {
@@ -1478,7 +1479,6 @@ public class CnpgServiceTests : IDisposable
             "another database's" => PodMonitor("entkube-cnpg-other", cluster: cluster.Id),
             "in another namespace" => PodMonitor("entkube-cnpg-fresh-pg", ns: "elsewhere", cluster: cluster.Id),
             "labelled for another cluster" => PodMonitor("entkube-cnpg-fresh-pg", labelledFor: Guid.NewGuid()),
-            "not managed by entkube" => PodMonitor("entkube-cnpg-fresh-pg", cluster: cluster.Id, managedBy: false),
             "without the ownership label" => PodMonitor("entkube-cnpg-fresh-pg", cluster: cluster.Id, owned: false),
             _ => throw new ArgumentOutOfRangeException(nameof(which)),
         };
@@ -1504,6 +1504,153 @@ public class CnpgServiceTests : IDisposable
         clusters.Should().HaveCount(2);
         clusters[0].Should().Contain("  name: pg-v18\n").And.Contain("    enablePodMonitor: true\n");
         clusters[1].Should().Contain("  name: pg\n").And.Contain("    enablePodMonitor: false\n");
+    }
+
+    /// <summary>
+    /// A major upgrade runs for as long as a restore takes, and in the middle of it the database has no row under its
+    /// own name: a planner pass then finds ours without an owner and prunes it, or (once the row is back) makes it.
+    /// The final cluster is written with the answer of the moment it is written, not the one from the start.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AMajorUpgradeAsksAgainJustBeforeItWritesTheFinalCluster(bool oursAtTheStart)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        string ours = PodMonitor("entkube-cnpg-pg", cluster: cluster.Id);
+        List<string> standing = oursAtTheStart ? [ours] : [];
+        PodMonitorsOnTheCluster(kindServed: true, standing);
+        // Between the source going and the rename: a planner pass over a list with no "pg" in it, or with it again.
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                "Cluster", "pg-v18", "databases", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback(() =>
+            {
+                standing.Clear();
+                if (!oursAtTheStart) standing.Add(ours);
+            })
+            .Returns(Task.CompletedTask);
+
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("major-upgrade", tenant, cluster, storageLink);
+
+        clusters.Should().HaveCount(2);
+        clusters[1].Should().Contain("  name: pg\n").And.Contain(
+            oursAtTheStart ? "    enablePodMonitor: true\n" : "    enablePodMonitor: false\n",
+            "ours was {0} by the time the final cluster was written", oursAtTheStart ? "pruned" : "made");
+    }
+
+    /// <summary>
+    /// The last question of a major upgrade comes after the source and the temporary cluster are both deleted. If the
+    /// cluster cannot answer it then, failing would leave the tenant with no database at all, so the final cluster is
+    /// written with the answer the upgrade had before its first write: a known answer, at worst a pass old, which the
+    /// planner corrects on its next pass either way.
+    /// </summary>
+    [Fact]
+    public async Task AMajorUpgradeWhoseLastQuestionCannotBeAnsweredStillWritesTheDatabase()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        PodMonitorsOnTheCluster(kindServed: true, [PodMonitor("entkube-cnpg-pg", cluster: cluster.Id)]);
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                "Cluster", "pg-v18", "databases", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback(() => TheClusterCannotSay("list"))
+            .Returns(Task.CompletedTask);
+
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("major-upgrade", tenant, cluster, storageLink);
+
+        clusters.Should().HaveCount(2);
+        clusters[1].Should().Contain("  name: pg\n").And.Contain("    enablePodMonitor: false\n");
+    }
+
+    /// <summary>
+    /// One rule for "ours". The handover counts a monitor as the engine's exactly where the planner does
+    /// (<c>ScrapeMonitorPlanner</c>'s private <c>IsOurs</c>), fed the same labels. The planner is asked through what
+    /// it does with them: with nothing to plan for and no Prometheus to wait on, it prunes every monitor it calls its
+    /// own and nothing else.
+    /// </summary>
+    [Theory]
+    [InlineData("the ownership label and managed-by", true)]
+    [InlineData("the ownership label alone", true)]
+    [InlineData("the ownership label and managed-by someone else", true)]
+    [InlineData("managed-by alone", false)]
+    [InlineData("another cluster's ownership label", false)]
+    [InlineData("the ownership label in capitals", false)]
+    [InlineData("an empty ownership label", false)]
+    [InlineData("no labels", false)]
+    public async Task TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes(string which, bool expected)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        Dictionary<string, string> labels = LabelsOf(which, cluster.Id);
+        PodMonitorsOnTheCluster(kindServed: true, [PodMonitorLabelled("entkube-cnpg-pg", "databases", labels)],
+            honourSelector: false);
+
+        bool planner = ThePlannerCallsItOurs(cluster.Id,
+            new EntKube.Web.Services.ScrapeMonitors.MonitorIdentity(
+                EntKube.Web.Services.ScrapeMonitors.MonitorKind.PodMonitor, "databases", "entkube-cnpg-pg"),
+            labels);
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("reapply", tenant, cluster, storageLink);
+        bool handedOver = clusters.Should().ContainSingle(lastReapply?.Error).Subject
+            .Contains("    enablePodMonitor: false\n", StringComparison.Ordinal);
+
+        planner.Should().Be(expected, "the planner's rule, as it is");
+        handedOver.Should().Be(planner, "the handover asks the planner's question");
+    }
+
+    /// <summary>The label sets of <see cref="TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes"/>.</summary>
+    internal static Dictionary<string, string> LabelsOf(string which, Guid clusterId)
+    {
+        const string owner = "entkube.io/scrape-monitor";
+        const string managedBy = "app.kubernetes.io/managed-by";
+        return which switch
+        {
+            "the ownership label and managed-by" => new() { [owner] = clusterId.ToString(), [managedBy] = "entkube" },
+            "the ownership label alone" => new() { [owner] = clusterId.ToString() },
+            // The planner's LabelsFor lets a Prometheus's monitor selector say what managed-by is.
+            "the ownership label and managed-by someone else" =>
+                new() { [owner] = clusterId.ToString(), [managedBy] = "platform-team" },
+            "managed-by alone" => new() { [managedBy] = "entkube" },
+            "another cluster's ownership label" => new() { [owner] = Guid.NewGuid().ToString(), [managedBy] = "entkube" },
+            "the ownership label in capitals" => new() { [owner] = clusterId.ToString().ToUpperInvariant() },
+            "an empty ownership label" => new() { [owner] = "" },
+            "no labels" => [],
+            _ => throw new ArgumentOutOfRangeException(nameof(which)),
+        };
+    }
+
+    /// <summary>
+    /// Whether the planner takes a monitor with these labels for its own: it prunes it when nothing claims it.
+    /// No Prometheus, so nothing is starting and nothing waits.
+    /// </summary>
+    internal static bool ThePlannerCallsItOurs(
+        Guid clusterId, EntKube.Web.Services.ScrapeMonitors.MonitorIdentity identity,
+        IReadOnlyDictionary<string, string> labels)
+    {
+        EntKube.Web.Services.ScrapeMonitors.LiveScrapeState live = new(
+            clusterId,
+            new EntKube.Web.Services.ScrapeMonitors.PrometheusRelease("monitoring", "kube-prometheus-stack"),
+            new EntKube.Web.Services.ScrapeMonitors.LiveMonitoring(
+                [],
+                [new EntKube.Web.Services.ScrapeMonitors.LiveMonitor(identity, labels, new Dictionary<string, string>(), [])],
+                [], DateTimeOffset.UtcNow),
+            new EntKube.Web.Services.ScrapeMonitors.LiveWorkloads(
+                new Dictionary<string, IReadOnlyDictionary<string, string>>(),
+                new Dictionary<string, EntKube.Web.Services.ScrapeMonitors.LiveNamespace>()));
+
+        return EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorPlanner.Plan([], live).Prune.Contains(identity);
+    }
+
+    /// <summary>A PodMonitor as the API server lists it, with exactly these labels.</summary>
+    private static string PodMonitorLabelled(string name, string ns, IReadOnlyDictionary<string, string> labels)
+    {
+        System.Text.Json.Nodes.JsonObject labelNode = [];
+        foreach ((string key, string value) in labels) labelNode[key] = value;
+        return new System.Text.Json.Nodes.JsonObject
+        {
+            ["apiVersion"] = "monitoring.coreos.com/v1",
+            ["kind"] = "PodMonitor",
+            ["metadata"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["name"] = name, ["namespace"] = ns, ["labels"] = labelNode,
+            },
+        }.ToJsonString();
     }
 
     /// <summary>Makes the cluster unable to say, in one of three ways.</summary>

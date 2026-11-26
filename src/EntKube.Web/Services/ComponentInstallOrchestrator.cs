@@ -137,7 +137,21 @@ public class ComponentInstallOrchestrator(
         // nobody edited. No-op unless that boundary is actually being crossed.
         await stalwartService.PrepareStorageShapeIfNeededAsync(tenantId, componentId, ct);
 
-        HelmCommand command = await lifecycleService.GetInstallCommandAsync(tenantId, componentId, ct);
+        HelmCommand command;
+        try
+        {
+            command = await lifecycleService.GetInstallCommandAsync(tenantId, componentId, ct);
+        }
+        catch (MonitorHandoverUnknownException unknown)
+        {
+            // The component is Installing from here on, and a throw would leave it so: no install running, and
+            // every later one refused as "an operation in progress". The cluster could not say whether the
+            // chart's own monitor may go to helm, so helm is not run, and the apply ends as a helm that failed
+            // does: Failed, with the reason. (ComponentUpgradeRunner then puts an upgrade back to Installed where
+            // it finds the release's revision unchanged, the reason kept, as it does for any unstarted upgrade.)
+            await lifecycleService.MarkInstallResultAsync(tenantId, componentId, false, unknown.Message, ct);
+            return new HelmExecutionResult { Success = false, Output = unknown.Message };
+        }
         command.NoWait = options.NoWait;
 
         // Pre-sync component secrets so they exist in K8s before the pod starts.

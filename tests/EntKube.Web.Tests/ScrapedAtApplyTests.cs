@@ -17,11 +17,18 @@ public abstract class ValuesAtApply : IDisposable
 {
     private readonly SqliteConnection connection;
     private readonly ComponentLifecycleService sut;
+    private readonly TestDbContextFactory factory;
+    private readonly VaultService vault;
+    private readonly KeycloakService keycloak;
+    private readonly Mock<EntKube.Web.Services.Clusters.IClusterClientFactory> clusters = new();
 
     protected ApplicationDbContext Db { get; }
     protected Guid TenantId { get; } = Guid.NewGuid();
     protected Guid ClusterId { get; } = Guid.NewGuid();
     protected Guid StrangersClusterId { get; } = Guid.NewGuid();
+
+    /// <summary>The tenant's other cluster, reachable like the first and answering for itself.</summary>
+    protected Guid SecondClusterId { get; } = Guid.NewGuid();
 
     protected ValuesAtApply()
     {
@@ -31,40 +38,77 @@ public abstract class ValuesAtApply : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         Db.Database.EnsureCreated();
 
-        foreach ((Guid tenant, Guid cluster) in new[] { (TenantId, ClusterId), (Guid.NewGuid(), StrangersClusterId) })
+        foreach ((Guid tenant, Guid[] owned) in new[]
+                 { (TenantId, new[] { ClusterId, SecondClusterId }), (Guid.NewGuid(), new[] { StrangersClusterId }) })
         {
             Db.Tenants.Add(new Tenant { Id = tenant, Name = $"t-{tenant:N}", Slug = $"t-{tenant:N}" });
             Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant, Name = "prod" };
             Db.Environments.Add(env);
-            Db.KubernetesClusters.Add(new KubernetesCluster
+            foreach (Guid cluster in owned)
             {
-                Id = cluster, TenantId = tenant, EnvironmentId = env.Id,
-                Name = $"c-{cluster:N}", ApiServerUrl = "https://k8s.example",
-            });
+                Db.KubernetesClusters.Add(new KubernetesCluster
+                {
+                    Id = cluster, TenantId = tenant, EnvironmentId = env.Id,
+                    Name = $"c-{cluster:N}", ApiServerUrl = "https://k8s.example",
+                });
+            }
         }
         Db.SaveChanges();
 
-        TestDbContextFactory factory = new(connection);
-        VaultService vault = new(factory,
+        factory = new(connection);
+        vault = new(factory,
             new VaultEncryptionService(Convert.FromBase64String(TestServices.TestRootKeyBase64)),
             TestServices.NoClusterAccess);
 
-        // The tenant's own cluster answers through the seam; the stranger's is not reachable from this tenant.
+        // The tenant's own clusters answer through the seam; the stranger's is not reachable from this tenant.
         Cluster.SetupGet(c => c.ClusterId).Returns(ClusterId);
         Cluster.SetupGet(c => c.ClusterName).Returns("ours");
         ServesMonitorKinds(true);
-        Mock<EntKube.Web.Services.Clusters.IClusterClientFactory> clusters = new();
         clusters.Setup(f => f.ForAsync(TenantId, ClusterId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => Reachable ? Cluster.Object : null);
+        SecondCluster.SetupGet(c => c.ClusterId).Returns(SecondClusterId);
+        SecondCluster.SetupGet(c => c.ClusterName).Returns("our second");
+        clusters.Setup(f => f.ForAsync(TenantId, SecondClusterId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => SecondCluster.Object);
 
         Microsoft.Extensions.Configuration.IConfiguration config = TestServices.TestConfiguration();
         IngestTokenService tokens = new(config);
+        keycloak = TestServices.BuildKeycloak(factory, vault);
         sut = new ComponentLifecycleService(
-            factory, vault, TestServices.BuildKeycloak(factory, vault), tokens,
+            factory, vault, keycloak, tokens,
             new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config),
             config, clusters.Object,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
+    }
+
+    /// <summary>The tenant's second cluster as the seam hands it out. It serves nothing unless a test says so.</summary>
+    protected Mock<EntKube.Web.Services.Clusters.IClusterClient> SecondCluster { get; } = new();
+
+    /// <summary>
+    /// The install flow every Install button runs, over the same lifecycle service and cluster seam. The services it
+    /// consults for other charts get what they need to find that this is not theirs, and nothing more: a test that
+    /// strays into their work fails loudly.
+    /// </summary>
+    protected ComponentInstallOrchestrator Orchestrator()
+    {
+        EntKube.Web.Modules.Api.CatalogApi catalog = new(factory);
+        Mock<IKubernetesClientFactory> k8s = new(MockBehavior.Strict);
+        return new ComponentInstallOrchestrator(
+            factory, sut, keycloak,
+            new HarborService(factory, vault, null!, null!, null!, catalog, null!),
+            new OpenLdapService(factory, vault, k8s.Object, clusters.Object, null!, catalog,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenLdapService>.Instance),
+            new EntKube.Web.Services.Dr.VeleroService(factory, clusters.Object, null!,
+                new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, catalog,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<EntKube.Web.Services.Dr.VeleroService>.Instance),
+            new StalwartService(factory, vault, clusters.Object, null!, keycloak, sut, null!, catalog,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<StalwartService>.Instance),
+            new HeadscaleService(factory, k8s.Object, vault, null!, sut, null!, catalog, clusters.Object),
+            new ClusterProvidedComponents(factory, clusters.Object,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<ClusterProvidedComponents>.Instance),
+            new KyvernoUpgradeGuard(factory, clusters.Object),
+            TestServices.NewGate());
     }
 
     /// <summary>The tenant's cluster as the cluster-client seam hands it out.</summary>
@@ -119,11 +163,19 @@ public abstract class ValuesAtApply : IDisposable
     /// <summary>A monitor as the API server lists it. By default the monitor engine's, for this tenant's cluster.</summary>
     protected string Monitor(string kind, string name, string ns, Guid? labelledFor = null, bool managedBy = true)
     {
-        System.Text.Json.Nodes.JsonObject labels = new()
+        Dictionary<string, string> labels = new()
         {
             ["entkube.io/scrape-monitor"] = (labelledFor ?? ClusterId).ToString(),
         };
         if (managedBy) labels["app.kubernetes.io/managed-by"] = "entkube";
+        return MonitorLabelled(kind, name, ns, labels);
+    }
+
+    /// <summary>A monitor as the API server lists it, with exactly these labels.</summary>
+    protected static string MonitorLabelled(string kind, string name, string ns, IReadOnlyDictionary<string, string> labelled)
+    {
+        System.Text.Json.Nodes.JsonObject labels = [];
+        foreach ((string key, string value) in labelled) labels[key] = value;
         return new System.Text.Json.Nodes.JsonObject
         {
             ["apiVersion"] = "monitoring.coreos.com/v1",
@@ -152,11 +204,12 @@ public abstract class ValuesAtApply : IDisposable
         return InstallChart(key, entry.HelmChartName!, entry.DefaultReleaseName, entry.DefaultNamespace, values);
     }
 
-    protected Guid InstallChart(string name, string chart, string? release, string? @namespace, string? values)
+    protected Guid InstallChart(
+        string name, string chart, string? release, string? @namespace, string? values, Guid? cluster = null)
     {
         ClusterComponent component = new()
         {
-            Id = Guid.NewGuid(), ClusterId = ClusterId, Name = name, ComponentType = "HelmChart",
+            Id = Guid.NewGuid(), ClusterId = cluster ?? ClusterId, Name = name, ComponentType = "HelmChart",
             HelmChartName = chart, ReleaseName = release, Namespace = @namespace, HelmValues = values,
         };
         Db.ClusterComponents.Add(component);
@@ -335,14 +388,14 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     }
 
     /// <summary>
-    /// Only the engine's own monitor for this release counts: its name, its namespace, both ownership labels, this
-    /// cluster's id. A same-named monitor somebody else wrote is not ours, nor one for another release.
+    /// Only the engine's own monitor for this release counts: its name, its namespace, the engine's ownership label
+    /// with this cluster's id. A same-named monitor somebody else wrote is not ours, nor one for another release.
+    /// Which labels make a monitor ours is the planner's rule, pinned below.
     /// </summary>
     [Theory]
     [InlineData("for another release")]
     [InlineData("in another namespace")]
     [InlineData("labelled for another cluster")]
-    [InlineData("not managed by entkube")]
     [InlineData("a PodMonitor of that name")]
     public async Task A_monitor_that_is_not_wholly_ours_does_not_hand_keycloak_over(string which)
     {
@@ -353,8 +406,6 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
             "in another namespace" => (ServiceMonitors, Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "identity")),
             "labelled for another cluster" => (ServiceMonitors,
                 Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", labelledFor: StrangersClusterId)),
-            "not managed by entkube" => (ServiceMonitors,
-                Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", managedBy: false)),
             "a PodMonitor of that name" => (PodMonitors, Monitor("PodMonitor", "entkube-keycloak-keycloak", "keycloak")),
             _ => throw new ArgumentOutOfRangeException(nameof(which)),
         });
@@ -403,7 +454,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
         {
             case "unreachable":
                 Reachable = false;
-                expected = "*cannot be told*";
+                expected = "*no stored kubeconfig*";
                 break;
             case "kind":
                 Cluster.Setup(c => c.ResourceExistsAsync(CrdResource, ServiceMonitors, "", It.IsAny<CancellationToken>()))
@@ -423,7 +474,78 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
 
         Func<Task> act = () => ApplyAsync(keycloak);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(expected);
+        (await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(expected))
+            .WithMessage(CouldNotAsk);
+    }
+
+    /// <summary>What every apply that could not ask the cluster says first.</summary>
+    private const string CouldNotAsk =
+        "EntKube could not ask the cluster whether its own monitor for 'keycloak' stands, so nothing was handed to helm: *";
+
+    /// <summary>
+    /// The same unknown, through the install flow every Install button runs. The question is asked after the
+    /// component is marked Installing, so a throw out of it left the component Installing for ever: no install
+    /// running, and every later one refused with "an operation in progress". It ends like a helm that failed:
+    /// Failed, with the reason, and helm never run.
+    /// </summary>
+    [Theory]
+    [InlineData("unreachable")]
+    [InlineData("kind")]
+    [InlineData("list")]
+    [InlineData("garbage")]
+    public async Task Where_the_cluster_cannot_say_the_install_ends_failed_and_helm_is_never_run(string failure)
+    {
+        InstallPrometheus();
+        switch (failure)
+        {
+            case "unreachable": Reachable = false; break;
+            case "kind":
+                Cluster.Setup(c => c.ResourceExistsAsync(CrdResource, ServiceMonitors, "", It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "list":
+                Cluster.Setup(c => c.GetJsonAsync(ServiceMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "garbage":
+                Cluster.Setup(c => c.GetJsonAsync(ServiceMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ReturnsAsync("Unable to connect to the server");
+                break;
+        }
+        Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
+
+        HelmExecutionResult result = await Orchestrator().InstallAsync(TenantId, keycloak);
+
+        result.Success.Should().BeFalse();
+        result.Output.Should().Match(CouldNotAsk);
+        Db.ChangeTracker.Clear();
+        ClusterComponent component = await Db.ClusterComponents.SingleAsync(c => c.Id == keycloak);
+        component.Status.Should().Be(ComponentStatus.Failed, "nothing is installing any more");
+        component.LastError.Should().Be(result.Output);
+        Cluster.Verify(c => c.RunHelmAsync(
+            It.IsAny<EntKube.Web.Services.Clusters.HelmInvocation>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>
+    /// The control for the test above: where the cluster can say, the same flow does reach helm, so "never run" there
+    /// is the failure's doing and not the harness's. Helm is made to fail here so the flow stops at the result.
+    /// </summary>
+    [Fact]
+    public async Task Where_the_cluster_can_say_the_same_install_reaches_helm()
+    {
+        InstallPrometheus();
+        Cluster.Setup(c => c.RunHelmAsync(
+                It.IsAny<EntKube.Web.Services.Clusters.HelmInvocation>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HelmExecutionResult { Success = false, Output = "helm: refused" });
+        Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
+
+        HelmExecutionResult result = await Orchestrator().InstallAsync(TenantId, keycloak);
+
+        result.Output.Should().Contain("helm: refused");
+        Cluster.Verify(c => c.RunHelmAsync(
+            It.IsAny<EntKube.Web.Services.Clusters.HelmInvocation>(), It.IsAny<CancellationToken>()), Times.Once);
+        Db.ChangeTracker.Clear();
+        (await Db.ClusterComponents.SingleAsync(c => c.Id == keycloak)).Status.Should().Be(ComponentStatus.Failed);
     }
 
     /// <summary>The cluster is asked only where the answer can change something: a Keycloak without the block is not read for.</summary>
@@ -439,14 +561,64 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
         Cluster.Invocations.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// The engine's own monitor for a Keycloak of the same release, in the same namespace, standing on the tenant's
+    /// OTHER cluster, where EntKube's Prometheus runs and this cluster has none. It is that cluster's monitor, written
+    /// for that cluster, and says nothing about whether anything of ours scrapes this Keycloak: the question is asked
+    /// of the cluster this Keycloak runs on, and only of it.
+    /// </summary>
     [Fact]
-    public async Task A_prometheus_on_another_cluster_does_not_hand_keycloak_over()
+    public async Task The_engines_own_monitor_on_another_cluster_does_not_hand_this_keycloak_over()
     {
-        InstallPrometheus(cluster: StrangersClusterId);
+        InstallPrometheus(cluster: SecondClusterId);
+        InstallChart("keycloak", "keycloakx", "keycloak", "keycloak", StoredByTheOldCatalog, SecondClusterId);
+        string theirs = Monitor("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", labelledFor: SecondClusterId);
+        SecondCluster.Setup(c => c.ResourceExistsAsync(CrdResource, ServiceMonitors, "", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        SecondCluster.Setup(c => c.GetJsonAsync(ServiceMonitors, "keycloak", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new System.Text.Json.Nodes.JsonObject
+            {
+                ["kind"] = "List",
+                ["items"] = new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonNode.Parse(theirs)),
+            }.ToJsonString());
 
         string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
 
-        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}");
+        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}",
+            "nothing of ours stands on the cluster this Keycloak runs on");
+        SecondCluster.Invocations.Where(i => i.Method.Name is not ("get_ClusterId" or "get_ClusterName"))
+            .Should().BeEmpty("only the Keycloak's own cluster is asked");
+    }
+
+    /// <summary>
+    /// One rule for "ours". The handover counts a monitor as the engine's exactly where the planner does
+    /// (<c>ScrapeMonitorPlanner</c>'s private <c>IsOurs</c>), fed the same labels; see
+    /// <see cref="CnpgServiceTests.TheHandoverCallsAMonitorOursExactlyWhereThePlannerDoes"/>, which asks the same of
+    /// the CNPG handover.
+    /// </summary>
+    [Theory]
+    [InlineData("the ownership label and managed-by", true)]
+    [InlineData("the ownership label alone", true)]
+    [InlineData("the ownership label and managed-by someone else", true)]
+    [InlineData("managed-by alone", false)]
+    [InlineData("another cluster's ownership label", false)]
+    [InlineData("the ownership label in capitals", false)]
+    [InlineData("an empty ownership label", false)]
+    [InlineData("no labels", false)]
+    public async Task The_handover_calls_a_monitor_ours_exactly_where_the_planner_does(string which, bool expected)
+    {
+        Dictionary<string, string> labels = CnpgServiceTests.LabelsOf(which, ClusterId);
+        LiveMonitors.Add((ServiceMonitors, MonitorLabelled("ServiceMonitor", "entkube-keycloak-keycloak", "keycloak", labels)));
+
+        bool planner = CnpgServiceTests.ThePlannerCallsItOurs(ClusterId,
+            new EntKube.Web.Services.ScrapeMonitors.MonitorIdentity(
+                EntKube.Web.Services.ScrapeMonitors.MonitorKind.ServiceMonitor, "keycloak", "entkube-keycloak-keycloak"),
+            labels);
+        string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
+        bool handedOver = Said(At(Parse(values), "serviceMonitor")!) == "{enabled:false}";
+
+        planner.Should().Be(expected, "the planner's rule, as it is");
+        handedOver.Should().Be(planner, "the handover asks the planner's question");
     }
 
     [Theory]
