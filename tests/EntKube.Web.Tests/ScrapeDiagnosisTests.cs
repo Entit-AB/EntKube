@@ -29,9 +29,19 @@ public sealed class ScrapeDiagnosisTests
         cluster.ServeList(PodMonitorsPath);
         cluster.ServeList(ServiceMonitorsPath);
         cluster.ServeDatabasePods("data", "shop", instances: 3);
-        cluster.ServeList("/api/v1/namespaces/mq/services",
-            Labelled("mq", "orders", "\"app.kubernetes.io/name\":\"orders\",\"app.kubernetes.io/component\":\"rabbitmq\""));
+        cluster.ServeList("/api/v1/namespaces/mq/services", BrokerService("orders"));
+        cluster.ServeList("/api/v1/namespaces/mq/pods", BrokerPod("orders-server-0"));
     }
+
+    private const string OrdersLabels = "\"app.kubernetes.io/name\":\"orders\",\"app.kubernetes.io/component\":\"rabbitmq\"";
+
+    /// <summary>A Service of the broker 'orders', with the operator's labels and its Prometheus port.</summary>
+    private static string BrokerService(string name, string moreLabels = "", string selector = "\"app.kubernetes.io/name\":\"orders\"") =>
+        $$$"""{"metadata":{"name":"{{{name}}}","namespace":"mq","labels":{{{{OrdersLabels}}}{{{moreLabels}}}}},"spec":{"selector":{{{{selector}}}},"ports":[{"name":"prometheus","port":15692,"targetPort":15692}]}}""";
+
+    /// <summary>A broker pod that serves the Prometheus plugin.</summary>
+    private static string BrokerPod(string name, string moreLabels = "") =>
+        $$$"""{"metadata":{"name":"{{{name}}}","namespace":"mq","labels":{"app.kubernetes.io/name":"orders"{{{moreLabels}}}}},"spec":{"containers":[{"name":"rabbitmq","ports":[{"name":"prometheus","containerPort":15692}]}]}}""";
 
     private Task<KubernetesOperationResult<ScrapeDiagnosis>> AskAboutShop() =>
         cluster.Prometheus.DiagnoseCnpgScrapeAsync(cluster.TenantId, cluster.ClusterId, "shop", "data");
@@ -391,6 +401,84 @@ public sealed class ScrapeDiagnosisTests
         d.Remedy.Should().Contain("Apply monitors now");
     }
 
+    /// <summary>
+    /// ⭐ A PodMonitor for the primary and one for the replicas: both select the database and both
+    /// name its metrics port, but no pod is selected by both. Nothing is doubled, and deleting
+    /// "all but one of them" would lose one role's metrics.
+    /// </summary>
+    [Fact]
+    public async Task Two_monitors_that_select_different_pods_of_one_database_do_not_double_it()
+    {
+        cluster.ServeList("/api/v1/namespaces/data/pods",
+            Labelled("data", "shop-1", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"primary\""),
+            Labelled("data", "shop-2", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"replica\""));
+        cluster.ServeList(PodMonitorsPath,
+            PodMonitor("data", "db-primary", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"primary"}}"""),
+            PodMonitor("data", "db-replica", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"replica"}}"""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectedTwice.Should().BeFalse("no pod is scraped by both");
+        d.WiringIsRight.Should().BeTrue();
+        Said(d).Should().NotContain("scrape the same endpoint");
+        d.Remedy.Should().NotContain("Delete");
+    }
+
+    /// <summary>The same split, one pod in both: that one pod is doubled, and that is said.</summary>
+    [Fact]
+    public async Task Two_monitors_that_share_one_pod_of_a_database_double_it()
+    {
+        cluster.ServeList("/api/v1/namespaces/data/pods",
+            Labelled("data", "shop-1", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"primary\""),
+            Labelled("data", "shop-2", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"replica\""));
+        cluster.ServeList(PodMonitorsPath,
+            PodMonitor("data", "db-primary", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"primary"}}"""),
+            PodMonitor("data", "db-all", """{"matchLabels":{"cnpg.io/cluster":"shop"}}"""));
+
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        d.SelectedTwice.Should().BeTrue();
+        d.Findings[0].Should().Contain("data/db-primary").And.Contain("data/db-all");
+    }
+
+    /// <summary>
+    /// Two ServiceMonitors, one for each of two Services in front of the same broker pod: one pod
+    /// endpoint, reached twice. This is the doubling a ServiceMonitor causes most often.
+    /// </summary>
+    [Fact]
+    public async Task Two_service_monitors_through_two_services_to_one_pod_double_it()
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            BrokerService("orders", ",\"svc\":\"client\""), BrokerService("orders-nodes", ",\"svc\":\"nodes\""));
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "client", """{"matchLabels":{"svc":"client"}}"""),
+            ServiceMonitor("mq", "nodes", """{"matchLabels":{"svc":"nodes"}}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeTrue();
+        d.Findings[0].Should().Contain("mq/client").And.Contain("mq/nodes");
+    }
+
+    /// <summary>Two ServiceMonitors on two Services whose pods are not the same pods double nothing.</summary>
+    [Fact]
+    public async Task Two_service_monitors_through_services_in_front_of_different_pods_do_not_double_anything()
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            BrokerService("orders-a", ",\"svc\":\"a\"", "\"pod\":\"a\""),
+            BrokerService("orders-b", ",\"svc\":\"b\"", "\"pod\":\"b\""));
+        cluster.ServeList("/api/v1/namespaces/mq/pods",
+            BrokerPod("orders-server-0", ",\"pod\":\"a\""), BrokerPod("orders-server-1", ",\"pod\":\"b\""));
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "a", """{"matchLabels":{"svc":"a"}}"""),
+            ServiceMonitor("mq", "b", """{"matchLabels":{"svc":"b"}}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeFalse();
+        d.WiringIsRight.Should().BeTrue();
+    }
+
     [Fact]
     public async Task Two_monitors_of_which_prometheus_reads_one_do_not_double_anything()
     {
@@ -427,6 +515,105 @@ public sealed class ScrapeDiagnosisTests
 
         d.SelectedTwice.Should().BeTrue();
         d.Remedy.Should().Be("Delete all but one of them.");
+    }
+
+    /// <summary>Two monitors can end at one pod only where two reach its namespace: only then are its pods read.</summary>
+    [Fact]
+    public async Task The_pods_behind_a_brokers_services_are_read_only_where_two_monitors_could_meet_there()
+    {
+        cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("mq", "orders-metrics", OrdersServices));
+        (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).WiringIsRight.Should().BeTrue();
+        cluster.Requests.Should().NotContain("/api/v1/namespaces/mq/pods");
+
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "one", OrdersServices), ServiceMonitor("mq", "two", OrdersServices));
+        (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).SelectedTwice.Should().BeTrue();
+        cluster.Requests.Should().Contain("/api/v1/namespaces/mq/pods");
+    }
+
+    /// <summary>The pods behind the Services could not be read: a failure, and never "nothing is doubled".</summary>
+    [Fact]
+    public async Task Pods_behind_the_services_that_cannot_be_read_are_a_failure()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "one", OrdersServices), ServiceMonitor("mq", "two", OrdersServices));
+        cluster.Refuse("/api/v1/namespaces/mq/pods", HttpStatusCode.Forbidden);
+
+        KubernetesOperationResult<ScrapeDiagnosis> result = await cluster.Prometheus.DiagnoseServiceMonitorScrapeAsync(
+            cluster.TenantId, cluster.ClusterId, MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Could not read the pods in mq");
+    }
+
+    // ──────── The remedy, held against the engine's plan ────────
+
+    private const string ShopKey = "cnpg/data/shop";
+
+    private static KubernetesOperationResult<ScrapeMonitorPlan> PlanWith(MonitorState state, MonitorChange change, string detail) =>
+        KubernetesOperationResult<ScrapeMonitorPlan>.Success(new ScrapeMonitorPlan(
+            [new MonitorPlanRow(ShopKey, "shop", "PostgreSQL", "data", null, state, change, detail, [])], [], []));
+
+    /// <summary>EntKube's monitor is one of two: the button removes it, but only if the engine says it will.</summary>
+    [Fact]
+    public async Task Ours_doubling_another_is_told_to_press_only_where_the_engine_removes_ours()
+    {
+        cluster.ServeList(PodMonitorsPath,
+            PodMonitor("data", "shop", ShopPods),
+            PodMonitor("data", "entkube-cnpg-shop", ShopPods, endpoints: """{"portNumber":9187}"""));
+        ScrapeDiagnosis d = await DiagnoseShop();
+        d.RemedyExpects.Should().Be(ApplyExpectation.RemovesOurs);
+
+        ScrapeDiagnostician.AgainstThePlan(d, PlanWith(MonitorState.CoveredElsewhere, MonitorChange.Remove, "Ours goes."), ShopKey)
+            .Remedy.Should().Be(ScrapeDiagnostician.RemoveOurs);
+
+        ScrapeDiagnostician.AgainstThePlan(d, PlanWith(MonitorState.NotSelectable, MonitorChange.None, "Two Services lead to it."), ShopKey)
+            .Remedy.Should().Be("Two Services lead to it.");
+
+        ScrapeDiagnostician.AgainstThePlan(d, PlanWith(MonitorState.Managed, MonitorChange.Create, "Created."), ShopKey)
+            .Remedy.Should().Be("Created.", "a create is not the removal the remedy counts on");
+    }
+
+    [Theory]
+    [InlineData(MonitorPlanScope.NoPrometheus, "did not install Prometheus")]
+    [InlineData(MonitorPlanScope.NoMonitorKinds, "no PodMonitor or ServiceMonitor resource type")]
+    public async Task A_plan_with_nothing_to_plan_is_never_the_button(MonitorPlanScope scope, string said)
+    {
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        string? remedy = ScrapeDiagnostician.AgainstThePlan(
+            d, KubernetesOperationResult<ScrapeMonitorPlan>.Success(ScrapeMonitorPlan.Nothing(scope)), ShopKey).Remedy;
+
+        remedy.Should().Contain(said).And.NotContain("Press");
+    }
+
+    /// <summary>A remedy that is not the button needs no plan, and none is read for it.</summary>
+    [Fact]
+    public async Task A_remedy_that_is_not_the_button_is_left_alone_and_no_plan_is_read()
+    {
+        cluster.ServeList(PodMonitorsPath, PodMonitor("data", "entkube-cnpg-shop", ShopPods));
+        KubernetesOperationResult<ScrapeDiagnosis> diagnosed = await AskAboutShop();
+        PlanThatMustNotBeRead monitors = new();
+
+        KubernetesOperationResult<ScrapeDiagnosis> checkedOne = await ScrapeDiagnostician.CheckedAgainstThePlanAsync(
+            diagnosed, monitors, cluster.TenantId, cluster.ClusterId, ShopKey);
+
+        checkedOne.Data!.Remedy.Should().Be(diagnosed.Data!.Remedy).And.Contain("Targets");
+        monitors.Asked.Should().BeFalse();
+    }
+
+    private sealed class PlanThatMustNotBeRead : IScrapeMonitors
+    {
+        public bool Asked { get; private set; }
+
+        public Task<KubernetesOperationResult<ScrapeMonitorPlan>> PlanAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+        {
+            Asked = true;
+            throw new InvalidOperationException("The plan was read.");
+        }
+
+        public Task<KubernetesOperationResult<ScrapeMonitorPlan>> ApplyAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default) =>
+            throw new InvalidOperationException("Nothing applies here.");
     }
 
     // ──────── Keycloak, and a broker EntKube did not install ────────

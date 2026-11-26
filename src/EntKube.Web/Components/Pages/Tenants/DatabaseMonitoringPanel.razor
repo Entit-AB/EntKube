@@ -238,9 +238,13 @@ else
         StateHasChanged();
         try
         {
-            KubernetesOperationResult<ScrapeDiagnosis> result =
+            // Where the remedy is the button, the engine's own row for this database decides whether
+            // the button would do anything: it sees NetworkPolicies, pods and annotations the
+            // diagnosis does not.
+            KubernetesOperationResult<ScrapeDiagnosis> result = await ScrapeDiagnostician.CheckedAgainstThePlanAsync(
                 await PrometheusService.DiagnoseCnpgScrapeAsync(
-                    database.TenantId, ClusterId, database.Name, database.Namespace);
+                    database.TenantId, ClusterId, database.Name, database.Namespace),
+                Monitors, database.TenantId, ClusterId, MonitorsApplied.DatabaseKey(database.Namespace, database.Name));
 
             if (result.IsSuccess && result.Data is not null)
                 diagnoses[database.Id] = result.Data;

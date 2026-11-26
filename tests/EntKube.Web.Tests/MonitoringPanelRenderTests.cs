@@ -104,11 +104,14 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
     {
         IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
         cluster.ServeList(PodMonitorsPath, PodMonitor("billing", "shop", """{"matchLabels":{"cnpg.io/cluster":"shop"}}"""));
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "web", "shop", MonitorState.Managed, "Web's row.", MonitorChange.Create));
 
         Button(cut.Find("[data-database='web/shop']"), "Why is it empty?").Click();
 
         cut.WaitForAssertion(() => cut.Find("[data-database='web/shop']").TextContent
-            .Should().Contain("No PodMonitor", "the only monitor is the other namespace's").And.Contain("Apply monitors now"));
+            .Should().Contain("No PodMonitor", "the only monitor is the other namespace's"));
+        cut.Find("[data-database='web/shop'] pre").TextContent.Should().Be(ScrapeDiagnostician.ApplyMonitors);
         cluster.Requests.Should().Contain("/api/v1/namespaces/web/pods")
             .And.NotContain("/api/v1/namespaces/billing/pods");
         cut.Find("[data-database='billing/shop']").TextContent.Should().NotContain("No PodMonitor");
@@ -138,12 +141,105 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
     private const string WebShopPods = """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/podRole":"instance"}}""";
 
     /// <summary>The engine's row for a data service, keyed the way the engine keys it.</summary>
-    private static MonitorPlanRow RowFor(ManagedServiceKind kind, string ns, string name, MonitorState state, string detail)
+    private static MonitorPlanRow RowFor(
+        ManagedServiceKind kind, string ns, string name, MonitorState state, string detail,
+        MonitorChange change = MonitorChange.None)
     {
         string key = ScrapeTargetCatalog.For([], [new ManagedServiceSummary(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), kind, name, ns, ManagedServiceStatus.Running,
             IsOperatorManaged: true, IsInCluster: true, HasExporter: false)])[0].Key;
-        return new MonitorPlanRow(key, name, kind.ToString(), ns, null, state, MonitorChange.None, detail, []);
+        return new MonitorPlanRow(key, name, kind.ToString(), ns, null, state, change, detail, []);
+    }
+
+    /// <summary>The engine's row for a Keycloak release, keyed the way the engine keys an installed keycloakx chart.</summary>
+    private MonitorPlanRow KeycloakRow(string ns, string release, MonitorState state, MonitorChange change, string detail)
+    {
+        string key = ScrapeTargetCatalog.For([new EntKube.Contracts.Catalog.InstalledComponent(
+            Guid.NewGuid(), cluster.TenantId, cluster.ClusterId, "prod", Guid.NewGuid(), "keycloak", "HelmChart",
+            EntKube.Contracts.Catalog.ComponentStatus.Installed, ns, release, "keycloakx", null, "", null, null,
+            DateTime.UnixEpoch)], [])[0].Key;
+        return new MonitorPlanRow(key, release, "Keycloak", ns, null, state, change, detail, []);
+    }
+
+    /// <summary>The remedy the web/shop card shows once "Why is it empty?" has answered.</summary>
+    private static string WebShopRemedy(IRenderedComponent<DatabaseMonitoringPanel> cut)
+    {
+        Button(cut.Find("[data-database='web/shop']"), "Why is it empty?").Click();
+        cut.WaitForAssertion(() => cut.Find("[data-database='web/shop'] pre").Should().NotBeNull());
+        return cut.Find("[data-database='web/shop'] pre").TextContent;
+    }
+
+    /// <summary>
+    /// ⭐ A database the engine will not create a monitor for — its namespace denies Prometheus, or it
+    /// has no pods — was told to press a button that writes nothing, again after every press. The
+    /// advice comes from the engine's own row for it now, and is the row's own sentence where the
+    /// apply would change nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(MonitorState.BlockedByNetworkPolicy, "NetworkPolicy data/deny-all keeps Prometheus out of its pods.")]
+    [InlineData(MonitorState.NotRunning, "No pods of it are running, so there is nothing to scrape.")]
+    [InlineData(MonitorState.NotSelectable, "Whether Prometheus would read a monitor here cannot be told.")]
+    [InlineData(MonitorState.Annotated, "Its pods carry prometheus.io/scrape annotations, which Prometheus already scrapes.")]
+    public void Where_the_engine_would_create_nothing_the_remedy_is_its_own_sentence_and_not_the_button(
+        MonitorState state, string detail)
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "billing", "shop", MonitorState.Managed, "Billing's row.", MonitorChange.Create),
+            RowFor(ManagedServiceKind.Postgres, "web", "shop", state, detail));
+
+        string remedy = WebShopRemedy(cut);
+
+        remedy.Should().Contain(detail).And.NotContain("Press").And.NotContain("Billing's row.");
+        monitors.Applied.Should().BeEmpty("asking what an apply would do applies nothing");
+    }
+
+    /// <summary>Where the engine would put the monitor in place, pressing the button is the advice.</summary>
+    [Theory]
+    [InlineData(MonitorChange.Create)]
+    [InlineData(MonitorChange.Update)]
+    [InlineData(MonitorChange.Replace)]
+    public void Where_the_engine_would_write_the_monitor_the_remedy_is_the_button(MonitorChange change)
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "web", "shop", MonitorState.Managed, "EntKube will create it.", change));
+
+        WebShopRemedy(cut).Should().Be(ScrapeDiagnostician.ApplyMonitors);
+    }
+
+    /// <summary>Unknown is not "press the button": a plan that could not be read says that it could not be told.</summary>
+    [Fact]
+    public void Where_the_engines_plan_cannot_be_read_the_remedy_says_so_and_never_advises_the_button()
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => KubernetesOperationResult<ScrapeMonitorPlan>.Failure("Forbidden: cannot list networkpolicies");
+
+        string remedy = WebShopRemedy(cut);
+
+        remedy.Should().Contain("could not be told").And.Contain("Forbidden: cannot list networkpolicies")
+            .And.NotContain("Press");
+    }
+
+    [Fact]
+    public void Where_the_engines_plan_throws_the_remedy_says_so_and_never_advises_the_button()
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => throw new InvalidOperationException("Vault is sealed.");
+
+        string remedy = WebShopRemedy(cut);
+
+        remedy.Should().Contain("could not be told").And.Contain("Vault is sealed").And.NotContain("Press");
+    }
+
+    [Fact]
+    public void Where_the_engines_plan_has_no_row_for_the_database_the_remedy_does_not_advise_the_button()
+    {
+        IRenderedComponent<DatabaseMonitoringPanel> cut = TwoDatabasesCalledShop();
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "billing", "shop", MonitorState.Managed, "Billing's row.", MonitorChange.Create));
+
+        WebShopRemedy(cut).Should().Contain("no row").And.NotContain("Press").And.NotContain("Billing's row.");
     }
 
     private static KubernetesOperationResult<ScrapeMonitorPlan> Planned(params MonitorPlanRow[] rows) =>
@@ -422,6 +518,17 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
     [Fact]
     public void An_unscraped_keycloak_is_told_to_apply_monitors_and_not_to_edit_helm_values()
     {
+        monitors.Answer = () => Planned(KeycloakRow("iam", "sso", MonitorState.Managed, MonitorChange.Create, "EntKube will create it."));
+        IRenderedComponent<KeycloakMonitoringPanel> cut = UnscrapedKeycloak();
+        cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
+
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain("No ServiceMonitor"));
+        cut.Find("pre").TextContent.Should().Be(ScrapeDiagnostician.ApplyMonitors);
+        cut.Markup.Should().NotContain("serviceMonitor.enabled").And.NotContain("switched off");
+    }
+
+    private IRenderedComponent<KeycloakMonitoringPanel> UnscrapedKeycloak()
+    {
         cluster.ServeList("/api/v1/namespaces/iam/services", Labelled("iam", "sso-keycloakx-http",
             "\"app.kubernetes.io/name\":\"keycloakx\",\"app.kubernetes.io/instance\":\"sso\",\"app.kubernetes.io/component\":\"http\""));
 
@@ -429,11 +536,57 @@ public sealed class MonitoringPanelRenderTests : BunitContext, IDisposable
             .Add(p => p.TenantId, cluster.TenantId).Add(p => p.ClusterId, cluster.ClusterId)
             .Add(p => p.Namespace, "iam").Add(p => p.ReleaseName, "sso"));
         cut.WaitForAssertion(() => cut.Markup.Should().Contain("Why is this empty?"));
+        return cut;
+    }
+
+    /// <summary>
+    /// ⭐ The diagnosis told an unscraped Keycloak to press "Apply monitors now", and the Identity tab
+    /// had no such button: the only one was on the cluster's Monitoring tab.
+    /// </summary>
+    [Fact]
+    public void An_unscraped_keycloak_has_the_button_its_remedy_names_and_says_what_it_did()
+    {
+        monitors.Answer = () => Planned(
+            RowFor(ManagedServiceKind.Postgres, "iam", "sso", MonitorState.Managed, "A database's row.", MonitorChange.Create),
+            KeycloakRow("iam", "sso", MonitorState.Managed, MonitorChange.Create, "Keycloak's row: EntKube will create it."));
+        monitors.OnApply = () => cluster.ServeList(ServiceMonitorsPath, ServiceMonitor("iam", "entkube-keycloak-sso",
+            """{"matchLabels":{"app.kubernetes.io/instance":"sso","app.kubernetes.io/component":"http"}}""",
+            endpoints: """{"port":"http-internal","path":"/auth/metrics"}"""));
+        IRenderedComponent<KeycloakMonitoringPanel> cut = UnscrapedKeycloak();
+
+        cut.Markup.Should().Contain("every database and component on this Kubernetes cluster");
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-apply]").TextContent.Should().Contain("Keycloak's row: EntKube will create it."));
+        cut.Find("[data-apply]").TextContent.Should().NotContain("A database's row.");
+        monitors.Applied.Should().Equal([(cluster.TenantId, cluster.ClusterId)]);
+        cut.WaitForAssertion(() => cut.Markup.Should().Contain(
+            "iam/entkube-keycloak-sso selects Keycloak 'sso' and Prometheus reads it", "it diagnoses again after the apply"));
+    }
+
+    [Fact]
+    public void A_failed_keycloak_apply_is_shown_beside_the_button_in_red()
+    {
+        monitors.Answer = () => KubernetesOperationResult<ScrapeMonitorPlan>.Failure("Cancelled. Nothing was changed.");
+        IRenderedComponent<KeycloakMonitoringPanel> cut = UnscrapedKeycloak();
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == ApplyButton).Click();
+
+        cut.WaitForAssertion(() => cut.Find("[data-apply] .text-danger").TextContent
+            .Should().Contain("Cancelled. Nothing was changed."));
+    }
+
+    [Fact]
+    public void An_unscraped_keycloak_the_engine_would_not_monitor_is_told_why_and_not_to_press()
+    {
+        monitors.Answer = () => Planned(KeycloakRow("iam", "sso", MonitorState.BlockedByNetworkPolicy, MonitorChange.None,
+            "NetworkPolicy iam/deny keeps Prometheus out of its pods."));
+        IRenderedComponent<KeycloakMonitoringPanel> cut = UnscrapedKeycloak();
+
         cut.FindAll("button").Single(b => b.TextContent.Contains("Why is this empty?")).Click();
 
-        cut.WaitForAssertion(() => cut.Markup.Should().Contain("No ServiceMonitor"));
-        cut.Markup.Should().Contain("Apply monitors now")
-            .And.NotContain("serviceMonitor.enabled").And.NotContain("switched off");
+        cut.WaitForAssertion(() => cut.Find("pre").TextContent.Should().Contain("NetworkPolicy iam/deny"));
+        cut.Find("pre").TextContent.Should().NotContain("Press");
     }
 
     [Fact]
