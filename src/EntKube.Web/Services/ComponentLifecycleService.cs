@@ -908,25 +908,19 @@ public class ComponentLifecycleService(
             }
         }
 
-        // Keycloak: the chart's own ServiceMonitor goes where the catalog put it there, but only where
-        // EntKube's own Prometheus serves the cluster, because only there does EntKube's monitor engine make
-        // the replacement. Asked of Catalog's one answer, the engine's own gate. Elsewhere the stored block is
-        // handed to helm as it is: a Prometheus EntKube did not install may be the one scraping the chart's
-        // monitor, and turning it off would end that scrape with nothing to say so.
+        // Keycloak: the chart's own ServiceMonitor, where the catalog put it there, is turned off in two cases
+        // only, both read from the cluster (see KeycloakChartMonitorGoesAsync). Elsewhere the stored block is
+        // handed to helm as it is.
         //
         // ⚠️ BEFORE the theme fragments below. They are joined on as text, so a component with extraVolumes
         // of its own gets that key twice: helm takes the last, and the YAML parser refuses the document —
         // after them, this step would read such a Keycloak as empty and leave its monitor on.
-        if (component.HelmChartName == "keycloakx" && valuesYaml is not null)
+        if (component.HelmChartName == "keycloakx"
+            && valuesYaml is not null
+            && YamlFormMerger.CarriesCatalogKeycloakMonitor(valuesYaml)
+            && await KeycloakChartMonitorGoesAsync(tenantId, component, ct))
         {
-            EntKube.Contracts.Catalog.InstalledComponent? prometheus =
-                await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
-                    db.ClusterComponents, tenantId, component.ClusterId, ct);
-
-            if (prometheus is not null)
-            {
-                valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
-            }
+            valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
         }
 
         // Keycloak: render any named-theme volumes / copier init container / login mount into
@@ -1027,6 +1021,54 @@ public class ComponentLifecycleService(
             ValuesYaml = valuesYaml,
             Timeout = installTimeout
         };
+    }
+
+    /// <summary>
+    /// Whether the catalog's Keycloak ServiceMonitor block is turned off for this apply. Asked only of a Keycloak
+    /// that carries that block, and read from the cluster:
+    ///
+    /// <list type="number">
+    /// <item><b>The cluster does not serve the ServiceMonitor kind</b> (no monitoring.coreos.com CRD). The chart
+    /// renders the object without asking, and helm refuses the whole release ("no matches for kind
+    /// ServiceMonitor"), so Keycloak would not install at all. Off, whatever else is true.</item>
+    /// <item><b>The monitor engine's own ServiceMonitor for this Keycloak already stands</b>
+    /// (<see cref="EngineMonitorOnCluster"/>: its name for this release, in this namespace, with both ownership
+    /// labels for this cluster). The chart's beside it would double every number. Off.</item>
+    /// </list>
+    ///
+    /// <para><b>Everywhere else it stays as stored.</b> Where EntKube's Prometheus selects the chart's monitor,
+    /// the planner sees Keycloak covered and never makes ours, so the chart's goes on scraping. Where it does not
+    /// select it, the planner makes ours and the next apply turns the chart's off; until then an unselected
+    /// monitor beside ours doubles nothing. Where the planner makes nothing (no catalog Prometheus, a sharded
+    /// or ambiguous one, a Prometheus EntKube did not install), a working monitor is never removed.</para>
+    ///
+    /// <para><b>Unknown fails the apply.</b> A cluster that cannot be reached, a CRD probe or a monitor read that
+    /// fails: this throws before helm is given anything, rather than guess which of a refused release, a
+    /// double scrape or a lost one to risk.</para>
+    /// </summary>
+    private async Task<bool> KeycloakChartMonitorGoesAsync(
+        Guid tenantId, ClusterComponent component, CancellationToken ct)
+    {
+        EntKube.Web.Services.Clusters.IClusterClient cluster =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct)
+            ?? throw new InvalidOperationException(
+                $"Whether '{component.Name}' may keep the chart's ServiceMonitor cannot be told: the cluster has no "
+                + "stored kubeconfig, or is not this tenant's.");
+
+        if (!await EngineMonitorOnCluster.KindIsServedAsync(
+                cluster, EntKube.Web.Services.ScrapeMonitors.MonitorKind.ServiceMonitor, ct))
+        {
+            return true;
+        }
+
+        EntKube.Web.Services.ScrapeMonitors.MonitorIdentity? ours = EngineMonitorOnCluster.ForComponent(
+            new EntKube.Contracts.Catalog.InstalledComponent(
+                component.Id, tenantId, component.ClusterId, "", Guid.Empty, component.Name,
+                component.ComponentType, EntKube.Contracts.Catalog.ComponentStatus.Installed,
+                component.Namespace, component.ReleaseName, component.HelmChartName, component.HelmChartVersion,
+                component.HelmValues, component.Configuration, null, component.InstalledAt));
+
+        return ours is not null && await EngineMonitorOnCluster.StandsAsync(cluster, ours, ct);
     }
 
     /// <summary>

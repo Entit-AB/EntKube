@@ -1138,11 +1138,12 @@ public static class YamlFormMerger
     /// <para><b>Why.</b> From 2026-08-20 the catalog switched it on for every install. The chart renders it
     /// without asking whether the cluster knows the kind, so on a cluster without the Prometheus Operator helm
     /// refused the whole release ("no matches for kind ServiceMonitor") and Keycloak did not install at all.
-    /// Where EntKube's own Prometheus serves the cluster, EntKube now makes the monitor itself, and a second
-    /// one reading the same pods would double every number on the Keycloak panel.</para>
+    /// Where the monitor engine's own ServiceMonitor for this Keycloak stands, a second one reading the same
+    /// pods would double every number on the Keycloak panel.</para>
     ///
-    /// <para><b>Only there.</b> The caller asks first: everywhere else EntKube makes no monitor, a Prometheus
-    /// it did not install may be scraping the chart's, and this is not called.</para>
+    /// <para><b>Only there.</b> The caller reads the cluster first and calls this in those two cases only: no
+    /// ServiceMonitor kind, or the engine's own monitor already standing. Everywhere else a Prometheus may be
+    /// scraping the chart's, nothing replaces it, and this is not called.</para>
     ///
     /// <para><b>Only the catalog's own block</b>, which was <c>enabled: true</c> with nothing beside it. Any
     /// other key in it — an interval, a label — means an operator made it theirs, and their monitor stays;
@@ -1156,16 +1157,26 @@ public static class YamlFormMerger
         if (string.IsNullOrWhiteSpace(yaml)) return yaml;
 
         YamlMappingNode root = ParseOrCreateRoot(yaml);
-        if (!TryGetMapping(root, "serviceMonitor", out YamlMappingNode? monitor)
-            || monitor!.Children.Count != 1
-            || !IsTrue(monitor, "enabled"))
-        {
-            return yaml;
-        }
+        if (CatalogKeycloakMonitor(root) is not { } monitor) return yaml;
 
         SetScalar(monitor, "enabled", "false");
         return SerializeKeepingTheLastNewline(root);
     }
+
+    /// <summary>
+    /// Whether these values carry the block <see cref="TurnOffCatalogKeycloakMonitor"/> turns off: the
+    /// catalog's own <c>serviceMonitor: {enabled: true}</c>, nothing beside it. Lets the caller ask the
+    /// cluster only where the answer can change something.
+    /// </summary>
+    public static bool CarriesCatalogKeycloakMonitor(string yaml)
+        => !string.IsNullOrWhiteSpace(yaml) && CatalogKeycloakMonitor(ParseOrCreateRoot(yaml)) is not null;
+
+    private static YamlMappingNode? CatalogKeycloakMonitor(YamlMappingNode root)
+        => TryGetMapping(root, "serviceMonitor", out YamlMappingNode? monitor)
+           && monitor!.Children.Count == 1
+           && IsTrue(monitor, "enabled")
+            ? monitor
+            : null;
 
     /// <summary>
     /// The port a SeaweedFS server answers Prometheus on when its block sets no <c>metricsPort</c> (the chart's

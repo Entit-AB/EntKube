@@ -1217,6 +1217,20 @@ public class CnpgServiceTests : IDisposable
     public static TheoryData<string> EveryPathThatWritesACluster() =>
         ["create", "upgrade", "major-upgrade", "backup", "reapply", "restore", "restore-in-place", "drift"];
 
+    /// <summary>Every path that fails whole when the cluster cannot say (the backup and the drift check do not).</summary>
+    public static TheoryData<string, string> EveryPathThatFailsWholeOnAnUnknown()
+    {
+        TheoryData<string, string> data = new();
+        foreach (string operation in new[] { "create", "upgrade", "major-upgrade", "reapply", "restore", "restore-in-place" })
+        {
+            foreach (string failure in new[] { "kind", "list", "garbage" }) data.Add(operation, failure);
+        }
+        return data;
+    }
+
+    private const string CrdResource = "customresourcedefinitions.apiextensions.k8s.io";
+    private const string PodMonitors = "podmonitors.monitoring.coreos.com";
+
     /// <summary>
     /// Seeds a 17 cluster with backup storage, runs <paramref name="operation"/> against it, and returns every
     /// Cluster document it applied or (for "drift") diffed.
@@ -1249,10 +1263,10 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.DiffManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, string, CancellationToken>((m, _, _, _) => written.Add(m))
-            .ReturnsAsync(new EntKube.Web.Services.Clusters.ManifestDiff(
-                EntKube.Web.Services.Clusters.DiffOutcome.Matches, null));
+            .ReturnsAsync((string m, string _, string _, CancellationToken _) => DiffAgainstLive(m));
+        // Everything but the monitors, which each test's world answers for.
         k8sFactory.Setup(f => f.GetJsonAsync(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.Is<string>(r => r != PodMonitors), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync("{}");
 
@@ -1269,7 +1283,7 @@ public class CnpgServiceTests : IDisposable
             case "reapply": lastReapply = await service.ReapplyClusterManifestsAsync(tenant.Id, pg.Id); break;
             case "restore": await service.RestoreAsync(tenant.Id, pg.Id, "restored-pg", at); break;
             case "restore-in-place": await service.RestoreInPlaceAsync(tenant.Id, pg.Id, at); break;
-            case "drift": await service.GetClusterDetailAsync(tenant.Id, pg.Id); break;
+            case "drift": lastDetail = await service.GetClusterDetailAsync(tenant.Id, pg.Id); break;
             default: throw new ArgumentOutOfRangeException(nameof(operation), operation, null);
         }
 
@@ -1277,6 +1291,20 @@ public class CnpgServiceTests : IDisposable
     }
 
     private KubernetesOperationResult<string>? lastReapply;
+    private CnpgClusterDetail? lastDetail;
+
+    /// <summary>What the live Cluster says, for the server-side diff to compare against. On, as CNPG's default leaves it.</summary>
+    private bool liveEnablePodMonitor = true;
+
+    /// <summary>
+    /// A server-side dry run, reduced to the one field these tests are about: the manifest matches the live
+    /// Cluster where it says what the live one says.
+    /// </summary>
+    private EntKube.Web.Services.Clusters.ManifestDiff DiffAgainstLive(string manifest)
+        => manifest.Contains($"    enablePodMonitor: {(liveEnablePodMonitor ? "true" : "false")}\n", StringComparison.Ordinal)
+            ? new EntKube.Web.Services.Clusters.ManifestDiff(EntKube.Web.Services.Clusters.DiffOutcome.Matches, null)
+            : new EntKube.Web.Services.Clusters.ManifestDiff(
+                EntKube.Web.Services.Clusters.DiffOutcome.Differs, "spec.monitoring.enablePodMonitor");
 
     /// <summary>EntKube's kube-prometheus-stack on <paramref name="cluster"/>, as Catalog registers it.</summary>
     private async Task SeedPrometheusAsync(
@@ -1297,19 +1325,74 @@ public class CnpgServiceTests : IDisposable
         await db.SaveChangesAsync();
     }
 
+    /// <summary>A PodMonitor as the API server lists it. By default the monitor engine's, for this cluster.</summary>
+    private static string PodMonitor(
+        string name, string ns = "databases", Guid? labelledFor = null, Guid? cluster = null,
+        bool managedBy = true, bool owned = true)
+    {
+        System.Text.Json.Nodes.JsonObject labels = [];
+        if (managedBy) labels["app.kubernetes.io/managed-by"] = "entkube";
+        if (owned) labels["entkube.io/scrape-monitor"] = (labelledFor ?? cluster ?? Guid.Empty).ToString();
+        return new System.Text.Json.Nodes.JsonObject
+        {
+            ["apiVersion"] = "monitoring.coreos.com/v1",
+            ["kind"] = "PodMonitor",
+            ["metadata"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["name"] = name, ["namespace"] = ns, ["labels"] = labels,
+            },
+        }.ToJsonString();
+    }
+
     /// <summary>
-    /// Where EntKube's own Prometheus serves the cluster, its monitor engine makes the database's PodMonitor,
-    /// so the operator's is switched off: two would double every sum.
+    /// The cluster's PodMonitors, as kubectl lists them: by namespace and by label selector, the way
+    /// <c>kubectl get -n ns -l a=b,c=d -o json</c> answers. <paramref name="honourSelector"/> false hands back
+    /// the whole namespace, to show the answer is checked and not only the question.
+    /// </summary>
+    private void PodMonitorsOnTheCluster(bool kindServed, string[] monitors, bool honourSelector = true)
+    {
+        k8sFactory.Setup(f => f.ResourceExistsAsync(
+                CrdResource, PodMonitors, "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(kindServed);
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                PodMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string _, string ns, string _, string selector, CancellationToken _) =>
+            {
+                if (!kindServed) throw new InvalidOperationException("error: the server doesn't have a resource type \"podmonitors\"");
+
+                Dictionary<string, string> wanted = selector.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(p => p.Split('=', 2)).ToDictionary(p => p[0], p => p[1]);
+                System.Text.Json.Nodes.JsonArray items = [];
+                foreach (string json in monitors)
+                {
+                    System.Text.Json.Nodes.JsonNode item = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+                    if ((string?)item["metadata"]!["namespace"] != ns) continue;
+                    System.Text.Json.Nodes.JsonObject labels = item["metadata"]!["labels"]!.AsObject();
+                    if (honourSelector && !wanted.All(w => labels.TryGetPropertyValue(w.Key, out var v) && (string?)v == w.Value)) continue;
+                    items.Add(item);
+                }
+                return new System.Text.Json.Nodes.JsonObject { ["kind"] = "List", ["items"] = items }.ToJsonString();
+            });
+    }
+
+    /// <summary>The engine's PodMonitor for every database name these paths write.</summary>
+    private static string[] OursForEveryName(KubernetesCluster cluster)
+        => [.. new[] { "pg", "fresh-pg", "restored-pg", "pg-v18" }.Select(n => PodMonitor($"entkube-cnpg-{n}", cluster: cluster.Id))];
+
+    /// <summary>
+    /// Where the monitor engine's own PodMonitor for the database already stands, the operator's is switched off:
+    /// two would double every sum. Asked of the cluster, not of Catalog: no kube-prometheus-stack is registered
+    /// here at all.
     ///
     /// <para>The block is written, with false, rather than left out: a client-side apply that drops
     /// spec.monitoring deletes all of it, tls included, and losing that rolls the database.</para>
     /// </summary>
     [Theory]
     [MemberData(nameof(EveryPathThatWritesACluster))]
-    public async Task WhereEntKubesPrometheusServesTheCluster_TheOperatorsPodMonitorIsTurnedOff(string operation)
+    public async Task WhereTheEnginesOwnMonitorStands_TheOperatorsPodMonitorIsTurnedOff(string operation)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-        await SeedPrometheusAsync(cluster);
+        PodMonitorsOnTheCluster(kindServed: true, OursForEveryName(cluster));
 
         List<string> clusters = await ClusterDocumentsWrittenByAsync(operation, tenant, cluster, storageLink);
 
@@ -1318,16 +1401,17 @@ public class CnpgServiceTests : IDisposable
     }
 
     /// <summary>
-    /// Everywhere else the engine makes nothing: it runs only where Catalog's kube-prometheus-stack serves
-    /// the cluster. A Prometheus EntKube did not install may be scraping the operator's PodMonitor, and
-    /// switching it off would leave the database unscraped with nothing to say so. So the builders write
-    /// what they wrote before the engine existed.
+    /// The skeptic's case (a): EntKube's Prometheus serves the cluster, but the engine made nothing for this
+    /// database (sharded, ambiguous, a selector it cannot read, or simply because Prometheus selects the
+    /// operator's PodMonitor and the planner sees it covered). Nothing replaces the operator's, so it stays on.
     /// </summary>
     [Theory]
     [MemberData(nameof(EveryPathThatWritesACluster))]
-    public async Task WhereEntKubesPrometheusDoesNotServeTheCluster_TheOperatorsPodMonitorStaysOn(string operation)
+    public async Task WhereNoMonitorOfOursStands_TheOperatorsPodMonitorStaysOn_WithEntKubesPrometheusThereOrNot(string operation)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        await SeedPrometheusAsync(cluster);
+        PodMonitorsOnTheCluster(kindServed: true, []);
 
         List<string> clusters = await ClusterDocumentsWrittenByAsync(operation, tenant, cluster, storageLink);
 
@@ -1335,29 +1419,70 @@ public class CnpgServiceTests : IDisposable
         clusters.Should().AllSatisfy(m => m.Should().Contain("  monitoring:\n    enablePodMonitor: true\n"));
     }
 
-    /// <summary>The same rule <see cref="EntKube.Contracts.Catalog.PrometheusPresence.Serving"/> states.</summary>
+    /// <summary>
+    /// The skeptic's case (b): Catalog's kube-prometheus-stack is on its way out (Uninstalling, a status that can
+    /// stick) or its row is gone, while our monitor still runs and the engine, seeing no Prometheus, neither keeps
+    /// nor prunes it. Switching the operator's back on now would sit it beside ours: a double.
+    /// </summary>
     [Theory]
-    [InlineData(ComponentStatus.NotInstalled, false, "true")]
-    [InlineData(ComponentStatus.Installing, false, "true")]
-    [InlineData(ComponentStatus.Failed, false, "true")]
-    [InlineData(ComponentStatus.Failed, true, "false")]
-    [InlineData(ComponentStatus.Installing, true, "false")]
-    public async Task OnlyAPrometheusThatServesHandsTheMonitorOver(ComponentStatus status, bool installedBefore, string expected)
+    [InlineData(null)]
+    [InlineData(ComponentStatus.Uninstalling)]
+    [InlineData(ComponentStatus.NotInstalled)]
+    public async Task AMonitorOfOursThatOutlivesTheCatalogsPrometheusKeepsTheOperatorsOff(ComponentStatus? prometheus)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-        await SeedPrometheusAsync(cluster, status, installedBefore ? DateTime.UtcNow.AddDays(-1) : null);
+        if (prometheus is { } status) await SeedPrometheusAsync(cluster, status);
+        PodMonitorsOnTheCluster(kindServed: true, OursForEveryName(cluster));
+
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("reapply", tenant, cluster, storageLink);
+
+        clusters.Should().ContainSingle(lastReapply?.Error).Which.Should().Contain("    enablePodMonitor: false\n");
+    }
+
+    /// <summary>
+    /// A cluster without the Prometheus Operator's PodMonitor kind can hold nothing of ours: that is an answer,
+    /// not an unknown, and nothing more is asked.
+    /// </summary>
+    [Fact]
+    public async Task WithoutThePodMonitorKindNothingOfOursCanStandAndTheOperatorsStaysOn()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        await SeedPrometheusAsync(cluster);
+        PodMonitorsOnTheCluster(kindServed: false, OursForEveryName(cluster));
 
         List<string> clusters = await ClusterDocumentsWrittenByAsync("create", tenant, cluster, storageLink);
 
-        clusters.Should().ContainSingle().Which.Should().Contain($"    enablePodMonitor: {expected}\n");
+        clusters.Should().ContainSingle().Which.Should().Contain("    enablePodMonitor: true\n");
+        k8sFactory.Verify(f => f.GetJsonAsync(
+            PodMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
-    [Fact]
-    public async Task APrometheusOnAnotherTenantsClusterDoesNotCount()
+    /// <summary>
+    /// Only the engine's own monitor for this database counts: its name, its namespace, both ownership labels,
+    /// this cluster's id. Anything less is somebody else's (or another registration's), which the engine would
+    /// not keep, so the operator's stays on. Listed without the selector, so it is the answer that is checked.
+    /// </summary>
+    [Theory]
+    [InlineData("another database's")]
+    [InlineData("in another namespace")]
+    [InlineData("labelled for another cluster")]
+    [InlineData("not managed by entkube")]
+    [InlineData("without the ownership label")]
+    public async Task AMonitorThatIsNotWhollyOursDoesNotCount(string which)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-        (_, KubernetesCluster theirs, _) = await SeedTenantWithClusterAsync("stranger");
-        await SeedPrometheusAsync(theirs);
+        await SeedPrometheusAsync(cluster);
+        string monitor = which switch
+        {
+            "another database's" => PodMonitor("entkube-cnpg-other", cluster: cluster.Id),
+            "in another namespace" => PodMonitor("entkube-cnpg-fresh-pg", ns: "elsewhere", cluster: cluster.Id),
+            "labelled for another cluster" => PodMonitor("entkube-cnpg-fresh-pg", labelledFor: Guid.NewGuid()),
+            "not managed by entkube" => PodMonitor("entkube-cnpg-fresh-pg", cluster: cluster.Id, managedBy: false),
+            "without the ownership label" => PodMonitor("entkube-cnpg-fresh-pg", cluster: cluster.Id, owned: false),
+            _ => throw new ArgumentOutOfRangeException(nameof(which)),
+        };
+        PodMonitorsOnTheCluster(kindServed: true, [monitor], honourSelector: false);
 
         List<string> clusters = await ClusterDocumentsWrittenByAsync("create", tenant, cluster, storageLink);
 
@@ -1365,41 +1490,82 @@ public class CnpgServiceTests : IDisposable
     }
 
     /// <summary>
-    /// Unknown means do nothing. When Catalog cannot say whether its Prometheus serves the cluster, neither
-    /// value is safe to write: one may double the scrape, the other may end it. The question is asked before
-    /// anything is written, so the action fails whole, and a backup still runs but skips its re-apply.
+    /// A major upgrade writes two clusters. Ours selects the source's pods by name, so the temporary
+    /// <c>pg-v18</c> is nobody's but the operator's until it is renamed back; only the final one hands over.
     /// </summary>
-    [Theory]
-    [InlineData("create")]
-    [InlineData("upgrade")]
-    [InlineData("major-upgrade")]
-    [InlineData("reapply")]
-    [InlineData("restore")]
-    [InlineData("restore-in-place")]
-    public async Task WhenCatalogCannotSayNoClusterIsWritten(string operation)
+    [Fact]
+    public async Task AMajorUpgradesTemporaryClusterKeepsTheOperatorsMonitorAndTheFinalOneHandsOver()
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-        CnpgService blind = WithFailingCatalog();
+        PodMonitorsOnTheCluster(kindServed: true, [PodMonitor("entkube-cnpg-pg", cluster: cluster.Id)]);
+
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("major-upgrade", tenant, cluster, storageLink);
+
+        clusters.Should().HaveCount(2);
+        clusters[0].Should().Contain("  name: pg-v18\n").And.Contain("    enablePodMonitor: true\n");
+        clusters[1].Should().Contain("  name: pg\n").And.Contain("    enablePodMonitor: false\n");
+    }
+
+    /// <summary>Makes the cluster unable to say, in one of three ways.</summary>
+    private void TheClusterCannotSay(string failure)
+    {
+        switch (failure)
+        {
+            case "kind":
+                k8sFactory.Setup(f => f.ResourceExistsAsync(
+                        CrdResource, PodMonitors, "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "list":
+                PodMonitorsOnTheCluster(kindServed: true, []);
+                k8sFactory.Setup(f => f.GetJsonAsync(
+                        PodMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ThrowsAsync(new InvalidOperationException("cluster unreachable"));
+                break;
+            case "garbage":
+                PodMonitorsOnTheCluster(kindServed: true, []);
+                k8sFactory.Setup(f => f.GetJsonAsync(
+                        PodMonitors, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                    .ReturnsAsync("Unable to connect to the server");
+                break;
+            default: throw new ArgumentOutOfRangeException(nameof(failure));
+        }
+    }
+
+    private static string WhatFailed(string failure)
+        => failure == "garbage" ? "*could not be read*" : "cluster unreachable";
+
+    /// <summary>
+    /// Unknown means do nothing. When the cluster cannot say whether ours stands, neither value is safe to write:
+    /// one may double the scrape, the other may end it. The question is asked before anything is written, so the
+    /// action fails whole: nothing applied, nothing deleted, no record left behind.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EveryPathThatFailsWholeOnAnUnknown))]
+    public async Task WhenTheClusterCannotSayNoClusterIsWritten(string operation, string failure)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        TheClusterCannotSay(failure);
 
         List<string> clusters = [];
         Func<Task> act = async () => clusters = await ClusterDocumentsWrittenByAsync(
-            operation, tenant, cluster, storageLink, blind);
+            operation, tenant, cluster, storageLink);
 
         if (operation == "reapply")
         {
             // Reports its failures as a result rather than throwing.
             await act.Should().NotThrowAsync();
             lastReapply!.IsSuccess.Should().BeFalse();
-            lastReapply.Error.Should().Be("catalog unreachable");
+            lastReapply.Error.Should().Match(WhatFailed(failure));
         }
         else
         {
-            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("catalog unreachable");
+            await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(WhatFailed(failure));
         }
 
         k8sFactory.Verify(f => f.ApplyManifestAsync(
-            It.Is<string>(m => m.Contains("kind: Cluster\n")), It.IsAny<string>(), It.IsAny<CancellationToken>()),
-            Times.Never);
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never, "nothing at all is applied for an action that cannot be finished");
         k8sFactory.Verify(f => f.DeleteManifestAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CancellationToken>()), Times.Never, "nothing is torn down for a cluster that is not put back");
@@ -1409,13 +1575,16 @@ public class CnpgServiceTests : IDisposable
         (await check.CnpgClusters.SingleAsync()).Status.Should().Be(CnpgClusterStatus.Running);
     }
 
-    [Fact]
-    public async Task WhenCatalogCannotSayABackupStillRunsButReappliesNothing()
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("list")]
+    [InlineData("garbage")]
+    public async Task WhenTheClusterCannotSayABackupStillRunsButReappliesNothing(string failure)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        TheClusterCannotSay(failure);
 
-        List<string> clusters = await ClusterDocumentsWrittenByAsync(
-            "backup", tenant, cluster, storageLink, WithFailingCatalog());
+        List<string> clusters = await ClusterDocumentsWrittenByAsync("backup", tenant, cluster, storageLink);
 
         clusters.Should().BeEmpty();
         k8sFactory.Verify(f => f.ApplyManifestAsync(
@@ -1423,32 +1592,89 @@ public class CnpgServiceTests : IDisposable
             Times.Once);
     }
 
-    [Fact]
-    public async Task WhenCatalogCannotSayTheDriftIsUnknown()
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("list")]
+    [InlineData("garbage")]
+    public async Task WhenTheClusterCannotSayTheDriftIsUnknown(string failure)
     {
         (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
-        CnpgService blind = WithFailingCatalog();
+        TheClusterCannotSay(failure);
 
-        List<string> diffed = await ClusterDocumentsWrittenByAsync("drift", tenant, cluster, storageLink, blind);
-        CnpgClusterDetail? detail = await blind.GetClusterDetailAsync(
-            tenant.Id, (await db.CnpgClusters.SingleAsync()).Id);
+        List<string> diffed = await ClusterDocumentsWrittenByAsync("drift", tenant, cluster, storageLink);
 
         diffed.Should().BeEmpty();
-        detail!.ConfigurationDrift.Should().Be(EntKube.Web.Services.Clusters.DiffOutcome.Unknown);
+        lastDetail!.ConfigurationDrift.Should().Be(EntKube.Web.Services.Clusters.DiffOutcome.Unknown);
     }
 
-    private CnpgService WithFailingCatalog()
+    /// <summary>
+    /// drift-flap: a database whose operator PodMonitor is on, with nothing of ours beside it, is as it should be,
+    /// whether or not EntKube's Prometheus serves the cluster. The banner must not invite a re-apply that would
+    /// switch off the only monitor there is.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADatabaseWithTheOperatorsMonitorOnAndNoneOfOursReportsNoDrift(bool entKubesPrometheus)
     {
-        // Everything but the one question answers as Catalog does: "is the operator installed" included.
-        EntKube.Web.Modules.Api.CatalogApi real = new(dbFactory);
-        Mock<EntKube.Contracts.Catalog.ICatalogApi> catalog = new();
-        catalog.Setup(c => c.GetComponentsForClusterAsync(It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Returns((Guid tenant, Guid cluster, CancellationToken ct) => real.GetComponentsForClusterAsync(tenant, cluster, ct));
-        catalog.Setup(c => c.FindPrometheusAsync(It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("catalog unreachable"));
-        return new CnpgService(dbFactory, vaultService,
-            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
-            catalog.Object, new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), gate);
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        if (entKubesPrometheus) await SeedPrometheusAsync(cluster);
+        PodMonitorsOnTheCluster(kindServed: true, []);
+        liveEnablePodMonitor = true;
+
+        await ClusterDocumentsWrittenByAsync("drift", tenant, cluster, storageLink);
+
+        lastDetail!.ConfigurationDrift.Should().Be(EntKube.Web.Services.Clusters.DiffOutcome.Matches);
+    }
+
+    /// <summary>
+    /// The handover's invitation: ours stands and the operator's is still on (Prometheus did not select it, so the
+    /// planner made ours). The banner says it differs, and the re-apply it offers switches the operator's off. Once
+    /// that is done there is nothing left to differ.
+    /// </summary>
+    [Theory]
+    [InlineData(true, EntKube.Web.Services.Clusters.DiffOutcome.Differs)]
+    [InlineData(false, EntKube.Web.Services.Clusters.DiffOutcome.Matches)]
+    public async Task WhereOursStandsTheOperatorsMonitorStillOnIsADifferenceAndOffIsNone(
+        bool liveOn, EntKube.Web.Services.Clusters.DiffOutcome expected)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        PodMonitorsOnTheCluster(kindServed: true, OursForEveryName(cluster));
+        liveEnablePodMonitor = liveOn;
+
+        await ClusterDocumentsWrittenByAsync("drift", tenant, cluster, storageLink);
+
+        lastDetail!.ConfigurationDrift.Should().Be(expected);
+    }
+
+    /// <summary>
+    /// The drift check and the re-apply ask the same question and get the same answer: whatever the cluster holds,
+    /// the document diffed is the document the re-apply then writes. If they disagreed, the banner would say
+    /// "differs" for ever on a database the re-apply leaves as it is, or say nothing while the re-apply changes it.
+    /// </summary>
+    [Theory]
+    [InlineData("ours stands")]
+    [InlineData("none of ours")]
+    [InlineData("no PodMonitor kind")]
+    public async Task TheDriftCheckDiffsTheDocumentTheReapplyWrites(string world)
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+        await SeedPrometheusAsync(cluster);
+        PodMonitorsOnTheCluster(kindServed: world != "no PodMonitor kind",
+            world == "ours stands" ? OursForEveryName(cluster) : []);
+
+        List<string> diffed = await ClusterDocumentsWrittenByAsync("drift", tenant, cluster, storageLink);
+        CnpgCluster pg = await db.CnpgClusters.SingleAsync();
+        List<string> applied = [];
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .ReturnsAsync(string.Empty);
+        (await sut.ReapplyClusterManifestsAsync(tenant.Id, pg.Id)).IsSuccess.Should().BeTrue();
+
+        diffed.Should().ContainSingle();
+        applied.Where(m => m.Contains("kind: Cluster\n", StringComparison.Ordinal))
+            .Should().ContainSingle().Which.Should().Be(diffed[0]);
     }
 
     // ──────── Tenancy of the binding pairing ────────
