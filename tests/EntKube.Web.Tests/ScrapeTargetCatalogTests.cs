@@ -145,6 +145,32 @@ public class ScrapeTargetCatalogTests
         row.Info.Should().Contain(why);
     }
 
+    /// <summary>
+    /// The catalog knows the chart annotates its pods, not that anything takes them: what the planner
+    /// has seen of the annotation job is said beside it, and the catalog's own sentence claims nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("traefik")]
+    [InlineData("cert-manager")]
+    [InlineData("velero")]
+    public void A_component_left_to_the_annotation_job_is_marked_so_and_claims_no_scrape(string chart)
+    {
+        world.Component(chart, "ns", "rel");
+
+        ScrapeTargetSpec row = world.Specs().Should().ContainSingle().Subject;
+        row.LeftToAnnotationJob.Should().BeTrue();
+        row.Info.Should().NotContain("already scrapes").And.NotContain("which the Prometheus stack");
+    }
+
+    [Fact]
+    public void Only_a_component_its_chart_annotates_is_left_to_the_annotation_job()
+    {
+        world.Component("kube-prometheus-stack", "monitoring", "kps");
+        world.Component("loki", "loki", "loki");
+
+        world.Specs().Should().OnlyContain(s => !s.LeftToAnnotationJob);
+    }
+
     [Theory]
     [InlineData("gateway", "istio")]
     [InlineData("gateway", "istio-internal")]

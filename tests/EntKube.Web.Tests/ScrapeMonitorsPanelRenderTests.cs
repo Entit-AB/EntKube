@@ -66,6 +66,8 @@ public sealed class ScrapeMonitorsPanelRenderTests : BunitContext
             endpoints: [new("orders-1", "10.0.0.5:9187", "/metrics"), new("orders-2", "10.0.0.6:9187", "/metrics")]),
         Row("covered", MonitorState.CoveredElsewhere),
         Row("annotated", MonitorState.Annotated),
+        Row("partly", MonitorState.PartlyCovered),
+        Row("starting", MonitorState.PrometheusStarting),
         Row("notrunning", MonitorState.NotRunning),
         Row("notexposed", MonitorState.NotExposed),
         Row("blocked", MonitorState.BlockedByNetworkPolicy),
@@ -122,7 +124,9 @@ public sealed class ScrapeMonitorsPanelRenderTests : BunitContext
     [Theory]
     [InlineData("managed", "Scraped by EntKube")]
     [InlineData("covered", "Scraped elsewhere")]
-    [InlineData("annotated", "Scraped by annotation")]
+    [InlineData("annotated", "Awaiting the annotation job")]
+    [InlineData("partly", "Partly scraped")]
+    [InlineData("starting", "Prometheus starting")]
     [InlineData("notrunning", "Not running")]
     [InlineData("notexposed", "No metrics port")]
     [InlineData("blocked", "Blocked by a NetworkPolicy")]
@@ -145,7 +149,51 @@ public sealed class ScrapeMonitorsPanelRenderTests : BunitContext
         Plans(Ok(EveryState()));
 
         Panel().FindAll("[data-monitor-row]").Select(r => r.GetAttribute("data-monitor-row")).Should().Equal(
-            "managed", "covered", "annotated", "notrunning", "notexposed", "blocked", "notselectable", "info");
+            "managed", "covered", "annotated", "partly", "starting", "notrunning", "notexposed", "blocked",
+            "notselectable", "info");
+    }
+
+    /// <summary>
+    /// ⭐ Every state the planner can give has a label and a colour of its own. A state added without
+    /// one would show as its enum name in a grey badge, which is what PartlyCovered and
+    /// PrometheusStarting did; this fails for the next one instead.
+    /// </summary>
+    [Fact]
+    public void Every_state_there_is_has_a_label_and_a_colour()
+    {
+        MonitorState[] states = Enum.GetValues<MonitorState>();
+        Plans(Ok(Plan(states.Select(s => Row(s.ToString(), s)))));
+
+        IRenderedComponent<ScrapeMonitorsPanel> cut = Panel();
+
+        List<(string Label, string Colour)> badges = [];
+        foreach (MonitorState state in states)
+        {
+            IElement badge = RowOf(cut, state.ToString()).QuerySelector("[data-state]")!;
+            string label = badge.TextContent.Trim();
+            string colour = badge.ClassList.FirstOrDefault(c => c.StartsWith("bg-", StringComparison.Ordinal)) ?? "";
+
+            label.Should().NotBeNullOrWhiteSpace().And.NotBe(state.ToString(), $"{state} needs a label a person reads");
+            colour.Should().MatchRegex("^bg-(success|info|warning|danger|secondary)-subtle$", $"{state} needs a colour");
+            badges.Add((label, colour));
+        }
+
+        badges.Select(b => b.Label).Should().OnlyHaveUniqueItems("two states with one label cannot be told apart");
+    }
+
+    /// <summary>What a person should read into the colour: scraped, about to be, not, kept out.</summary>
+    [Theory]
+    [InlineData(MonitorState.Managed, "bg-success-subtle")]
+    [InlineData(MonitorState.CoveredElsewhere, "bg-info-subtle")]
+    [InlineData(MonitorState.Annotated, "bg-info-subtle")]
+    [InlineData(MonitorState.PartlyCovered, "bg-warning-subtle")]
+    [InlineData(MonitorState.PrometheusStarting, "bg-secondary-subtle")]
+    [InlineData(MonitorState.BlockedByNetworkPolicy, "bg-danger-subtle")]
+    public void A_states_colour_says_how_it_stands(MonitorState state, string colour)
+    {
+        Plans(Ok(Plan([Row("a", state)])));
+
+        RowOf(Panel(), "a").QuerySelector("[data-state]")!.ClassList.Should().Contain(colour);
     }
 
     [Fact]

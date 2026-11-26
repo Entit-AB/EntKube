@@ -106,4 +106,11 @@ public sealed record ScrapeTargetSpec(
     /// usual "let it in": a chart that owns its policies undoes an edit to them by hand.
     /// </summary>
     public string? WhenBlocked { get; init; }
+
+    /// <summary>
+    /// True where its chart annotates its pods with <c>prometheus.io/scrape</c> for an annotation scrape job
+    /// to take, so EntKube makes no monitor of its own. Whether such a job is there is for the planner to
+    /// say, from what Prometheus lists; the catalog cannot know.
+    /// </summary>
+    public bool LeftToAnnotationJob { get; init; }
 }

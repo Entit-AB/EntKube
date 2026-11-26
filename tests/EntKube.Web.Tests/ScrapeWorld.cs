@@ -149,6 +149,17 @@ internal sealed class ScrapeWorld
         return monitor;
     }
 
+    /// <summary>
+    /// The monitor as it is after somebody wrote it again: then by the API server's record of its
+    /// writers, and at the generation its spec is at.
+    /// </summary>
+    public LiveMonitor MonitorEdited(LiveMonitor monitor, DateTimeOffset? at, long? generation = 2)
+    {
+        LiveMonitor edited = monitor with { Changed = at, Generation = generation };
+        Monitors[Monitors.IndexOf(monitor)] = edited;
+        return edited;
+    }
+
     /// <summary>A monitor of EntKube's for this cluster registration, selecting nothing in particular.</summary>
     public LiveMonitor OurMonitor(MonitorKind kind, string ns, string name)
         => Monitor(kind, ns, name, "{}", (ScrapeMonitorManifest.OwnershipLabel, ClusterId.ToString()));

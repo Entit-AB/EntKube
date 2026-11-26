@@ -31,14 +31,65 @@ public sealed class DuplicateScrapeTests : BunitContext
     }
 
     [Fact]
-    public void Two_ports_of_one_pod_and_two_paths_of_one_port_are_different_endpoints()
+    public void Two_ports_of_one_pod_are_different_endpoints()
     {
         DuplicateScrapes.Find(
         [
             Target("a", "http://10.0.0.5:9187/metrics"),
             Target("b", "http://10.0.0.5:8080/metrics"),
-            Target("c", "http://10.0.0.5:9187/metrics/detailed"),
         ]).Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// ⭐ The planner's rule (ScrapedEndpoints.ServesItsOwnMetrics): one port serves one set of series,
+    /// whatever the path. RabbitMQ's /metrics/per-object serves its /metrics again, per object, so a job on
+    /// each doubles every sum the same as two jobs on one path.
+    /// </summary>
+    [Fact]
+    public void Two_paths_of_one_port_are_one_endpoint()
+    {
+        DuplicateScrape d = DuplicateScrapes.Find(
+        [
+            Target("serviceMonitor/queues/events-metrics/0", "http://10.0.0.7:15692/metrics"),
+            Target("rabbitmq-per-object", "http://10.0.0.7:15692/metrics/per-object"),
+        ]).Should().ContainSingle().Subject;
+
+        d.Scrapes.Should().Equal(
+            new EndpointScrape("rabbitmq-per-object", null, "/metrics/per-object"),
+            new EndpointScrape("serviceMonitor/queues/events-metrics/0", null, "/metrics"));
+        d.Scrapes[0].ToString().Should().Contain("/metrics/per-object", "the path is what tells a person where to look");
+    }
+
+    /// <summary>
+    /// What asks the port for something else is not its own series: an exporter's probe, a query that
+    /// picks families, and the kubelet's separate sets beside its /metrics. kube-prometheus-stack scrapes
+    /// the kubelet on /metrics, /metrics/cadvisor and /metrics/probes of every node.
+    /// </summary>
+    [Fact]
+    public void A_path_that_asks_for_something_else_is_its_own_endpoint()
+    {
+        DuplicateScrapes.Find(
+        [
+            Target("serviceMonitor/kube-system/kubelet/0", "https://10.0.1.1:10250/metrics"),
+            Target("serviceMonitor/kube-system/kubelet/1", "https://10.0.1.1:10250/metrics/cadvisor"),
+            Target("serviceMonitor/kube-system/kubelet/2", "https://10.0.1.1:10250/metrics/probes"),
+            Target("serviceMonitor/kube-system/kubelet/3", "https://10.0.1.1:10250/metrics/resource"),
+            Target("serviceMonitor/kube-system/kubelet/4", "https://10.0.1.1:10250/metrics/slis"),
+            Target("exporter", "http://10.0.0.9:9115/metrics"),
+            Target("probe/a", "http://10.0.0.9:9115/probe?target=a"),
+            Target("rabbitmq-detailed", "http://10.0.0.7:15692/metrics/detailed?family=queue_coarse_metrics"),
+            Target("rabbitmq", "http://10.0.0.7:15692/metrics"),
+        ]).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Two_scrapes_that_ask_for_the_same_something_else_are_still_a_duplicate()
+    {
+        DuplicateScrapes.Find(
+        [
+            Target("serviceMonitor/kube-system/kubelet/1", "https://10.0.1.1:10250/metrics/cadvisor"),
+            Target("cadvisor-by-hand", "https://10.0.1.1:10250/metrics/cadvisor"),
+        ]).Should().ContainSingle();
     }
 
     [Fact]

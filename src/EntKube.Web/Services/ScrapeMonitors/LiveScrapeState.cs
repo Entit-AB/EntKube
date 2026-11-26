@@ -42,12 +42,23 @@ public sealed record LivePrometheus(
 /// When the API server made it. A monitor Prometheus selects and has listed no target of after a while
 /// is one it scrapes nothing through, which a monitor just made is not yet. Null where it was not said.
 /// </param>
+/// <param name="Changed">
+/// When anybody last wrote it, by the API server's own record of each writer (<c>managedFields</c>), its
+/// status left out. A monitor edited a moment ago may now select what it did not, and Prometheus may not
+/// have taken that in yet. Null where there is no such record.
+/// </param>
+/// <param name="Generation">
+/// How many times its spec has been written (<c>metadata.generation</c>). More than one, with no record of
+/// when, is an edit at a time that cannot be told. Null where it was not said.
+/// </param>
 public sealed record LiveMonitor(
     MonitorIdentity Identity,
     IReadOnlyDictionary<string, string> Labels,
     IReadOnlyDictionary<string, string> Annotations,
     JsonObject Spec,
-    DateTimeOffset? Created = null)
+    DateTimeOffset? Created = null,
+    DateTimeOffset? Changed = null,
+    long? Generation = null)
 {
     /// <summary>
     /// Whether it looks for pods or Services in <paramref name="ns"/>. Only its own namespace, unless it

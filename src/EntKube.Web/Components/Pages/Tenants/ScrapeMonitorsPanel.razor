@@ -278,11 +278,17 @@ else if (plan is not null)
 
     private static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
 
+    // Every state is named here, and none falls through to a default that would pass for a label:
+    // the render test walks every MonitorState and fails on one that shows its enum name or no colour.
+
     private static string StateLabel(MonitorState state) => state switch
     {
         MonitorState.Managed => "Scraped by EntKube",
         MonitorState.CoveredElsewhere => "Scraped elsewhere",
-        MonitorState.Annotated => "Scraped by annotation",
+        // The annotation job is there and takes its pods; Prometheus has not listed them yet.
+        MonitorState.Annotated => "Awaiting the annotation job",
+        MonitorState.PartlyCovered => "Partly scraped",
+        MonitorState.PrometheusStarting => "Prometheus starting",
         MonitorState.NotRunning => "Not running",
         MonitorState.NotExposed => "No metrics port",
         MonitorState.BlockedByNetworkPolicy => "Blocked by a NetworkPolicy",
@@ -291,15 +297,21 @@ else if (plan is not null)
         _ => state.ToString(),
     };
 
+    private const string Success = "bg-success-subtle text-success-emphasis border border-success-subtle";
+    private const string Pending = "bg-info-subtle text-info-emphasis border border-info-subtle";
+    private const string Warning = "bg-warning-subtle text-warning-emphasis border border-warning-subtle";
+    private const string Danger = "bg-danger-subtle text-danger-emphasis border border-danger-subtle";
+    private const string Quiet = "bg-secondary-subtle text-secondary-emphasis border";
+
     private static string StateClass(MonitorState state) => state switch
     {
-        MonitorState.Managed => "bg-success-subtle text-success-emphasis border border-success-subtle",
-        MonitorState.CoveredElsewhere or MonitorState.Annotated
-            => "bg-info-subtle text-info-emphasis border border-info-subtle",
-        MonitorState.NotExposed or MonitorState.NotSelectable
-            => "bg-warning-subtle text-warning-emphasis border border-warning-subtle",
-        MonitorState.BlockedByNetworkPolicy => "bg-danger-subtle text-danger-emphasis border border-danger-subtle",
-        _ => "bg-secondary-subtle text-secondary-emphasis border",
+        MonitorState.Managed => Success,
+        MonitorState.CoveredElsewhere or MonitorState.Annotated => Pending,
+        // Some of it is scraped by nothing: a gap the row names.
+        MonitorState.PartlyCovered or MonitorState.NotExposed or MonitorState.NotSelectable => Warning,
+        MonitorState.BlockedByNetworkPolicy => Danger,
+        MonitorState.PrometheusStarting or MonitorState.NotRunning or MonitorState.Info => Quiet,
+        _ => "border",
     };
 
     private static string ChangeLabel(MonitorChange change) => change switch

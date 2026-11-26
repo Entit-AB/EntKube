@@ -188,7 +188,9 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus, TimeProv
             Pairs(item["metadata"]?["labels"]),
             Pairs(item["metadata"]?["annotations"]),
             SpecOf(item),
-            CreatedOf(item));
+            CreatedOf(item),
+            ChangedOf(item),
+            GenerationOf(item));
 
     /// <summary>
     /// When the API server made it. It always says; one that says something that is not a time is an
@@ -197,13 +199,52 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus, TimeProv
     private static DateTimeOffset? CreatedOf(JsonObject item)
     {
         JsonNode? created = item["metadata"]?["creationTimestamp"];
-        if (created is null) return null;
+        return created is null ? null : TimeOf(created);
+    }
 
-        return TextOf(created) is { } text && DateTimeOffset.TryParse(
+    /// <summary>
+    /// When anybody last wrote it: the latest time in the API server's record of its writers
+    /// (<c>metadata.managedFields</c>), leaving out what was written to its status, which is the operator
+    /// reporting on it and changes nothing it selects. Null where there is no record, or no time in it.
+    /// A record that is there and cannot be read throws, like any other answer that cannot be.
+    /// </summary>
+    private static DateTimeOffset? ChangedOf(JsonObject item)
+    {
+        JsonNode? record = item["metadata"]?["managedFields"];
+        if (record is null) return null;
+        if (record is not JsonArray writers) throw Unreadable("monitors");
+
+        DateTimeOffset? latest = null;
+        foreach (JsonNode? writer in writers)
+        {
+            if (writer is not JsonObject entry) throw Unreadable("monitors");
+            if (TextOf(entry["subresource"]) is { Length: > 0 }) continue;
+            if (entry["time"] is not { } time) continue;
+
+            DateTimeOffset at = TimeOf(time);
+            if (latest is null || at > latest) latest = at;
+        }
+
+        return latest;
+    }
+
+    /// <summary>How many times its spec has been written; null where it was not said.</summary>
+    private static long? GenerationOf(JsonObject item)
+    {
+        JsonNode? generation = item["metadata"]?["generation"];
+        if (generation is null) return null;
+
+        return generation is JsonValue value && value.GetValueKind() == JsonValueKind.Number
+               && value.TryGetValue(out long number)
+            ? number
+            : throw Unreadable("monitors");
+    }
+
+    private static DateTimeOffset TimeOf(JsonNode node)
+        => TextOf(node) is { } text && DateTimeOffset.TryParse(
             text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset at)
             ? at
             : throw Unreadable("monitors");
-    }
 
     /// <summary>
     /// Prometheus's own list of what it scrapes. Every part of it has to be there: this is what says
