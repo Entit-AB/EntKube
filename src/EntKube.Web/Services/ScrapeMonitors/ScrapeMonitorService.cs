@@ -301,11 +301,29 @@ public class ScrapeMonitorService(
         return all.Count > NamedInSummary ? $"{named} and {all.Count - NamedInSummary} more" : named;
     }
 
-    /// <summary>The same for the same set of changes, so that a failure is remembered for those alone.</summary>
+    /// <summary>
+    /// The same for the same set of changes, so that a failure is remembered for those alone.
+    ///
+    /// <para><b>Whatever order they were read in.</b> The plan lists monitors in the order of its
+    /// targets, which is the order the database returned its rows, and no query below orders them:
+    /// Postgres hands an updated row back in another place. Taken in that order, a status change on
+    /// one database would start a refusing cluster's wait over, and every pass would be an attempt
+    /// and an audit row again.</para>
+    /// </summary>
     private static string Fingerprint(ScrapeMonitorPlan plan)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            ScrapeMonitorManifest.RenderNames(plan.Delete) + "\n===\n"
-            + ScrapeMonitorManifest.Render(plan.Apply.Select(m => m.Manifest)))));
+            ScrapeMonitorManifest.RenderNames(plan.Delete.Order(ByIdentity)) + "\n===\n"
+            + ScrapeMonitorManifest.Render(plan.Apply.OrderBy(m => m.Identity, ByIdentity).Select(m => m.Manifest)))));
+
+    /// <summary>By kind, then namespace, then name: one order for the same monitors, however they came.</summary>
+    private static readonly IComparer<MonitorIdentity> ByIdentity = Comparer<MonitorIdentity>.Create((a, b) =>
+    {
+        int kind = a.Kind.CompareTo(b.Kind);
+        if (kind != 0) return kind;
+
+        int ns = string.CompareOrdinal(a.Namespace, b.Namespace);
+        return ns != 0 ? ns : string.CompareOrdinal(a.Name, b.Name);
+    });
 
     private static CancellationTokenSource Limited(CancellationToken ct)
     {

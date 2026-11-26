@@ -589,6 +589,32 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         AppliedTimes(2);
     }
 
+    /// <summary>
+    /// Nothing orders the rows a query returns, and Postgres hands an updated row back in another
+    /// place. The same changes read in another order are still the same changes, and wait as long.
+    /// </summary>
+    [Fact]
+    public async Task The_same_changes_read_in_another_order_wait_as_long()
+    {
+        ADatabaseWithoutAMonitor();
+        world.DataService(ManagedServiceKind.Postgres, "databases", "billing");
+        world.CnpgPod("billing");
+        AnOrphan();
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-older");
+        EveryApplyFails();
+        cluster.Setup(c => c.DeleteManifestSetAsync(It.IsAny<string>(), "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("admission webhook denied the request"));
+        await ReconcileAsync();
+        AppliedTimes(1);
+
+        world.Services.Reverse();
+        world.Monitors.Reverse();
+        clock.Pass(TimeSpan.FromMinutes(1));
+        await ReconcileAsync();
+
+        AppliedTimes(1);
+    }
+
     [Fact]
     public void Waiting_never_exceeds_six_hours_and_a_success_forgets_it()
     {
