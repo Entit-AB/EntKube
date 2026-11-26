@@ -212,6 +212,15 @@
             <RabbitMQMonitoringPanel ClusterId="ClusterId" TenantId="TenantId" />
         </div>
     }
+
+    @* ── Monitors ──
+       Outside the branch above on purpose: it reads the cluster, not Prometheus, and a cluster
+       whose Prometheus cannot be reached is the one whose operator most needs to see what
+       EntKube's monitors are and why. *@
+    <div class="mt-4">
+        <h6 class="text-muted mb-2"><span class="bi bi-binoculars me-1"></span>Monitors</h6>
+        <ScrapeMonitorsPanel TenantId="TenantId" ClusterId="ClusterId" />
+    </div>
 </div>
 
 @code {

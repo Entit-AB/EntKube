@@ -1,0 +1,324 @@
+@using EntKube.Web.Services
+@using EntKube.Web.Services.ScrapeMonitors
+@implements IDisposable
+@inject IScrapeMonitors Monitors
+
+@* ═══════════════════════════════════════════════════════════════════════════
+   ScrapeMonitorsPanel — the ServiceMonitors and PodMonitors EntKube keeps for
+   a cluster's data services and components: who scrapes each one, or what
+   stops it, and what the next apply would change.
+
+   It reads the cluster, not Prometheus, so it has something to say when
+   Prometheus is down. It changes nothing until the button is pressed.
+   ═══════════════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex gap-2 mb-3 align-items-center flex-wrap">
+    <span class="text-muted small">
+        One monitor per data service and component, where nothing else scrapes it already.
+    </span>
+    <div class="ms-auto d-flex gap-2 align-items-center">
+        @if (!loading && plan is { Scope: MonitorPlanScope.Planned })
+        {
+            <span class="text-muted small" data-pending>
+                @(plan.HasChanges ? Count(plan.Apply.Count + plan.Prune.Count, "change") + " to apply" : "Nothing to change")
+            </span>
+            <button class="btn btn-sm btn-primary" @onclick="ApplyAsync"
+                    disabled="@(Busy || !plan.HasChanges)">
+                @if (applying)
+                {
+                    <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                }
+                else
+                {
+                    <span class="bi bi-check2-circle me-1"></span>
+                }
+                Apply monitors now
+            </button>
+        }
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync" disabled="@Busy"
+                title="Read the cluster again" aria-label="Read the cluster again">
+            <span class="bi bi-arrow-clockwise"></span>
+        </button>
+    </div>
+</div>
+
+@if (applyError is not null)
+{
+    <div class="alert alert-danger small py-2" data-apply-error>
+        <span class="bi bi-x-circle me-1"></span>Applying the monitors failed: @applyError
+    </div>
+}
+else if (outcome is not null)
+{
+    <div class="alert @(outcome.Left > 0 ? "alert-warning" : "alert-success") small py-2" data-apply-outcome>@outcome.Sentence</div>
+}
+
+@if (loading)
+{
+    <div class="text-center py-3 text-muted small" data-loading>
+        <span class="bi bi-hourglass-split me-1"></span> Reading the monitors…
+    </div>
+}
+else if (planError is not null)
+{
+    @* Never an empty table: that would say this cluster has no monitors, which is not known. *@
+    <div class="alert alert-warning small py-2" data-plan-error>
+        <span class="bi bi-exclamation-triangle me-1"></span>The monitors could not be read: @planError
+        Nothing was changed.
+    </div>
+}
+else if (plan is { Scope: MonitorPlanScope.NoPrometheus })
+{
+    <div class="text-muted small py-2" data-scope="NoPrometheus">
+        This cluster has no Prometheus installed by EntKube, so EntKube keeps no monitors on it.
+        Once kube-prometheus-stack is installed from the catalog, its monitors are created within five minutes.
+    </div>
+}
+else if (plan is { Scope: MonitorPlanScope.NoMonitorKinds })
+{
+    <div class="text-muted small py-2" data-scope="NoMonitorKinds">
+        Prometheus is installed, but this cluster does not know the ServiceMonitor and PodMonitor kinds yet,
+        so no monitor can be written. They come with kube-prometheus-stack's CRDs; until they are there,
+        nothing is created or removed.
+    </div>
+}
+else if (plan is not null && plan.Rows.Count == 0)
+{
+    <div class="text-muted small py-2" data-empty="monitors">
+        Nothing on this cluster has a metrics endpoint EntKube knows how to monitor.
+    </div>
+}
+else if (plan is not null)
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0 border">
+            <thead class="table-light">
+                <tr>
+                    <th>Target</th>
+                    <th>Kind</th>
+                    <th>Namespace</th>
+                    <th>State</th>
+                    <th>Next apply</th>
+                    <th>Monitor</th>
+                    <th class="text-end">Targets</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (MonitorPlanRow row in plan.Rows)
+                {
+                    <tr data-monitor-row="@row.Key">
+                        <td style="min-width: 260px;">
+                            <div class="fw-semibold small">@row.Title</div>
+                            <div class="text-muted small">@row.Detail</div>
+                            @if (row.Endpoints.Count > 0)
+                            {
+                                <details class="small mt-1">
+                                    <summary class="text-muted">@Count(row.Endpoints.Count, "endpoint")</summary>
+                                    <ul class="list-unstyled mb-0 ms-3">
+                                        @foreach (PlannedEndpoint e in row.Endpoints)
+                                        {
+                                            <li><span class="font-monospace">@(e.Address + e.Path)</span> <span class="text-muted">@e.Pod</span></li>
+                                        }
+                                    </ul>
+                                </details>
+                            }
+                        </td>
+                        <td class="small">@row.Kind</td>
+                        <td><span class="badge bg-secondary-subtle text-secondary border">@row.Namespace</span></td>
+                        <td>
+                            <span class="badge @StateClass(row.State)" data-state="@row.State">@StateLabel(row.State)</span>
+                        </td>
+                        <td class="small @(row.Change == MonitorChange.None ? "text-muted" : "fw-semibold")" data-change>
+                            @ChangeLabel(row.Change)
+                        </td>
+                        <td class="small">
+                            @if (row.Monitor is { } monitor)
+                            {
+                                <code>@monitor.Name</code>
+                                <div class="text-muted">@monitor.Kind</div>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td class="text-end">
+                            @if (row is { State: MonitorState.Managed, TargetsTotal: int total, TargetsUp: int up })
+                            {
+                                <span class="badge @TargetsClass(up, total)" data-targets>@up/@total up</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    /// <summary>
+    /// Whose cluster this is. The plan is read tenant-first, so a panel holding only a cluster id
+    /// could name any cluster in the installation.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
+    [Parameter] public required Guid ClusterId { get; set; }
+
+    private ScrapeMonitorPlan? plan;
+    private string? planError;
+    private bool loading = true;
+    private bool applying;
+    private string? applyError;
+    private MonitorApplyOutcome? outcome;
+
+    /// <summary>
+    /// Which cluster the plan is of. A plan reads every namespace a target is in, so the page
+    /// re-rendering around the panel must not read it all again.
+    /// </summary>
+    private (Guid Tenant, Guid Cluster)? planned;
+
+    /// <summary>Ends a read nobody is waiting for. An apply is never ended this way.</summary>
+    private readonly CancellationTokenSource gone = new();
+
+    private bool Busy => loading || applying;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (planned == (TenantId, ClusterId)) return;
+
+        planned = (TenantId, ClusterId);
+        applyError = null;
+        outcome = null;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (gone.IsCancellationRequested) return;
+
+        loading = true;
+        planError = null;
+        StateHasChanged();
+
+        try
+        {
+            Show(await Monitors.PlanAsync(TenantId, ClusterId, gone.Token));
+        }
+        catch (OperationCanceledException) when (gone.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            // Resolving the cluster decrypts its kubeconfig through the vault, which can throw.
+            // Unhandled it would tear down the circuit; shown, it is the error it is.
+            plan = null;
+            planError = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void Show(KubernetesOperationResult<ScrapeMonitorPlan> result)
+    {
+        if (result is { IsSuccess: true, Data: { } read })
+        {
+            plan = read;
+            planError = null;
+        }
+        else
+        {
+            plan = null;
+            planError = result.Error ?? "The cluster gave no answer.";
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        if (Busy || plan is not { HasChanges: true } before) return;
+
+        applying = true;
+        applyError = null;
+        outcome = null;
+
+        try
+        {
+            // No token: leaving the page must not stop an apply between its delete and its write.
+            KubernetesOperationResult<ScrapeMonitorPlan> result =
+                await Monitors.ApplyAsync(TenantId, ClusterId, CancellationToken.None);
+
+            if (result is { IsSuccess: true, Data: { } after })
+            {
+                plan = after;
+                outcome = MonitorApplyOutcome.Between(before, after);
+            }
+            else
+            {
+                applyError = result.Error ?? "The cluster gave no answer.";
+            }
+        }
+        catch (Exception ex)
+        {
+            applyError = ex.Message;
+        }
+        finally
+        {
+            applying = false;
+        }
+
+        // A failed apply may have written part of it, so the rows from before are no longer known
+        // to be true. Read them again rather than leave them up as if they were.
+        if (applyError is not null && !gone.IsCancellationRequested)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
+
+    private static string StateLabel(MonitorState state) => state switch
+    {
+        MonitorState.Managed => "Scraped by EntKube",
+        MonitorState.CoveredElsewhere => "Scraped elsewhere",
+        MonitorState.Annotated => "Scraped by annotation",
+        MonitorState.NotRunning => "Not running",
+        MonitorState.NotExposed => "No metrics port",
+        MonitorState.BlockedByNetworkPolicy => "Blocked by a NetworkPolicy",
+        MonitorState.NotSelectable => "Not picked up by Prometheus",
+        MonitorState.Info => "Nothing to create",
+        _ => state.ToString(),
+    };
+
+    private static string StateClass(MonitorState state) => state switch
+    {
+        MonitorState.Managed => "bg-success-subtle text-success-emphasis border border-success-subtle",
+        MonitorState.CoveredElsewhere or MonitorState.Annotated
+            => "bg-info-subtle text-info-emphasis border border-info-subtle",
+        MonitorState.NotExposed or MonitorState.NotSelectable
+            => "bg-warning-subtle text-warning-emphasis border border-warning-subtle",
+        MonitorState.BlockedByNetworkPolicy => "bg-danger-subtle text-danger-emphasis border border-danger-subtle",
+        _ => "bg-secondary-subtle text-secondary-emphasis border",
+    };
+
+    private static string ChangeLabel(MonitorChange change) => change switch
+    {
+        MonitorChange.Create => "Create",
+        MonitorChange.Update => "Update",
+        MonitorChange.Replace => "Replace",
+        MonitorChange.Remove => "Remove",
+        _ => "No change",
+    };
+
+    private static string TargetsClass(int up, int total) =>
+        total == 0 ? "bg-secondary-subtle text-secondary-emphasis border"
+        : up == total ? "bg-success-subtle text-success-emphasis border border-success-subtle"
+        : "bg-danger-subtle text-danger-emphasis border border-danger-subtle";
+
+    public void Dispose()
+    {
+        gone.Cancel();
+        gone.Dispose();
+    }
+}

@@ -1,10 +1,13 @@
+using EntKube.Web.Services;
+
 namespace EntKube.Web.Services.ScrapeMonitors;
 
 /// <summary>
 /// What a page may ask of the monitor engine: what the monitors on one cluster are, and to make them
 /// so now. <see cref="ScrapeMonitorService"/> is the one implementation; the interface exists so a
 /// panel can be rendered over a stand-in, and so the panels that read the plan and the panels that
-/// apply it ask the same thing.
+/// apply it ask the same thing. The sweep keeps <see cref="ScrapeMonitorService.ReconcileAllAsync"/>,
+/// which no page has any business calling.
 /// </summary>
 public interface IScrapeMonitors
 {
