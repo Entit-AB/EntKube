@@ -1044,9 +1044,16 @@ public static class ComponentCatalog
                           resources:
                             requests:
                               storage: 20Gi
-                    # Pods that ask to be scraped with the usual annotations — see
-                    # YamlFormMerger.PodAnnotationScrapeJob for what each one does. Only annotated
-                    # pods: an app opts in, nothing is scraped that nobody asked for.
+                    # Pods that ask to be scraped with the usual annotations: prometheus.io/scrape,
+                    # /port, /path and /scheme. Only annotated pods: an app opts in, nothing is
+                    # scraped that nobody asked for.
+                    #
+                    # A pod is discovered once per container (init containers included), and the
+                    # port annotation rewrites all of those to one address. They collapse into ONE
+                    # target only if nothing tells them apart, so no label may come from the
+                    # container: with a `container` label a pod with a sidecar was scraped twice and
+                    # every sum over it doubled. A container without a port is dropped unless the
+                    # pod names one, because its only address is the pod on port 80.
                     additionalScrapeConfigs:
                       - job_name: kubernetes-pods-annotated
                         kubernetes_sd_configs:
@@ -1058,6 +1065,9 @@ public static class ComponentCatalog
                           - source_labels: [__meta_kubernetes_pod_phase]
                             action: drop
                             regex: Pending|Succeeded|Failed|Unknown
+                          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_container_port_number]
+                            action: drop
+                            regex: ;
                           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
                             action: replace
                             regex: (https?)
@@ -1080,8 +1090,6 @@ public static class ComponentCatalog
                             target_label: namespace
                           - source_labels: [__meta_kubernetes_pod_name]
                             target_label: pod
-                          - source_labels: [__meta_kubernetes_pod_container_name]
-                            target_label: container
                           - action: labelmap
                             regex: __meta_kubernetes_pod_label_(app_kubernetes_io_name|app_kubernetes_io_instance)
 
