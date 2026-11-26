@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using EntKube.Contracts.Catalog;
 using EntKube.Contracts.DataServices;
 using EntKube.Web.Data;
@@ -81,7 +82,7 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
             {
                 log.Add("apply");
                 applied = (manifest, summary);
-                world.Apply(world.Plan() with { Prune = [] });
+                ApplyWhatWasSent(manifest);
                 return "";
             });
         cluster.Setup(c => c.DeleteManifestSetAsync(It.IsAny<string>(), "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -89,9 +90,78 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
             {
                 log.Add("delete");
                 deleted = (manifest, summary);
-                world.Monitors.RemoveAll(m => manifest.Contains($"\"{m.Identity.Name}\""));
+                DeleteWhatWasNamed(manifest);
                 return "";
             });
+    }
+
+    // ── The cluster's side of kubectl ─────────────────────────────────────────
+
+    /// <summary>
+    /// What <c>kubectl apply -f</c> leaves: each document that was SENT, merged into the live object
+    /// of its kind and name the way a merge patch merges (maps key by key, a list replaced whole),
+    /// with the one default the API server fills in. What the planner meant and the text left out
+    /// never arrives, and what an apply cannot take away stays.
+    /// </summary>
+    private void ApplyWhatWasSent(string manifest)
+    {
+        foreach (JsonObject document in ScrapeMonitorManifestTests.Documents(manifest))
+        {
+            MonitorIdentity identity = IdentityOf(document);
+            LiveMonitor? before = world.Monitors.SingleOrDefault(m => m.Identity == identity);
+
+            JsonObject spec = before?.Spec.DeepClone().AsObject() ?? [];
+            Merge(spec, document["spec"]!.AsObject());
+
+            foreach (JsonNode? rule in (spec["endpoints"] ?? spec["podMetricsEndpoints"])!.AsArray()
+                         .SelectMany(e => e!["relabelings"]?.AsArray() ?? []))
+            {
+                if (rule!["action"] is null) rule["action"] = "replace";
+            }
+
+            if (before is not null) world.Monitors.Remove(before);
+            world.Monitors.Add(new LiveMonitor(
+                identity,
+                Merged(before?.Labels, document["metadata"]!["labels"]),
+                Merged(before?.Annotations, document["metadata"]!["annotations"]),
+                spec));
+        }
+    }
+
+    /// <summary>What <c>kubectl delete -f</c> removes: exactly the kind, namespace and name each document names.</summary>
+    private void DeleteWhatWasNamed(string manifest)
+    {
+        foreach (JsonObject document in ScrapeMonitorManifestTests.Documents(manifest))
+        {
+            MonitorIdentity identity = IdentityOf(document);
+            world.Monitors.RemoveAll(m => m.Identity == identity);
+        }
+    }
+
+    private static MonitorIdentity IdentityOf(JsonObject document)
+    {
+        document["apiVersion"]!.GetValue<string>().Should().Be("monitoring.coreos.com/v1");
+
+        return new MonitorIdentity(
+            Enum.Parse<MonitorKind>(document["kind"]!.GetValue<string>()),
+            document["metadata"]!["namespace"]!.GetValue<string>(),
+            document["metadata"]!["name"]!.GetValue<string>());
+    }
+
+    private static void Merge(JsonObject into, JsonObject from)
+    {
+        foreach ((string key, JsonNode? value) in from.ToList())
+        {
+            if (value is JsonObject map && into[key] is JsonObject have) Merge(have, map);
+            else into[key] = value?.DeepClone();
+        }
+    }
+
+    private static Dictionary<string, string> Merged(IReadOnlyDictionary<string, string>? live, JsonNode? sent)
+    {
+        Dictionary<string, string> pairs = live is null ? [] : new(live, StringComparer.Ordinal);
+        foreach ((string key, JsonNode? value) in sent?.AsObject() ?? []) pairs[key] = value!.GetValue<string>();
+        return pairs;
     }
 
     public void Dispose() => connection.Dispose();
@@ -246,6 +316,56 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         log.Skip(4).Should().Equal("delete", "apply");
         deleted!.Value.Manifest.Should().Contain("entkube-cnpg-orders");
         deleted.Value.Summary.Should().NotContain("remove");
+        applied!.Value.Manifest.Should().Contain("entkube-cnpg-orders", "what was deleted has to be made again in the same pass");
+
+        LiveMonitor again = world.Monitors.Single();
+        again.Spec["selector"]!["matchLabels"]!.AsObject().ContainsKey("team").Should().BeFalse();
+        world.Plan().HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// With an orphan going in the same pass there is a delete either way, so only what the cluster
+    /// holds afterwards tells whether the monitor made again was deleted first: an apply on its own
+    /// leaves the label added by hand where it is.
+    /// </summary>
+    [Fact]
+    public async Task A_monitor_made_again_beside_one_that_goes_comes_back_as_it_should_be()
+    {
+        ADatabaseWithoutAMonitor();
+        await ReconcileAsync();
+        world.Monitors.Single().Spec["selector"]!["matchLabels"]!["team"] = "payments";
+        AnOrphan();
+
+        await ReconcileAsync();
+
+        world.Monitors.Should().ContainSingle();
+        world.Monitors.Single().Spec["selector"]!["matchLabels"]!.AsObject().ContainsKey("team")
+            .Should().BeFalse("an apply cannot take away what was added by hand");
+        world.Plan().HasChanges.Should().BeFalse();
+        deleted!.Value.Manifest.Should().Contain("entkube-cnpg-orders").And.Contain("entkube-cnpg-old");
+    }
+
+    /// <summary>
+    /// The cluster holds what the text said, and only that: a monitor the planner meant and the text
+    /// left out is missing here, as it would be on a cluster.
+    /// </summary>
+    [Fact]
+    public async Task What_kubectl_is_handed_is_what_the_cluster_holds_afterwards()
+    {
+        ADatabaseWithoutAMonitor();
+        world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
+        world.RabbitBroker("events");
+        AnOrphan();
+        ScrapeMonitorPlan before = world.Plan();
+
+        await ReconcileAsync();
+
+        world.Monitors.Select(m => m.Identity).Should().BeEquivalentTo(before.Apply.Select(m => m.Identity));
+        world.Plan().HasChanges.Should().BeFalse();
+
+        log.Clear();
+        await ReconcileAsync();
+        NothingWasWritten();
     }
 
     [Fact]
@@ -598,14 +718,14 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
             .Returns(async (string manifest, string _, string summary, CancellationToken ct) =>
             {
                 await through.AcknowledgeAsync(Change(ChangeVerb.Apply, manifest, summary), ct);
-                world.Apply(world.Plan() with { Prune = [] });
+                ApplyWhatWasSent(manifest);
                 return "";
             });
         cluster.Setup(c => c.DeleteManifestSetAsync(It.IsAny<string>(), "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns(async (string manifest, string _, string summary, CancellationToken ct) =>
             {
                 await through.AcknowledgeAsync(Change(ChangeVerb.Delete, manifest, summary), ct);
-                world.Monitors.RemoveAll(m => manifest.Contains($"\"{m.Identity.Name}\""));
+                DeleteWhatWasNamed(manifest);
                 return "";
             });
     }

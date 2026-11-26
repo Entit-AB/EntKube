@@ -201,8 +201,19 @@ public class ScrapeMonitorManifestTests
 
     private MonitorDifference Difference(LiveMonitor live) => ScrapeMonitorManifest.Compare(desired, live);
 
+    /// <summary>
+    /// The documents of one kubectl input, each as the JSON object it reads back as. The service
+    /// tests' cluster applies and deletes what this finds, not what the planner meant.
+    /// </summary>
+    internal static IReadOnlyList<JsonObject> Documents(string yaml)
+    {
+        YamlStream stream = [];
+        stream.Load(new StringReader(yaml));
+        return [.. stream.Documents.Select(d => AsJson(d.RootNode).AsObject())];
+    }
+
     /// <summary>A YAML node as JSON: quoted is a string, plain is whatever it looks like.</summary>
-    private static JsonNode AsJson(YamlNode node) => node switch
+    internal static JsonNode AsJson(YamlNode node) => node switch
     {
         YamlMappingNode map => new JsonObject(map.Children.Select(c =>
             KeyValuePair.Create(((YamlScalarNode)c.Key).Value!, (JsonNode?)AsJson(c.Value)))),
