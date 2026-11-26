@@ -1050,10 +1050,19 @@ public sealed class ScrapeMonitorClaimPostgresTests
         return (long)(await command.ExecuteScalarAsync())!;
     }
 
+    /// <summary>
+    /// One set of options per connection string, as AddDbContextFactory has it: new options for
+    /// every context build EF a service provider each, which the rest of the suite has used up.
+    /// </summary>
     private sealed class NpgsqlTelemetry(string connectionString) : IDbContextFactory<TelemetryDbContext>
     {
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DbContextOptions<TelemetryDbContext>> Options = new();
+
         public TelemetryDbContext CreateDbContext()
-            => new(new DbContextOptionsBuilder<TelemetryDbContext>().UseNpgsql(connectionString).Options);
+            => new(Options.GetOrAdd(connectionString, cs => new DbContextOptionsBuilder<TelemetryDbContext>()
+                .UseNpgsql(cs)
+                .ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ManyServiceProvidersCreatedWarning))
+                .Options));
     }
 }
 
