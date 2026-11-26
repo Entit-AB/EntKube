@@ -26,6 +26,7 @@ public sealed class LiveScrapeStateReaderTests
 
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid clusterId = Guid.NewGuid();
+    private readonly DateTimeOffset readAt = new(2026, 11, 26, 12, 0, 0, TimeSpan.Zero);
 
     /// <summary>What the API server answers, by path, and by page where it has a second one.</summary>
     private readonly Dictionary<string, Func<HttpResponseMessage>> answers = new(StringComparer.Ordinal);
@@ -141,6 +142,31 @@ public sealed class LiveScrapeStateReaderTests
         await FluentActions.Awaiting(ReadMonitoringAsync).Should().ThrowAsync<HttpOperationException>();
     }
 
+    [Fact]
+    public async Task A_monitor_says_when_it_was_made_and_the_answer_when_it_was_read()
+    {
+        Answer($"{Monitoring}/podmonitors", List(
+            """{"metadata":{"name":"orders","namespace":"databases","creationTimestamp":"2026-11-26T11:50:00Z"},"spec":{}}"""));
+
+        LiveMonitoring live = (await ReadMonitoringAsync())!;
+
+        live.Monitors.Single(m => m.Identity.Name == "orders").Created
+            .Should().Be(new DateTimeOffset(2026, 11, 26, 11, 50, 0, TimeSpan.Zero));
+        live.Monitors.Single(m => m.Identity.Name == "events-metrics").Created.Should().BeNull();
+        live.ReadAt.Should().Be(readAt, "the age of what was read is measured from when it was read");
+    }
+
+    [Theory]
+    [InlineData("\"yesterday\"")]
+    [InlineData("12")]
+    public async Task A_creation_time_that_is_not_a_time_is_not_a_monitor_of_no_age(string created)
+    {
+        Answer($"{Monitoring}/podmonitors", List(
+            $$$"""{"metadata":{"name":"orders","namespace":"databases","creationTimestamp":{{{created}}}},"spec":{}}"""));
+
+        await FluentActions.Awaiting(ReadMonitoringAsync).Should().ThrowAsync<FormatException>();
+    }
+
     // ── What Prometheus says ──────────────────────────────────────────────────
 
     [Fact]
@@ -166,15 +192,15 @@ public sealed class LiveScrapeStateReaderTests
     }
 
     [Theory]
-    [InlineData("https://10.0.0.5:9187/metrics?x=1", "10.0.0.5", 9187, "/metrics")]
-    [InlineData("http://10.0.0.5/stats/prometheus", "10.0.0.5", 80, "/stats/prometheus")]
-    [InlineData("http://[fd00::5]:9187/metrics", "fd00::5", 9187, "/metrics")]
-    public void A_target_is_where_its_address_says(string url, string host, int port, string path)
+    [InlineData("https://10.0.0.5:9187/metrics?x=1", "10.0.0.5", 9187, "/metrics", "?x=1")]
+    [InlineData("http://10.0.0.5/stats/prometheus", "10.0.0.5", 80, "/stats/prometheus", "")]
+    [InlineData("http://[fd00::5]:9187/metrics", "fd00::5", 9187, "/metrics", "")]
+    public void A_target_is_where_its_address_says(string url, string host, int port, string path, string query)
     {
         ActiveTarget target = LiveScrapeStateReader.ReadTargets(Targets(
             $$$"""{"scrapePool":"some-job","scrapeUrl":"{{{url}}}","health":"down"}""")).Single();
 
-        target.Should().Be(new ActiveTarget("some-job", host, port, path, Up: false));
+        target.Should().Be(new ActiveTarget("some-job", host, port, path, Up: false, query));
         target.Monitor.Should().BeNull("a job that is not an operator's monitor has none behind it");
     }
 
@@ -239,7 +265,12 @@ public sealed class LiveScrapeStateReaderTests
 
         return new LiveScrapeStateReader(new PrometheusService(
             Mock.Of<IDeliveryApi>(), clusters.Object, catalog.Object, new PromQueryCache(),
-            NullLogger<PrometheusService>.Instance));
+            NullLogger<PrometheusService>.Instance), new StoppedClock(readAt));
+    }
+
+    private sealed class StoppedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private IClusterClient Cluster()

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -37,8 +38,16 @@ public interface ILiveScrapeStateReader
 /// what it can and wrong here: an empty list of monitors means "create them all", and an empty list
 /// of pods means "this is not running". The SDK says which it was, and stops when it is told to.</para>
 /// </summary>
-public sealed class LiveScrapeStateReader(PrometheusService prometheus) : ILiveScrapeStateReader
+/// <param name="prometheus">Asks Prometheus what it scrapes.</param>
+/// <param name="time">
+/// The clock the answer is stamped with; the system's unless a test says otherwise. It is not
+/// registered as a service, so the container leaves it to the default.
+/// </param>
+public sealed class LiveScrapeStateReader(PrometheusService prometheus, TimeProvider? time = null)
+    : ILiveScrapeStateReader
 {
+    private readonly TimeProvider clock = time ?? TimeProvider.System;
+
     private const string Group = "monitoring.coreos.com";
     private const string Version = "v1";
 
@@ -60,6 +69,7 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus) : ILiveS
         if (podMonitors is null) return null;
 
         string targets = await prometheus.ReadActiveTargetsAsync(tenantId, cluster.ClusterId, ct);
+        DateTimeOffset readAt = clock.GetUtcNow();
 
         return new LiveMonitoring(
             [.. prometheuses.Select(ReadPrometheus)],
@@ -67,7 +77,8 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus) : ILiveS
                 .. serviceMonitors.Select(m => ReadMonitor(MonitorKind.ServiceMonitor, m)),
                 .. podMonitors.Select(m => ReadMonitor(MonitorKind.PodMonitor, m)),
             ],
-            ReadTargets(targets));
+            ReadTargets(targets),
+            readAt);
     }
 
     public async Task<LiveWorkloads> ReadWorkloadsAsync(
@@ -176,7 +187,23 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus) : ILiveS
             new MonitorIdentity(kind, NamespaceOf(item), NameOf(item)),
             Pairs(item["metadata"]?["labels"]),
             Pairs(item["metadata"]?["annotations"]),
-            SpecOf(item));
+            SpecOf(item),
+            CreatedOf(item));
+
+    /// <summary>
+    /// When the API server made it. It always says; one that says something that is not a time is an
+    /// answer that cannot be read, not a monitor of no age.
+    /// </summary>
+    private static DateTimeOffset? CreatedOf(JsonObject item)
+    {
+        JsonNode? created = item["metadata"]?["creationTimestamp"];
+        if (created is null) return null;
+
+        return TextOf(created) is { } text && DateTimeOffset.TryParse(
+            text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset at)
+            ? at
+            : throw Unreadable("monitors");
+    }
 
     /// <summary>
     /// Prometheus's own list of what it scrapes. Every part of it has to be there: this is what says
@@ -214,7 +241,8 @@ public sealed class LiveScrapeStateReader(PrometheusService prometheus) : ILiveS
             }
 
             read.Add(new ActiveTarget(
-                pool, url.Host.Trim('[', ']'), url.Port, url.AbsolutePath, TextOf(found["health"]) == "up"));
+                pool, url.Host.Trim('[', ']'), url.Port, url.AbsolutePath, TextOf(found["health"]) == "up",
+                url.Query));
         }
 
         return read;

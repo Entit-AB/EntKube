@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using EntKube.Contracts.DataServices;
+using EntKube.Web.Services;
 using EntKube.Web.Services.ScrapeMonitors;
 using FluentAssertions;
 using k8s.Models;
@@ -252,15 +253,57 @@ public class ScrapeMonitorPlannerTests
         plan.Apply.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// The one path rule, for targets and monitors alike: the same pod port is the same series names
+    /// whatever the path, except where the scrape asks the endpoint for something else, an exporter's
+    /// probe of another address, or a query that picks other families.
+    /// </summary>
     [Theory]
-    [InlineData(8000, "/metrics")]
-    [InlineData(9187, "/probe")]
-    public void A_target_on_another_port_or_path_is_another_endpoint(int port, string path)
+    [InlineData(8000, "/metrics", "")]
+    [InlineData(9187, "/probe", "")]
+    [InlineData(9187, "/metrics", "?target=10.0.0.99%3A5432")]
+    public void A_target_on_another_port_or_one_that_asks_for_something_else_is_not_coverage(
+        int port, string path, string query)
     {
         world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
-        world.Scraped("somebody", world.CnpgPod("orders"), port, path);
+        world.Scraped("somebody", world.CnpgPod("orders"), port, path, query: query);
 
         OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed);
+    }
+
+    /// <summary>
+    /// A job that is not a monitor (a ScrapeConfig, an additionalScrapeConfigs job) on another path of
+    /// the same port serves the same names again, as RabbitMQ's per-object path does: ours beside it
+    /// would double them.
+    /// </summary>
+    [Theory]
+    [InlineData("scrapeConfig/queues/rabbit-per-object")]
+    [InlineData("rabbitmq-per-object")]
+    public void A_job_on_another_path_of_the_same_port_covers_it(string pool)
+    {
+        world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
+        V1Pod broker = world.RabbitBroker("events");
+        world.Scraped(pool, broker, 15692, "/metrics/per-object");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere);
+        OnlyRow(plan).Detail.Should().Contain(pool);
+        plan.Apply.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("""{"port":"prometheus","path":"/probe"}""", "an exporter's probe serves the probed address's metrics")]
+    [InlineData("""{"port":"prometheus","path":"/metrics/detailed","params":{"family":["queue_coarse_metrics"]}}""",
+        "a query asks for other families")]
+    public void A_foreign_monitor_that_asks_the_port_for_something_else_covers_nothing(string endpoint, string because)
+    {
+        world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
+        world.RabbitBroker("events");
+        world.Monitor(MonitorKind.ServiceMonitor, "queues", "detailed",
+            $$$"""{"selector":{"matchLabels":{"app.kubernetes.io/component":"rabbitmq"}},"endpoints":[{{{endpoint}}}]}""");
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed, because);
     }
 
     /// <summary>
@@ -318,13 +361,36 @@ public class ScrapeMonitorPlannerTests
 
     // ── Annotated ─────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The stack's annotation job, as the catalog installs it, and Prometheus scraping some other pod
+    /// through it: the job is there.
+    /// </summary>
+    private void TheAnnotationJobRuns()
+    {
+        V1Pod demo = world.Pod("apps", "demo-0", ScrapeWorld.Labels(("app", "demo")),
+            ScrapeWorld.Container("demo", ("http", 8080)));
+        demo.Metadata.Annotations = ScrapeWorld.Labels(("prometheus.io/scrape", "true"));
+        world.Scraped("kubernetes-pods-annotated", demo, 8080);
+    }
+
+    private V1Pod StartedAMinuteAgo(V1Pod pod)
+    {
+        pod.Status.StartTime = (world.Now - TimeSpan.FromMinutes(1)).UtcDateTime;
+        return pod;
+    }
+
+    /// <summary>
+    /// A pod that has only just started, that the annotation job takes by its own rules, and that
+    /// Prometheus has not listed yet: ours beside it would be the second job in a moment.
+    /// </summary>
     [Theory]
     [InlineData("9187")]
     [InlineData(null)]
     public void A_pod_that_asks_to_be_scraped_on_that_port_needs_no_monitor(string? port)
     {
+        TheAnnotationJobRuns();
         world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
-        V1Pod pod = world.CnpgPod("orders");
+        V1Pod pod = StartedAMinuteAgo(world.CnpgPod("orders"));
         pod.Metadata.Annotations = ScrapeWorld.Labels(("prometheus.io/scrape", "true"));
         if (port is not null) pod.Metadata.Annotations["prometheus.io/port"] = port;
         world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
@@ -334,6 +400,71 @@ public class ScrapeMonitorPlannerTests
         OnlyRow(plan).State.Should().Be(MonitorState.Annotated);
         plan.Prune.Should().Equal(Pods("databases", "entkube-cnpg-orders"));
         plan.Apply.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// An adopted stack with its own additionalScrapeConfigs has no annotation job, and nothing in
+    /// Prometheus's list says otherwise: an annotation is then a wish nobody grants.
+    /// </summary>
+    [Fact]
+    public void An_annotation_is_no_evidence_where_no_annotation_job_is_there()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        StartedAMinuteAgo(world.CnpgPod("orders")).Metadata.Annotations =
+            ScrapeWorld.Labels(("prometheus.io/scrape", "true"), ("prometheus.io/port", "9187"));
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.Create);
+    }
+
+    /// <summary>The job keeps only the literal true: its regex is anchored and minds case.</summary>
+    [Theory]
+    [InlineData("True")]
+    [InlineData("yes")]
+    [InlineData(" true")]
+    public void The_annotation_job_takes_only_the_literal_true(string scrape)
+    {
+        TheAnnotationJobRuns();
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        StartedAMinuteAgo(world.CnpgPod("orders")).Metadata.Annotations =
+            ScrapeWorld.Labels(("prometheus.io/scrape", scrape), ("prometheus.io/port", "9187"));
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed);
+    }
+
+    /// <summary>
+    /// Without a port annotation the job scrapes the ports the containers declare, and drops a
+    /// container that declares none. Tetragon's agent declares none; its Service says 2112 by number.
+    /// </summary>
+    [Fact]
+    public void Without_a_port_annotation_the_job_takes_only_the_ports_a_container_declares()
+    {
+        TheAnnotationJobRuns();
+        world.Component("tetragon", "tetragon", "tetragon");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(
+            ("app.kubernetes.io/name", "tetragon"), ("app.kubernetes.io/instance", "tetragon"));
+        V1Pod pod = StartedAMinuteAgo(world.Pod("tetragon", "tetragon-abcde", labels, ScrapeWorld.Container("tetragon")));
+        pod.Metadata.Annotations = ScrapeWorld.Labels(("prometheus.io/scrape", "true"));
+        world.Service("tetragon", "tetragon", labels, labels, ("metrics", 2112, "2112"));
+
+        world.Plan().Rows.Single(r => r.Kind == "Tetragon agent").State.Should().Be(MonitorState.Managed);
+    }
+
+    /// <summary>
+    /// The job takes pods within seconds of their start. One it still has not after ten minutes is
+    /// one it does not take, whatever its annotations read like to EntKube.
+    /// </summary>
+    [Fact]
+    public void A_pod_the_annotation_job_has_left_alone_for_a_while_is_not_counted()
+    {
+        TheAnnotationJobRuns();
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders").Metadata.Annotations =
+            ScrapeWorld.Labels(("prometheus.io/scrape", "true"), ("prometheus.io/port", "9187"));
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed);
     }
 
     /// <summary>
@@ -347,8 +478,68 @@ public class ScrapeMonitorPlannerTests
         V1Pod pod = world.CnpgPod("orders");
         pod.Metadata.Annotations = ScrapeWorld.Labels(
             ("prometheus.io/scrape", "true"), ("prometheus.io/port", "15020"), ("prometheus.io/path", "/stats/prometheus"));
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
 
         OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed);
+    }
+
+    /// <summary>
+    /// Istio's injector, merging metrics as it does by default: the pod's own prometheus.io
+    /// annotations go into the proxy's ISTIO_PROMETHEUS_ANNOTATIONS, the pod's now point at the agent
+    /// on 15020, and the agent scrapes the app's port and serves its series there with its own.
+    /// </summary>
+    private static V1Pod IstioMerged(V1Pod pod, string original)
+    {
+        pod.Spec.Containers.Add(new V1Container
+        {
+            Name = "istio-proxy",
+            Env = [new V1EnvVar { Name = "ISTIO_PROMETHEUS_ANNOTATIONS", Value = original }],
+            Ports = [new V1ContainerPort { Name = "http-envoy-prom", ContainerPort = 15090, Protocol = "TCP" }],
+        });
+        pod.Metadata.Annotations = ScrapeWorld.Labels(
+            ("prometheus.io/scrape", "true"), ("prometheus.io/port", "15020"), ("prometheus.io/path", "/stats/prometheus"));
+        return pod;
+    }
+
+    [Fact]
+    public void Istio_serves_the_apps_metrics_again_on_15020_where_the_annotation_job_scrapes_them()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), """{"scrape":"true","path":"/metrics","port":"9187"}""");
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere);
+        OnlyRow(plan).Detail.Should().Contain("kubernetes-pods-annotated").And.Contain("15020");
+        plan.Apply.Should().BeEmpty();
+        plan.Prune.Should().Equal(Pods("databases", "entkube-cnpg-orders"));
+    }
+
+    [Fact]
+    public void Istio_merging_a_pod_that_just_started_waits_for_the_annotation_job()
+    {
+        TheAnnotationJobRuns();
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        IstioMerged(StartedAMinuteAgo(world.CnpgPod("orders")), """{"scrape":"true","path":"","port":"9187"}""");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.Annotated);
+        plan.HasChanges.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("""{"scrape":"true","path":"/metrics","port":"9999"}""", "the agent merges another port")]
+    [InlineData("""{"scrape":"","path":"","port":""}""", "the pod asked for nothing to be merged")]
+    public void Istio_merging_something_else_is_no_coverage(string original, string because)
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        V1Pod pod = IstioMerged(world.CnpgPod("orders"), original);
+        world.Scraped("kubernetes-pods-annotated", pod, 15020, "/stats/prometheus");
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed, because);
     }
 
     [Fact]
@@ -456,6 +647,8 @@ public class ScrapeMonitorPlannerTests
 
         MonitorPlanRow Filer() => world.Plan().Rows.Single(r => r.Kind == "SeaweedFS filer");
         Filer().State.Should().Be(MonitorState.BlockedByNetworkPolicy);
+        Filer().Detail.Should().Contain("Re-apply SeaweedFS", "that is what adds the rule; the chart undoes an edit by hand")
+            .And.NotContain("Allow it in");
 
         world.Policy("seaweedfs", """
             {"podSelector":{"matchLabels":{"app.kubernetes.io/component":"filer"}},"policyTypes":["Ingress"],
@@ -779,11 +972,31 @@ public class ScrapeMonitorPlannerTests
     public void RabbitMqs_old_monitor_goes_where_the_broker_is_annotated()
     {
         world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
+        V1Pod broker = world.RabbitBroker("events");
+        broker.Metadata.Annotations =
+            ScrapeWorld.Labels(("prometheus.io/scrape", "true"), ("prometheus.io/port", "15692"));
+        world.OldRabbitMonitor("events");
+        world.Scraped("kubernetes-pods-annotated", broker, 15692);
+
+        world.Plan().Prune.Should().Equal(Services("queues", "events-metrics"));
+    }
+
+    /// <summary>
+    /// The same broker on a stack whose own additionalScrapeConfigs have no annotation job: the old
+    /// monitor is the only scrape there is, and it is taken over, not removed.
+    /// </summary>
+    [Fact]
+    public void RabbitMqs_old_monitor_stays_where_nothing_honours_the_brokers_annotation()
+    {
+        world.DataService(ManagedServiceKind.RabbitMq, "queues", "events");
         world.RabbitBroker("events").Metadata.Annotations =
             ScrapeWorld.Labels(("prometheus.io/scrape", "true"), ("prometheus.io/port", "15692"));
         world.OldRabbitMonitor("events");
 
-        world.Plan().Prune.Should().Equal(Services("queues", "events-metrics"));
+        ScrapeMonitorPlan plan = world.Plan();
+
+        plan.Prune.Should().BeEmpty();
+        OnlyRow(plan).State.Should().Be(MonitorState.Managed);
     }
 
     [Fact]
@@ -1022,6 +1235,241 @@ public class ScrapeMonitorPlannerTests
 
         Endpoint()["scheme"]!.GetValue<string>().Should().Be("https");
         Endpoint()["tlsConfig"]!["insecureSkipVerify"]!.GetValue<bool>().Should().BeTrue();
+    }
+
+    // ── Coverage is a question about every endpoint ───────────────────────────
+
+    /// <summary>
+    /// Argo CD's application controller, server and repo-server, which one PodMonitor of ours selects.
+    /// The chart can give the controller a ServiceMonitor of its own and leave the others without.
+    /// </summary>
+    private V1Pod ArgoCd()
+    {
+        world.Component("argo-cd", "argocd", "argocd");
+        V1Pod Part(string component, int port) => world.Pod("argocd", $"argocd-{component}-0", ScrapeWorld.Labels(
+            ("app.kubernetes.io/part-of", "argocd"), ("app.kubernetes.io/instance", "argocd"),
+            ("app.kubernetes.io/component", component)), ScrapeWorld.Container(component, ("metrics", port)));
+
+        V1Pod controller = Part("application-controller", 8082);
+        Part("server", 8083);
+        Part("repo-server", 8084);
+        return controller;
+    }
+
+    [Fact]
+    public void A_job_that_scrapes_one_part_of_a_target_does_not_take_the_rest_with_it()
+    {
+        V1Pod controller = ArgoCd();
+        world.Apply(world.Plan());
+        world.Scraped("serviceMonitor/argocd/argocd-application-controller/0", controller, 8082);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        MonitorPlanRow row = OnlyRow(plan);
+        row.State.Should().Be(MonitorState.PartlyCovered);
+        row.Change.Should().Be(MonitorChange.Remove, "ours scrapes the controller a second time");
+        plan.Prune.Should().Equal(Pods("argocd", "entkube-argocd-argocd"));
+        plan.Apply.Should().BeEmpty();
+        row.Endpoints.Should().HaveCount(3);
+        row.Detail.Should().Contain("serviceMonitor/argocd/argocd-application-controller/0")
+            .And.Contain("argocd-server-0").And.Contain("argocd-repo-server-0")
+            .And.NotContain("already scrapes it");
+    }
+
+    [Fact]
+    public void A_target_scraped_only_in_part_gets_no_monitor_of_ours_either()
+    {
+        V1Pod controller = ArgoCd();
+        world.Scraped("serviceMonitor/argocd/argocd-application-controller/0", controller, 8082);
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.PartlyCovered);
+        OnlyRow(plan).Change.Should().Be(MonitorChange.None);
+        plan.HasChanges.Should().BeFalse("a monitor for the rest would scrape the controller twice");
+    }
+
+    [Fact]
+    public void A_monitor_over_one_part_of_a_target_does_not_cover_the_rest()
+    {
+        ArgoCd();
+        world.Monitor(MonitorKind.PodMonitor, "argocd", "argocd-application-controller",
+            """{"selector":{"matchLabels":{"app.kubernetes.io/component":"application-controller"}},"podMetricsEndpoints":[{"port":"metrics"}]}""");
+
+        MonitorPlanRow row = OnlyRow(world.Plan());
+
+        row.State.Should().Be(MonitorState.PartlyCovered);
+        row.Detail.Should().Contain("PodMonitor argocd/argocd-application-controller").And.Contain("argocd-server-0");
+    }
+
+    [Fact]
+    public void A_target_every_endpoint_of_which_is_scraped_elsewhere_is_covered()
+    {
+        V1Pod controller = ArgoCd();
+        world.Scraped("serviceMonitor/argocd/argocd-application-controller/0", controller, 8082);
+        foreach (V1Pod other in world.Workloads().Namespaces["argocd"].Pods.Where(p => p != controller))
+        {
+            world.Scraped("argocd-by-hand", other, ScrapedEndpoints.DeclaredPorts(other).Single().ContainerPort);
+        }
+
+        MonitorPlanRow row = OnlyRow(world.Plan());
+
+        row.State.Should().Be(MonitorState.CoveredElsewhere);
+        row.Detail.Should().Contain("serviceMonitor/argocd/argocd-application-controller/0").And.Contain("argocd-by-hand");
+    }
+
+    // ── Foreign monitors: which count, and for how long without a target ──────
+
+    /// <summary>
+    /// With ignoreNamespaceSelectors the operator ignores every monitor's namespaceSelector, and a
+    /// monitor discovers only its own namespace: Strimzi's example in monitoring finds no broker.
+    /// </summary>
+    [Fact]
+    public void With_ignoreNamespaceSelectors_a_monitor_looks_only_in_its_own_namespace()
+    {
+        world.Prometheus("""{"ignoreNamespaceSelectors":true,"serviceMonitorSelector":{},"podMonitorSelector":{},"serviceMonitorNamespaceSelector":{},"podMonitorNamespaceSelector":{}}""");
+        world.DataService(ManagedServiceKind.Kafka, "kafka", "events");
+        world.Pod("kafka", "events-broker-0", ScrapeWorld.Labels(("strimzi.io/cluster", "events"), ("strimzi.io/kind", "Kafka")),
+            ScrapeWorld.Container("kafka", ("tcp-prometheus", 9404)));
+        world.Monitor(MonitorKind.PodMonitor, "monitoring", "kafka-resources-metrics",
+            """{"namespaceSelector":{"any":true},"selector":{"matchExpressions":[{"key":"strimzi.io/kind","operator":"In","values":["Kafka"]}]},"podMetricsEndpoints":[{"port":"tcp-prometheus"}]}""");
+
+        world.Plan().Rows.Single(r => r.Kind == "Kafka").State.Should().Be(MonitorState.Managed);
+    }
+
+    /// <summary>
+    /// A monitor the operator rejected, or whose own relabelling drops the pod, is selected and scrapes
+    /// nothing. Prometheus loads a new monitor in a minute or two; one it has listed no target of
+    /// after ten is one it scrapes nothing through.
+    /// </summary>
+    [Fact]
+    public void A_selected_monitor_Prometheus_has_scraped_nothing_through_for_a_while_is_not_coverage()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+        world.MonitorMade(world.Now - ScrapeWorld.AnHour, MonitorKind.PodMonitor, "databases", "orders",
+            """{"selector":{"matchLabels":{"cnpg.io/cluster":"orders","cnpg.io/podRole":"instance"}},"podMetricsEndpoints":[{"port":"metrics"}]}""");
+
+        MonitorPlanRow row = OnlyRow(world.Plan());
+
+        row.State.Should().Be(MonitorState.Managed);
+        row.Change.Should().Be(MonitorChange.Create);
+        row.Detail.Should().Contain("PodMonitor databases/orders").And.Contain("nothing through it");
+    }
+
+    [Fact]
+    public void A_selected_monitor_of_no_known_age_changes_nothing()
+    {
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+        world.MonitorMade(null, MonitorKind.PodMonitor, "databases", "orders",
+            """{"selector":{"matchLabels":{"cnpg.io/cluster":"orders","cnpg.io/podRole":"instance"}},"podMetricsEndpoints":[{"port":"metrics"}]}""");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.NotSelectable);
+        plan.HasChanges.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Loki's chart makes a ServiceMonitor where the catalog makes a PodMonitor. Both end at the same
+    /// pod port, so the chart's covers it from the moment it is there, not only once Prometheus lists it.
+    /// </summary>
+    [Fact]
+    public void A_selected_monitor_of_the_other_kind_covers_it_as_well()
+    {
+        world.Component("loki", "loki", "loki");
+        Dictionary<string, string> labels = ScrapeWorld.Labels(("app.kubernetes.io/name", "loki"),
+            ("app.kubernetes.io/instance", "loki"), ("app.kubernetes.io/component", "single-binary"));
+        world.Pod("loki", "loki-0", labels, ScrapeWorld.Container("loki", ("http-metrics", 3100)));
+        world.Service("loki", "loki", labels, labels, ("http-metrics", 3100, "http-metrics"));
+        world.Apply(world.Plan());
+        world.Monitor(MonitorKind.ServiceMonitor, "loki", "loki",
+            """{"selector":{"matchLabels":{"app.kubernetes.io/name":"loki","app.kubernetes.io/instance":"loki"}},"endpoints":[{"port":"http-metrics"}]}""");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.CoveredElsewhere);
+        OnlyRow(plan).Detail.Should().Contain("ServiceMonitor loki/loki");
+        plan.Prune.Should().Equal(Pods("loki", "entkube-loki-loki"));
+    }
+
+    // ── A Prometheus that has only just started ───────────────────────────────
+
+    /// <summary>
+    /// Ready is not settled: discovery fills the target list over the first moments, so an empty or
+    /// short list right after a start says nothing about who scrapes what.
+    /// </summary>
+    [Fact]
+    public void A_Prometheus_that_started_a_moment_ago_changes_nothing()
+    {
+        world.PrometheusStarted(world.Now - TimeSpan.FromSeconds(40));
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+        world.DataService(ManagedServiceKind.Postgres, "databases", "billing");
+        V1Pod billing = world.CnpgPod("billing");
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-billing");
+        world.Scraped("additional-job", billing, 9187);
+        world.OurMonitor(MonitorKind.PodMonitor, "databases", "entkube-cnpg-gone");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        plan.Rows.Select(r => r.State).Should().AllBeEquivalentTo(MonitorState.PrometheusStarting);
+        plan.Rows[0].Detail.Should().Contain("40 seconds");
+        plan.HasChanges.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, "a Prometheus whose container is not ready answered nothing")]
+    [InlineData(true, "the kubelet says nothing of when it started")]
+    public void A_Prometheus_whose_start_cannot_be_told_changes_nothing(bool ready, string because)
+    {
+        world.PrometheusStarted(world.Now - ScrapeWorld.AnHour);
+        V1ContainerStatus status = world.PrometheusPod.Status.ContainerStatuses.Single();
+        status.Ready = ready;
+        if (ready) status.State.Running = null;
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+
+        ScrapeMonitorPlan plan = world.Plan();
+
+        OnlyRow(plan).State.Should().Be(MonitorState.PrometheusStarting, because);
+        plan.HasChanges.Should().BeFalse(because);
+    }
+
+    [Fact]
+    public void A_Prometheus_that_has_run_a_few_minutes_is_believed()
+    {
+        world.PrometheusStarted(world.Now - TimeSpan.FromMinutes(4));
+        world.DataService(ManagedServiceKind.Postgres, "databases", "orders");
+        world.CnpgPod("orders");
+
+        OnlyRow(world.Plan()).State.Should().Be(MonitorState.Managed);
+    }
+
+    // ── What the panel says ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// "Scraped" is what Prometheus scrapes: EntKube's own, or a job it lists or has just been given.
+    /// An annotation it has not acted on, a target scraped in part, a Prometheus just started: no.
+    /// </summary>
+    [Theory]
+    [InlineData(MonitorState.Managed, "success")]
+    [InlineData(MonitorState.CoveredElsewhere, "success")]
+    [InlineData(MonitorState.Annotated, "warning")]
+    [InlineData(MonitorState.PartlyCovered, "warning")]
+    [InlineData(MonitorState.PrometheusStarting, "warning")]
+    [InlineData(MonitorState.NotSelectable, "warning")]
+    public void The_panel_calls_scraped_only_what_Prometheus_scrapes(MonitorState state, string tone)
+    {
+        ScrapeMonitorPlan plan = new(
+            [new MonitorPlanRow("cnpg/databases/orders", "orders", "PostgreSQL", "databases", null, state,
+                MonitorChange.None, "What is so.", [])],
+            [], []);
+
+        MonitorsApplied.From(KubernetesOperationResult<ScrapeMonitorPlan>.Success(plan), "cnpg/databases/orders")
+            .Tone.Should().Be(tone);
     }
 
     [Fact]

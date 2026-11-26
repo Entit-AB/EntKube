@@ -81,13 +81,18 @@ public static class ScrapedEndpoints
     /// set the ones it certainly scrapes; in the second, those its selector could not be read well
     /// enough to rule out.
     /// </summary>
+    /// <param name="monitor">The monitor.</param>
+    /// <param name="ns">The namespace.</param>
+    /// <param name="namespaceSelectorIgnored">
+    /// The Prometheus reading it ignores monitors' namespace selectors, so it looks in its own only.
+    /// </param>
     public static (IReadOnlySet<string> Certain, IReadOnlySet<string> Possible) OfForeign(
-        LiveMonitor monitor, LiveNamespace ns)
+        LiveMonitor monitor, LiveNamespace ns, bool namespaceSelectorIgnored = false)
     {
         HashSet<string> certain = new(StringComparer.Ordinal);
         HashSet<string> possible = new(StringComparer.Ordinal);
 
-        if (!monitor.LooksIn(ns.Name)) return (certain, possible);
+        if (!monitor.LooksIn(ns.Name, namespaceSelectorIgnored)) return (certain, possible);
 
         LabelSelector? selector = LabelSelector.From(monitor.Spec["selector"]);
 
@@ -228,8 +233,128 @@ public static class ScrapedEndpoints
         return true;
     }
 
+    /// <summary>
+    /// The endpoints of a monitor that scrape what the port serves of its own. One that probes
+    /// another address or asks with parameters gets other series, and is left out by the same rule
+    /// as a target is (<see cref="ServesItsOwnMetrics"/>).
+    /// </summary>
     private static IEnumerable<JsonObject> EndpointsIn(LiveMonitor monitor, string field)
-        => (monitor.Spec[field] as JsonArray ?? []).OfType<JsonObject>();
+        => (monitor.Spec[field] as JsonArray ?? []).OfType<JsonObject>()
+            .Where(e => ServesItsOwnMetrics(Text(e["path"]) ?? "/metrics", e["params"] is JsonObject { Count: > 0 }));
+
+    // ── What scrapes the same series ──────────────────────────────────────────
+
+    /// <summary>
+    /// The one rule for whether a scrape of a pod port gets the series ours would, for a target in
+    /// Prometheus's list and a monitor's endpoint alike: the same port is the same names whatever the
+    /// path (RabbitMQ's per-object path serves them again), except a scrape that asks for something
+    /// else. That is an exporter's probe, which reports on the address it is told to probe, and a
+    /// query (<c>?target=</c>, RabbitMQ's <c>?family=</c>), which picks other families.
+    /// </summary>
+    public static bool ServesItsOwnMetrics(string path, bool asksWithParameters)
+        => !asksWithParameters && path.TrimEnd('/').Split('/')[^1] != "probe";
+
+    /// <summary>The annotation scrape job the catalog installs with the Prometheus stack.</summary>
+    public const string AnnotationJob = "kubernetes-pods-annotated";
+
+    private const string ScrapeAnnotation = "prometheus.io/scrape";
+    private const string PortAnnotation = "prometheus.io/port";
+
+    /// <summary>
+    /// Whether the catalog's annotation job takes this port of the pod, by its own rules rather than by
+    /// what the annotations read like: it keeps only the literal <c>true</c> (an anchored regex that
+    /// minds case); a port annotation of digits is the one port it scrapes; without one it scrapes the
+    /// ports the containers declare, init containers included, and drops a container that declares none.
+    /// Running pods only, which every endpoint already is.
+    /// </summary>
+    public static bool AnnotationJobTakes(V1Pod pod, int port)
+    {
+        IDictionary<string, string>? annotations = pod.Metadata?.Annotations;
+
+        if (annotations is null
+            || !annotations.TryGetValue(ScrapeAnnotation, out string? scrape)
+            || !string.Equals(scrape, "true", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (annotations.TryGetValue(PortAnnotation, out string? named) && AllDigits(named))
+        {
+            return int.TryParse(named, NumberStyles.None, CultureInfo.InvariantCulture, out int number) && number == port;
+        }
+
+        return (pod.Spec?.Containers ?? []).Concat(pod.Spec?.InitContainers ?? [])
+            .SelectMany(c => c.Ports ?? [])
+            .Any(p => p.ContainerPort == port);
+    }
+
+    /// <summary>Whether a pod asks to be scraped by annotation at all, whatever any job makes of it.</summary>
+    public static bool AsksForAnnotationScrape(V1Pod pod)
+        => pod.Metadata?.Annotations?.ContainsKey(ScrapeAnnotation) is true;
+
+    /// <summary>What Istio's agent does with one port of a pod.</summary>
+    public enum IstioMerge
+    {
+        /// <summary>Nothing: no merging, or merging of another port.</summary>
+        No,
+
+        /// <summary>It scrapes the port and serves its series again on the agent's port.</summary>
+        Yes,
+
+        /// <summary>The proxy's record of the pod's own annotations cannot be read.</summary>
+        CannotTell,
+    }
+
+    private const string IstioAnnotations = "ISTIO_PROMETHEUS_ANNOTATIONS";
+
+    /// <summary>
+    /// Whether Istio's agent scrapes this port of the pod and serves its series again with its own.
+    ///
+    /// <para>With metrics merging on, as it is by default, the injector moves the pod's own
+    /// prometheus.io annotations into the proxy's <c>ISTIO_PROMETHEUS_ANNOTATIONS</c> and points the
+    /// pod's at the agent (15020, <c>/stats/prometheus</c>). The agent then scrapes the app's port (80
+    /// when the pod named none) only if the pod had asked with the literal <c>true</c>, and whatever
+    /// scrapes the agent's port gets the app's series too.</para>
+    /// </summary>
+    public static IstioMerge MergedByIstio(V1Pod pod, int port, out int agentPort)
+    {
+        agentPort = 0;
+
+        string? original = (pod.Spec?.Containers ?? []).Concat(pod.Spec?.InitContainers ?? [])
+            .SelectMany(c => c.Env ?? [])
+            .FirstOrDefault(e => e.Name == IstioAnnotations)?.Value;
+        if (original is null) return IstioMerge.No;
+
+        if (pod.Metadata?.Annotations?.TryGetValue(PortAnnotation, out string? rewritten) is not true
+            || !AllDigits(rewritten)
+            || !int.TryParse(rewritten, NumberStyles.None, CultureInfo.InvariantCulture, out agentPort)
+            || agentPort == port)
+        {
+            return IstioMerge.No;
+        }
+
+        JsonObject? asked;
+        try
+        {
+            asked = JsonNode.Parse(original) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            asked = null;
+        }
+
+        if (asked is null) return IstioMerge.CannotTell;
+        if (Text(asked["scrape"]) != "true") return IstioMerge.No;
+
+        string appPort = Text(asked["port"]) is { Length: > 0 } given ? given : "80";
+        return AllDigits(appPort)
+               && int.TryParse(appPort, NumberStyles.None, CultureInfo.InvariantCulture, out int app)
+               && app == port
+            ? IstioMerge.Yes
+            : IstioMerge.No;
+    }
+
+    private static bool AllDigits(string? text) => text is { Length: > 0 } && text.All(char.IsAsciiDigit);
 
     private static IReadOnlyList<ScrapedEndpoint> Distinct(IEnumerable<ScrapedEndpoint> endpoints)
         => [.. endpoints.DistinctBy(e => (e.PodIp, e.Port, e.Path))];

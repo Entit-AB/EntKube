@@ -37,7 +37,13 @@ public sealed record MonitorsApplied(string Tone, string Text)
         };
     }
 
-    /// <summary>Somebody scrapes it, EntKube or another monitor. Every other state is a reason nobody does.</summary>
+    /// <summary>
+    /// Somebody scrapes all of it: EntKube, or a job Prometheus lists on every endpoint (or a monitor it
+    /// was given a moment ago). Not <see cref="MonitorState.Annotated"/>: that is an annotation Prometheus
+    /// has not acted on yet, which is a hope rather than a scrape. Not
+    /// <see cref="MonitorState.PartlyCovered"/>, where some of it is scraped by nothing. Every other state
+    /// is a reason nobody does, or that it cannot be told.
+    /// </summary>
     private static bool Scraped(MonitorState state) =>
-        state is MonitorState.Managed or MonitorState.CoveredElsewhere or MonitorState.Annotated;
+        state is MonitorState.Managed or MonitorState.CoveredElsewhere;
 }

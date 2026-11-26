@@ -10,13 +10,37 @@ namespace EntKube.Web.Services.ScrapeMonitors;
 /// job</b>, because two jobs make every <c>sum()</c> twice what it is. <b>Unknown means do
 /// nothing</b>: a question that cannot be answered neither creates a monitor nor removes one.</para>
 ///
+/// <para><b>Who scrapes it is asked of every endpoint.</b> Ours scrapes all of a target's endpoints
+/// or none, so it is made only where nothing else scrapes any of them, and given up only where
+/// something else scrapes every one. In between, ours would double the endpoints that are covered:
+/// it is neither made nor kept, and the row names the ones nothing scrapes.</para>
+///
+/// <para><b>What counts as somebody else scraping an endpoint.</b> Prometheus listing a target on the
+/// pod's address and port, whatever the path, unless the scrape asks for something else
+/// (<see cref="ScrapedEndpoints.ServesItsOwnMetrics"/>). And, for the moments before Prometheus lists
+/// it: a monitor it selects that was made less than <see cref="LoadGrace"/> ago, or a pod that has run
+/// less than that which the annotation job, seen scraping something, takes by its own rules. After
+/// that, only the target list counts.</para>
+///
 /// <para>Pure. It is handed a complete <see cref="LiveScrapeState"/> and reads nothing else, so every
 /// decision it makes can be tested with the labels a chart really renders.</para>
 /// </summary>
 public static class ScrapeMonitorPlanner
 {
-    private const string ScrapeAnnotation = "prometheus.io/scrape";
-    private const string PortAnnotation = "prometheus.io/port";
+    /// <summary>
+    /// How long Prometheus has to have run before its list of targets is the whole of what it scrapes.
+    /// Ready comes when its storage and configuration are loaded; discovery fills the list over the
+    /// first few scrape intervals after that.
+    /// </summary>
+    public static readonly TimeSpan PrometheusSettles = TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// How long a monitor, or an annotated pod, may go without Prometheus listing a target on it and
+    /// still be counted as about to be scraped. The operator and the config reloader take a minute or
+    /// two over a new monitor, discovery seconds over a new pod; what is still not listed after this is
+    /// not scraped by that job.
+    /// </summary>
+    public static readonly TimeSpan LoadGrace = TimeSpan.FromMinutes(10);
 
     public static ScrapeMonitorPlan Plan(IReadOnlyList<ScrapeTargetSpec> targets, LiveScrapeState live)
         => new Pass(targets, live).Run();
@@ -40,6 +64,32 @@ public static class ScrapeMonitorPlanner
             : null;
     }
 
+    /// <summary>What says one endpoint is scraped already.</summary>
+    private enum Evidence
+    {
+        /// <summary>Nothing does.</summary>
+        None,
+
+        /// <summary>Prometheus lists a target of another job on it.</summary>
+        Target,
+
+        /// <summary>A monitor that is not ours, that Prometheus selects, made too recently to have a target yet.</summary>
+        Monitor,
+
+        /// <summary>The annotation job takes it, and the pod started too recently to be listed yet.</summary>
+        Annotation,
+
+        /// <summary>Whether something scrapes it cannot be told.</summary>
+        Unclear,
+    }
+
+    /// <summary>One endpoint and what scrapes it, named for a sentence.</summary>
+    private sealed record Coverage(ScrapedEndpoint Endpoint, Evidence By, string Who = "");
+
+    /// <summary>A monitor that is not ours, whether Prometheus selects it, and the pod ports it ends at.</summary>
+    private sealed record Foreign(
+        LiveMonitor Monitor, bool? Selected, IReadOnlySet<string> Certain, IReadOnlySet<string> Possible);
+
     /// <summary>One run over one cluster's targets.</summary>
     private sealed class Pass
     {
@@ -49,6 +99,12 @@ public static class ScrapeMonitorPlanner
         private readonly PrometheusAdmission admission;
         private readonly Dictionary<MonitorIdentity, LiveMonitor> liveMonitors;
         private readonly HashSet<MonitorIdentity> ours;
+
+        /// <summary>Why Prometheus's list of targets cannot be taken as the whole of it yet; null when it can.</summary>
+        private readonly string? starting;
+
+        /// <summary>Whether Prometheus lists any target of the annotation job, which is how it is known to be there.</summary>
+        private readonly bool annotationJobRuns;
 
         private readonly List<MonitorPlanRow> rows = [];
         private readonly List<PlannedMonitor> apply = [];
@@ -68,6 +124,8 @@ public static class ScrapeMonitorPlanner
                 .. live.Monitoring.Monitors.Where(IsOurs).Select(m => m.Identity),
                 .. targets.Select(t => t.Monitor).OfType<MonitorSpec>().Where(TakesOver).Select(m => m.Identity),
             ];
+            starting = prometheus is null ? null : WhyNotSettled(prometheus);
+            annotationJobRuns = live.Monitoring.Targets.Any(t => t.Pool == ScrapedEndpoints.AnnotationJob);
         }
 
         public ScrapeMonitorPlan Run()
@@ -80,10 +138,13 @@ public static class ScrapeMonitorPlanner
             }
 
             // What is left of ours has no target any more: its database, broker or component is gone
-            // from a list that was read in full.
-            prune.AddRange(live.Monitoring.Monitors
-                .Where(m => IsOurs(m) && !claimed.Contains(m.Identity))
-                .Select(m => m.Identity));
+            // from a list that was read in full. Not while Prometheus is starting: that pass writes nothing.
+            if (starting is null)
+            {
+                prune.AddRange(live.Monitoring.Monitors
+                    .Where(m => IsOurs(m) && !claimed.Contains(m.Identity))
+                    .Select(m => m.Identity));
+            }
 
             return new ScrapeMonitorPlan(rows, apply, prune);
         }
@@ -125,29 +186,33 @@ public static class ScrapeMonitorPlanner
                     + "EntKube picks it up by itself.");
             }
 
-            // From here on it is a question of who scrapes these endpoints. What Prometheus itself
-            // says comes first: an active target is evidence, whatever any selector reads like.
-            if (OtherPoolOn(monitor, resolved) is { } pool)
+            // Everything from here on is a question of who scrapes these endpoints, which a Prometheus
+            // that has only just started cannot answer yet.
+            if (starting is not null)
             {
-                return Yield(target, monitor, MonitorState.CoveredElsewhere, existingIsOurs, resolved,
-                    $"Prometheus already scrapes it through {pool}. EntKube adds no monitor of its own, because two "
-                    + "would count everything twice.");
+                return Row(target, MonitorState.PrometheusStarting, MonitorChange.None, starting, resolved);
             }
 
-            (LiveMonitor? covering, LiveMonitor? unclear) = ForeignMonitorsOn(monitor, resolved, ns);
+            List<string> notes = [];
+            List<Coverage> coverage = [.. CoverageOf(monitor, resolved, ns, notes)];
+            List<Coverage> covered = [.. coverage.Where(c => c.By is Evidence.Target or Evidence.Monitor or Evidence.Annotation)];
+            List<Coverage> unclear = [.. coverage.Where(c => c.By == Evidence.Unclear)];
 
-            if (covering is not null)
+            if (covered.Count == coverage.Count)
             {
-                return Yield(target, monitor, MonitorState.CoveredElsewhere, existingIsOurs, resolved,
-                    $"{covering.Identity}, which EntKube did not create, already selects it. EntKube adds no monitor "
-                    + "of its own, because two would count everything twice.");
+                return covered.All(c => c.By == Evidence.Annotation)
+                    ? Yield(target, monitor, MonitorState.Annotated, existingIsOurs, resolved, AnnotatedSentence(covered))
+                    : Yield(target, monitor, MonitorState.CoveredElsewhere, existingIsOurs, resolved,
+                        CoveredSentence(covered) + " EntKube adds no monitor of its own, because two would count "
+                        + "everything twice.");
             }
 
-            if (resolved.Endpoints.FirstOrDefault(IsAnnotated) is { } annotated)
+            // Some are scraped and some are not. Ours would scrape all of them, so the covered ones twice:
+            // known, whatever is unknown about the rest.
+            if (covered.Count > 0)
             {
-                return Yield(target, monitor, MonitorState.Annotated, existingIsOurs, resolved,
-                    $"Pod {annotated.PodName} asks to be scraped with a {ScrapeAnnotation} annotation, which the "
-                    + "Prometheus stack already does. A monitor beside it would count everything twice.");
+                return Yield(target, monitor, MonitorState.PartlyCovered, existingIsOurs, resolved,
+                    PartlySentence(coverage, covered, existingIsOurs));
             }
 
             if (existing is not null && !existingIsOurs)
@@ -157,11 +222,11 @@ public static class ScrapeMonitorPlanner
                     + "does not scrape this. Rename or delete it and EntKube creates its own.", resolved);
             }
 
-            if (unclear is not null)
+            if (unclear.Count > 0)
             {
                 return Row(target, MonitorState.NotSelectable, MonitorChange.None,
-                    $"Whether {unclear.Identity} already scrapes it cannot be told, because its selector uses "
-                    + "something EntKube does not understand. Nothing is changed while that is so.", resolved);
+                    $"Whether {unclear[0].Who} already scrapes it cannot be told. Nothing is changed while that is so.",
+                    resolved);
             }
 
             // Our own monitor would be the second job. Ours goes if there is one: a gap the row
@@ -189,16 +254,18 @@ public static class ScrapeMonitorPlanner
             if (shut.Count == resolved.Endpoints.Count)
             {
                 return Row(target, MonitorState.BlockedByNetworkPolicy, MonitorChange.None,
-                    $"A NetworkPolicy in {target.Namespace} keeps Prometheus out of port {shut[0].Port}. Allow it in "
-                    + $"from namespace {prometheus!.Namespace} and EntKube picks it up by itself.", resolved);
+                    $"A NetworkPolicy in {target.Namespace} keeps Prometheus out of port {shut[0].Port}. "
+                    + (target.WhenBlocked
+                       ?? $"Allow it in from namespace {prometheus!.Namespace} and EntKube picks it up by itself."),
+                    resolved);
             }
 
-            return Manage(target, monitor, existing, labels, resolved, shut.Count);
+            return Manage(target, monitor, existing, labels, resolved, shut.Count, notes);
         }
 
         private MonitorPlanRow Manage(
             ScrapeTargetSpec target, MonitorSpec monitor, LiveMonitor? existing,
-            IReadOnlyDictionary<string, string> labels, ResolvedTargets resolved, int shut)
+            IReadOnlyDictionary<string, string> labels, ResolvedTargets resolved, int shut, IReadOnlyList<string> notes)
         {
             JsonObject manifest = ScrapeMonitorManifest.Build(
                 monitor, target.Key, labels, endpoint => OverTls(endpoint, resolved.Pods));
@@ -231,6 +298,8 @@ public static class ScrapeMonitorPlanner
                 said += $" A NetworkPolicy keeps Prometheus out of {shut} of them, which will show as down.";
             }
 
+            foreach (string note in notes) said += " " + note;
+
             return Row(target, MonitorState.Managed, change, said, resolved) with
             {
                 TargetsUp = scraped.Count(t => t.Up),
@@ -238,7 +307,7 @@ public static class ScrapeMonitorPlanner
             };
         }
 
-        /// <summary>A row for something another job scrapes: ours goes, if there is one.</summary>
+        /// <summary>A row for something another job scrapes, all of it or some: ours goes, if there is one.</summary>
         private MonitorPlanRow Yield(
             ScrapeTargetSpec target, MonitorSpec monitor, MonitorState state, bool existingIsOurs,
             ResolvedTargets resolved, string detail)
@@ -269,72 +338,277 @@ public static class ScrapeMonitorPlanner
                 && JsonNode.DeepEquals(existing.Spec["selector"], monitor.Selector.ToJson());
         }
 
-        // ── Who scrapes it already ────────────────────────────────────────────
+        // ── Whether Prometheus's list is the whole of it ──────────────────────
 
         /// <summary>
-        /// A scrape job, not one of ours, with an active target on one of these endpoints.
+        /// Why the target list cannot be taken as everything this Prometheus scrapes, or null when it
+        /// can. Every ready pod of it has to have run <see cref="PrometheusSettles"/>: it is one of them
+        /// that answered, and which one cannot be told.
+        /// </summary>
+        private string? WhyNotSettled(LivePrometheus of)
+        {
+            string name = $"Prometheus {of.Namespace}/{of.Name}";
+            const string nothing = "EntKube creates, changes and removes no monitor until it can.";
+
+            List<V1ContainerStatus> ready =
+            [
+                .. (live.Workloads.Namespaces.GetValueOrDefault(of.Namespace)?.Pods ?? [])
+                    .Where(p => BelongsTo(of, ScrapedEndpoints.Labels(p)))
+                    .SelectMany(p => p.Status?.ContainerStatuses ?? [])
+                    .Where(c => c.Name == "prometheus" && c.Ready),
+            ];
+
+            if (ready.Count == 0)
+            {
+                return $"None of the pods of {name} has a ready Prometheus container, so how long the one that "
+                    + $"answered has run cannot be told, nor whether its list of targets is the whole of it. {nothing}";
+            }
+
+            if (ready.Any(c => c.State?.Running?.StartedAt is null))
+            {
+                return $"The kubelet does not say when {name} started, so whether its list of targets is the whole "
+                    + $"of it cannot be told. {nothing}";
+            }
+
+            TimeSpan ran = live.Monitoring.ReadAt - ready.Max(c => Utc(c.State.Running.StartedAt!.Value));
+
+            return ran < PrometheusSettles
+                ? $"{name} started {Since(ran)} ago, and until it has run {PrometheusSettles.TotalMinutes:0} minutes its "
+                  + $"list of targets may not be the whole of what it scrapes. {nothing}"
+                : null;
+        }
+
+        // ── Who scrapes it already ────────────────────────────────────────────
+
+        /// <summary>Each endpoint, and what scrapes it already, with what was seen but not counted in <paramref name="notes"/>.</summary>
+        private IEnumerable<Coverage> CoverageOf(
+            MonitorSpec wanted, ResolvedTargets resolved, LiveNamespace ns, List<string> notes)
+        {
+            bool ignored = prometheus?.IgnoresNamespaceSelectors is true;
+
+            // Every monitor that is not ours and that this Prometheus may select, of either kind: both
+            // end at pod ports.
+            List<Foreign> foreign = [];
+            foreach (LiveMonitor monitor in live.Monitoring.Monitors.Where(m => !ours.Contains(m.Identity)))
+            {
+                bool? selected = PrometheusSelects(monitor.Identity, monitor.Labels);
+                if (selected is false) continue;
+
+                (IReadOnlySet<string> certain, IReadOnlySet<string> possible) = ScrapedEndpoints.OfForeign(monitor, ns, ignored);
+                foreign.Add(new Foreign(monitor, selected, certain, possible));
+            }
+
+            HashSet<MonitorIdentity> stale = [];
+            HashSet<string> annotatedNotTaken = new(StringComparer.Ordinal);
+
+            foreach (ScrapedEndpoint endpoint in resolved.Endpoints)
+            {
+                ScrapedEndpoints.IstioMerge merge = ScrapedEndpoints.MergedByIstio(endpoint.Pod, endpoint.Port, out int agent);
+                List<int> ports = merge == ScrapedEndpoints.IstioMerge.Yes ? [endpoint.Port, agent] : [endpoint.Port];
+                HashSet<string> addresses = [.. ports.Select(p => ScrapedEndpoints.Address(endpoint.Pod, p))];
+
+                // What Prometheus itself says comes first: an active target is evidence, whatever any
+                // selector reads like.
+                if (OtherTargetOn(wanted, endpoint, ports) is { } other)
+                {
+                    yield return new Coverage(endpoint, Evidence.Target, other.Port == endpoint.Port
+                        ? other.Pool
+                        : $"{other.Pool} on port {other.Port}, where Istio's agent serves port {endpoint.Port}'s "
+                          + "metrics again with its own");
+                    continue;
+                }
+
+                LiveMonitor? loading = null;
+                string? cannotTell = null;
+
+                foreach ((LiveMonitor monitor, bool? selected, IReadOnlySet<string> certain, IReadOnlySet<string> possible) in foreign)
+                {
+                    if (selected is true && addresses.Overlaps(certain))
+                    {
+                        // Prometheus lists no target of it here (that would have been the first check),
+                        // which a monitor made a moment ago may not have yet.
+                        if (monitor.Created is not { } created)
+                        {
+                            cannotTell ??= $"{monitor.Identity}, whose age the API server does not give,";
+                        }
+                        else if (live.Monitoring.ReadAt - created < LoadGrace)
+                        {
+                            loading ??= monitor;
+                        }
+                        else
+                        {
+                            stale.Add(monitor.Identity);
+                        }
+                    }
+                    else if (addresses.Overlaps(certain) || addresses.Overlaps(possible))
+                    {
+                        cannotTell ??= selected is null
+                            ? $"{monitor.Identity}, which this Prometheus may or may not select,"
+                            : $"{monitor.Identity}, whose selector uses something EntKube does not understand,";
+                    }
+                }
+
+                if (loading is not null)
+                {
+                    yield return new Coverage(endpoint, Evidence.Monitor, loading.Identity.ToString());
+                    continue;
+                }
+
+                if (ports.Any(p => ScrapedEndpoints.AnnotationJobTakes(endpoint.Pod, p)))
+                {
+                    if (annotationJobRuns && RanFor(endpoint.Pod) is { } ran && ran < LoadGrace)
+                    {
+                        yield return new Coverage(endpoint, Evidence.Annotation, ScrapedEndpoints.AnnotationJob);
+                        continue;
+                    }
+
+                    annotatedNotTaken.Add(endpoint.PodName);
+                }
+
+                if (cannotTell is not null)
+                {
+                    yield return new Coverage(endpoint, Evidence.Unclear, cannotTell);
+                    continue;
+                }
+
+                if (merge == ScrapedEndpoints.IstioMerge.CannotTell)
+                {
+                    yield return new Coverage(endpoint, Evidence.Unclear,
+                        $"Istio's agent in pod {endpoint.PodName}, whose record of the pod's annotations cannot be read,");
+                    continue;
+                }
+
+                yield return new Coverage(endpoint, Evidence.None);
+            }
+
+            foreach (MonitorIdentity monitor in stale.OrderBy(m => m.ToString(), StringComparer.Ordinal))
+            {
+                notes.Add($"{monitor}, which EntKube did not create, selects it too, but Prometheus has scraped "
+                    + $"nothing through it on these pods in the {Since(live.Monitoring.ReadAt - liveMonitors[monitor].Created!.Value)} "
+                    + "since it was made, so it is not counted.");
+            }
+
+            if (annotatedNotTaken.Count > 0)
+            {
+                notes.Add(annotationJobRuns
+                    ? $"{Pods(annotatedNotTaken)} {Ask(annotatedNotTaken)} to be scraped by annotation, but the "
+                      + $"{ScrapedEndpoints.AnnotationJob} job has not taken {Them(annotatedNotTaken)}, so that is not counted."
+                    : $"{Pods(annotatedNotTaken)} {Ask(annotatedNotTaken)} to be scraped by annotation, but Prometheus "
+                      + $"scrapes nothing through a {ScrapedEndpoints.AnnotationJob} job, so that is not counted.");
+            }
+        }
+
+        /// <summary>
+        /// A target of a scrape job, not one of ours, on the endpoint's address at one of these ports,
+        /// that gets what the port serves of its own (<see cref="ScrapedEndpoints.ServesItsOwnMetrics"/>).
         ///
         /// <para>The job of the monitor being decided is ours when nothing of that name is live: it
         /// is what Prometheus keeps of one of ours that was just removed, until its next reload. The
         /// same name is the same job, so writing the monitor again scrapes nothing twice.</para>
         /// </summary>
-        private string? OtherPoolOn(MonitorSpec wanted, ResolvedTargets resolved)
+        private ActiveTarget? OtherTargetOn(MonitorSpec wanted, ScrapedEndpoint endpoint, IReadOnlyList<int> ports)
+            => live.Monitoring.Targets.FirstOrDefault(t =>
+                t.Host == endpoint.PodIp
+                && ports.Contains(t.Port)
+                && ScrapedEndpoints.ServesItsOwnMetrics(t.Path, t.Query.Length > 0)
+                && (t.Monitor is not { } monitor
+                    || !(ours.Contains(monitor) || (monitor == wanted.Identity && !liveMonitors.ContainsKey(monitor)))));
+
+        /// <summary>How long the pod has run, or null where the kubelet does not say.</summary>
+        private TimeSpan? RanFor(V1Pod pod)
+            => pod.Status?.StartTime is { } started ? live.Monitoring.ReadAt - Utc(started) : null;
+
+        // ── What the rows say about it ────────────────────────────────────────
+
+        private static string CoveredSentence(IReadOnlyList<Coverage> covered)
         {
-            HashSet<(string, int, string)> endpoints = [.. resolved.Endpoints.Select(e => (e.PodIp, e.Port, e.Path))];
+            List<string> through = [.. covered.Where(c => c.By == Evidence.Target).Select(c => c.Who).Distinct()];
+            List<string> monitors = [.. covered.Where(c => c.By == Evidence.Monitor).Select(c => c.Who).Distinct()];
+            List<string> annotated = [.. covered.Where(c => c.By == Evidence.Annotation).Select(c => c.Endpoint.PodName).Distinct()];
 
-            return live.Monitoring.Targets
-                .FirstOrDefault(t => endpoints.Contains((t.Host, t.Port, t.Path))
-                    && (t.Monitor is not { } monitor
-                        || !(ours.Contains(monitor) || (monitor == wanted.Identity && !liveMonitors.ContainsKey(monitor)))))
-                ?.Pool;
-        }
-
-        /// <summary>
-        /// A monitor of the same kind that is not ours, that this Prometheus selects, and that ends
-        /// up on one of these ports. By port whatever the path: a second job on another path of the
-        /// same port (RabbitMQ's per-object metrics) serves the same names again.
-        /// </summary>
-        private (LiveMonitor? Covering, LiveMonitor? Unclear) ForeignMonitorsOn(
-            MonitorSpec wanted, ResolvedTargets resolved, LiveNamespace ns)
-        {
-            HashSet<string> ports = [.. resolved.Endpoints.Select(e => ScrapedEndpoints.Address(e.Pod, e.Port))];
-            LiveMonitor? unclear = null;
-
-            foreach (LiveMonitor monitor in live.Monitoring.Monitors)
+            List<string> parts = [];
+            if (through.Count > 0) parts.Add($"Prometheus already scrapes it through {Join(through)}");
+            if (monitors.Count > 0)
             {
-                if (monitor.Identity.Kind != wanted.Identity.Kind || ours.Contains(monitor.Identity)) continue;
-
-                bool? selected = PrometheusSelects(monitor.Identity, monitor.Labels);
-                if (selected is false) continue;
-
-                (IReadOnlySet<string> certain, IReadOnlySet<string> possible) = ScrapedEndpoints.OfForeign(monitor, ns);
-
-                if (selected is true && ports.Overlaps(certain)) return (monitor, null);
-                if (ports.Overlaps(certain) || ports.Overlaps(possible)) unclear ??= monitor;
+                parts.Add($"{Join(monitors)}, which EntKube did not create, already {(monitors.Count == 1 ? "selects" : "select")} "
+                    + (through.Count > 0 ? "the rest" : "it"));
             }
 
-            return (null, unclear);
-        }
-
-        /// <summary>
-        /// Whether the annotation job takes this port: the pod asks for it by number, or asks to be
-        /// scraped without saying where, in which case every declared port is taken.
-        /// </summary>
-        private static bool IsAnnotated(ScrapedEndpoint endpoint)
-        {
-            IDictionary<string, string>? annotations = endpoint.Pod.Metadata?.Annotations;
-
-            if (annotations is null
-                || !annotations.TryGetValue(ScrapeAnnotation, out string? scrape)
-                || !string.Equals(scrape, "true", StringComparison.OrdinalIgnoreCase))
+            if (annotated.Count > 0)
             {
-                return false;
+                parts.Add($"the {ScrapedEndpoints.AnnotationJob} job is about to take {Pods(annotated)}");
             }
 
-            return !annotations.TryGetValue(PortAnnotation, out string? port)
-                || string.IsNullOrWhiteSpace(port)
-                || port.Trim() == endpoint.Port.ToString();
+            string sentence = Join(parts) + ".";
+            return char.ToUpperInvariant(sentence[0]) + sentence[1..];
         }
+
+        private static string AnnotatedSentence(IReadOnlyList<Coverage> covered)
+        {
+            List<string> pods = [.. covered.Select(c => c.Endpoint.PodName).Distinct()];
+
+            return $"{Pods(pods)} {Ask(pods)} to be scraped with a prometheus.io/scrape annotation, and the stack's "
+                + $"{ScrapedEndpoints.AnnotationJob} job takes {Them(pods)}; {(pods.Count == 1 ? "it" : "they")} started too "
+                + $"recently for Prometheus to list {Them(pods)} yet. A monitor beside it would count everything twice.";
+        }
+
+        private static string PartlySentence(IReadOnlyList<Coverage> all, IReadOnlyList<Coverage> covered, bool existingIsOurs)
+        {
+            List<Coverage> rest = [.. all.Where(c => c.By is Evidence.None or Evidence.Unclear)];
+            List<string> nothing = [.. rest.Where(c => c.By == Evidence.None).Select(Place)];
+            List<Coverage> unclear = [.. rest.Where(c => c.By == Evidence.Unclear)];
+
+            string sentence = $"{covered.Count} of its {Count(all.Count, "endpoint")} {(covered.Count == 1 ? "is" : "are")} "
+                + $"scraped already, through {Join([.. covered.Select(c => c.Who).Distinct()])}";
+
+            if (nothing.Count > 0)
+            {
+                sentence += $", and nothing scrapes {Join(nothing)}";
+            }
+
+            sentence += ".";
+
+            if (unclear.Count > 0)
+            {
+                sentence += $" Whether {unclear[0].Who} scrapes {Join([.. unclear.Select(Place)])} cannot be told.";
+            }
+
+            return sentence
+                + " A monitor of EntKube's would scrape every one of them, and so the covered ones twice: EntKube "
+                + (existingIsOurs ? "removes its monitor" : "makes none")
+                + " while that is so. Have that job scrape all of them, or none, and EntKube picks it up by itself.";
+        }
+
+        private static string Place(Coverage c) => $"{c.Endpoint.PodName} ({ScrapedEndpoints.Address(c.Endpoint.Pod, c.Endpoint.Port)})";
+
+        private static string Pods(IReadOnlyCollection<string> pods)
+            => pods.Count == 1 ? $"Pod {pods.First()}" : $"Pods {Join([.. pods])}";
+
+        private static string Ask(IReadOnlyCollection<string> pods) => pods.Count == 1 ? "asks" : "ask";
+
+        private static string Them(IReadOnlyCollection<string> pods) => pods.Count == 1 ? "it" : "them";
+
+        private static string Join(IReadOnlyList<string> parts) => parts.Count switch
+        {
+            0 => "",
+            1 => parts[0],
+            _ => string.Join(", ", parts.Take(parts.Count - 1)) + " and " + parts[^1],
+        };
+
+        /// <summary>A length of time as a sentence says it.</summary>
+        private static string Since(TimeSpan span)
+        {
+            if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+
+            return span.TotalMinutes < 2 ? Count((int)span.TotalSeconds, "second")
+                : span.TotalHours < 2 ? Count((int)span.TotalMinutes, "minute")
+                : span.TotalDays < 2 ? Count((int)span.TotalHours, "hour")
+                : Count((int)span.TotalDays, "day");
+        }
+
+        /// <summary>A time the Kubernetes client read, as the UTC it was sent in.</summary>
+        private static DateTimeOffset Utc(DateTime at)
+            => new(at.Kind == DateTimeKind.Local ? at.ToUniversalTime() : DateTime.SpecifyKind(at, DateTimeKind.Utc));
 
         // ── Whether Prometheus would pick ours up ─────────────────────────────
 
