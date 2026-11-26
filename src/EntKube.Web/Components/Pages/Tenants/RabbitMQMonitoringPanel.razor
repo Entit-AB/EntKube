@@ -1,9 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
+@using EntKube.Web.Services.ScrapeMonitors
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
 @inject RabbitMQService RabbitMQService
+@inject IScrapeMonitors Monitors
 @inject IDbContextFactory<DataServicesDbContext> DbFactory
 
 @* ═══════════════════════════════════════════════════════════════════════════
@@ -112,7 +114,14 @@ else
                         <div class="text-muted">
                             RabbitMQ exposes its Prometheus plugin on port 15692, but nothing scrapes it
                             until a ServiceMonitor exists.
-                            @if (!b.IsOperatorManaged)
+                            @if (b.IsOperatorManaged)
+                            {
+                                <text>
+                                    EntKube keeps one for every broker it installed on a cluster where it installed
+                                    Prometheus, and puts a missing one in place by itself every few minutes.
+                                </text>
+                            }
+                            else
                             {
                                 <text>
                                     Its series are found by the cluster name RabbitMQ reports for itself, so they
@@ -120,28 +129,35 @@ else
                                 </text>
                             }
                         </div>
-                        <div class="mt-2 d-flex gap-2 flex-wrap">
-                            @if (b.IsOperatorManaged)
-                            {
+                        @* The wording agrees with ScrapeDiagnostician.ApplyMonitors, the remedy the diagnosis below
+                           gives. A broker EntKube did not install gets no monitor from the engine, so no button. *@
+                        @if (b.IsOperatorManaged)
+                        {
+                            <div class="mt-2 d-flex align-items-center flex-wrap gap-2" data-apply>
                                 <button class="btn btn-sm btn-primary"
-                                        @onclick="() => EnableScrapeAsync(b)" disabled="@b.Busy">
-                                    <span class="bi bi-toggles me-1"></span> Enable metrics
+                                        @onclick="() => ApplyMonitorsAsync(b)" disabled="@b.Busy">
+                                    <span class="bi bi-arrow-repeat me-1"></span>Apply monitors now
                                 </button>
-                            }
+                                <span class="text-muted">
+                                    Applies the monitors of every database and component on this Kubernetes cluster,
+                                    not only this broker's. EntKube creates its own monitor, labelled the way this
+                                    Prometheus asks for, and none where another monitor already scrapes the broker.
+                                    It writes monitors and nothing else: the broker itself is not touched.
+                                </span>
+                                @if (b.Applied is { } said)
+                                {
+                                    <div class="w-100 text-@said.Tone">
+                                        <span class="bi @(said.Tone == "success" ? "bi-check-circle" : said.Tone == "danger" ? "bi-x-circle" : "bi-exclamation-triangle") me-1"></span>@said.Text
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <div class="mt-2 d-flex gap-2 flex-wrap">
                             <button class="btn btn-sm btn-outline-secondary"
                                     @onclick="() => DiagnoseAsync(b)" disabled="@b.Busy">
                                 <span class="bi bi-stethoscope me-1"></span> Why is this empty?
                             </button>
                         </div>
-
-                        @if (b.ScrapeJustEnabled)
-                        {
-                            <div class="alert alert-success py-2 small mt-2 mb-0">
-                                <span class="bi bi-check-circle me-1"></span>
-                                ServiceMonitor created. Prometheus picks it up and completes a first
-                                scrape within about a minute — use Refresh above once it has.
-                            </div>
-                        }
 
                         @if (b.DiagnosisError is not null)
                         {
@@ -389,7 +405,9 @@ else
         /// <summary>Why the diagnosis has no answer. Its own field: shown as "Prometheus query failed" it blamed Prometheus for a monitor list the cluster would not give.</summary>
         public string? DiagnosisError { get; set; }
         public bool Busy { get; set; }
-        public bool ScrapeJustEnabled { get; set; }
+
+        /// <summary>What the last "Apply monitors now" came to, shown beside the button.</summary>
+        public MonitorsApplied? Applied { get; set; }
 
         public RabbitMQBrokerIdentity Identity => new(Name, Namespace, IsOperatorManaged);
     }
@@ -533,26 +551,31 @@ else
         return charts;
     }
 
-    private async Task EnableScrapeAsync(BrokerView b)
+    /// <summary>
+    /// Has the engine apply this cluster's monitors now rather than on its next pass, then diagnoses
+    /// again. The engine owns the broker's <c>{name}-metrics</c>, the monitor the button it replaces
+    /// used to write; it writes monitors only, so nothing here can restart the broker.
+    /// </summary>
+    private async Task ApplyMonitorsAsync(BrokerView b)
     {
         b.Busy = true;
+        b.Applied = null;
         try
         {
-            await RabbitMQService.EnableMetricsScrapeAsync(b.TenantId, b.Id);
-            b.Diagnosis = null;
-
-            // Prometheus has to notice the new ServiceMonitor and then complete a scrape before
-            // anything can be queried, so say so rather than reloading into the same empty state.
-            b.ScrapeJustEnabled = true;
+            KubernetesOperationResult<ScrapeMonitorPlan> result = await Monitors.ApplyAsync(b.TenantId, ClusterId);
+            b.Applied = MonitorsApplied.From(result, MonitorsApplied.BrokerKey(b.Namespace, b.Name));
         }
         catch (Exception ex)
         {
-            b.Error = ex.Message;
+            b.Applied = MonitorsApplied.Failed(ex.Message);
         }
         finally
         {
             b.Busy = false;
         }
+
+        // Read-only, and worth it after a failure too: it says what is on the cluster now.
+        await DiagnoseAsync(b);
     }
 
     private async Task DiagnoseAsync(BrokerView b)

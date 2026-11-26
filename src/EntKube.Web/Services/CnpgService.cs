@@ -689,40 +689,6 @@ public class CnpgService(
     /// (replicas first, then a switchover before recreating the old primary), which also lets
     /// the scheduler re-place pods according to the cluster's anti-affinity.
     /// </summary>
-    /// <summary>
-    /// Re-applies the Cluster manifest exactly as EntKube would build it today, so a database
-    /// created by an older version picks up spec changes made since — most visibly
-    /// <c>spec.monitoring.enablePodMonitor</c>, without which nothing scrapes its metrics.
-    ///
-    /// Nothing else about the database changes: the manifest is rebuilt from the same stored
-    /// settings, so the change gate's dry-run shows only what the current code adds. Until this
-    /// existed the only ways to re-apply were incidental — running a backup, or an upgrade — and
-    /// neither is an obvious thing to reach for when metrics are missing.
-    /// </summary>
-    public async Task ReapplyClusterSpecAsync(
-        Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
-    {
-        using DataServicesDbContext db = dbFactory.CreateDbContext();
-
-        CnpgCluster cnpg = await db.CnpgClusters
-            .Include(c => c.KubernetesCluster)
-            .Include(c => c.StorageLink)
-            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
-            ?? throw new InvalidOperationException("CNPG cluster not found.");
-
-        // ClusterFor refuses for the same reason the explicit guard here used to, and says so.
-        Clusters.IClusterClient reapplyTo = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
-
-        await AlignStorageSizeAsync(db, cnpg, reapplyTo, ct);
-
-        // Same secret-name convention as every other apply path, so the rebuilt manifest matches
-        // the live spec everywhere except the parts this version of EntKube changed.
-        string? s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null;
-
-        await reapplyTo.ApplyManifestAsync(
-            BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
-    }
-
     public async Task RestartClusterAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
@@ -2511,11 +2477,16 @@ public class CnpgService(
         sb.AppendLine("  primaryUpdateMethod: switchover");
         sb.AppendLine("  switchoverDelay: 600");
 
-        // Every CNPG instance already serves metrics on :9187, but nothing scrapes them until
-        // the operator is told to create a PodMonitor for the cluster. Without this the database
-        // monitoring panel has no cnpg_* series to query and simply shows nothing.
+        // EntKube's monitor engine (ScrapeMonitors) makes the PodMonitor for this database, so the
+        // operator's own is off. enablePodMonitor is deprecated upstream, and two monitors on one
+        // pod would double every sum.
+        //
+        // Written out, never left out: a client-side apply that drops a block the last apply had
+        // deletes all of spec.monitoring, a user's tls settings with it, and losing those rolls the
+        // database. With the field present only the field changes: the operator removes its
+        // PodMonitor, and the engine makes ours on its next pass.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: true");
+        sb.AppendLine("    enablePodMonitor: false");
 
         // Synchronous replication requires at least 2 instances. For HA clusters,
         // we guarantee one synchronous replica so no committed transactions are lost.
@@ -2674,10 +2645,10 @@ public class CnpgService(
         sb.AppendLine("spec:");
         sb.AppendLine($"  instances: {restored.Instances}");
         sb.AppendLine($"  imageName: ghcr.io/cloudnative-pg/postgresql:{restored.PostgresVersion}");
-        // Same PodMonitor opt-in as a freshly created cluster — a restored cluster should not
-        // come back monitoring-blind.
+        // As in BuildClusterManifest: the engine monitors it, and the block is written so that a
+        // later apply changes this field and not the whole of spec.monitoring.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: true");
+        sb.AppendLine("    enablePodMonitor: false");
         sb.AppendLine("  postgresql:");
         sb.AppendLine("    parameters:");
         sb.AppendLine("      archive_timeout: \"5min\"");

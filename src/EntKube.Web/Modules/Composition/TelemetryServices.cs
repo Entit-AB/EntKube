@@ -90,6 +90,8 @@ internal static class TelemetryServices
         services.AddSingletonWork<UptimeTrackingService>();
         services.AddScoped<ILiveScrapeStateReader, LiveScrapeStateReader>();
         services.AddScoped<ScrapeMonitorService>();
+        // One instance per circuit either way, so a panel's apply and the gate's dialog share a scope.
+        services.AddScoped<IScrapeMonitors>(sp => sp.GetRequiredService<ScrapeMonitorService>());
         services.AddSingletonWork<ScrapeMonitorReconcileService>();
 
         // The module's contract — what everyone else is allowed to know about it.

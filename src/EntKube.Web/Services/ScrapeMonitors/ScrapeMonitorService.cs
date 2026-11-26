@@ -28,7 +28,7 @@ public class ScrapeMonitorService(
     IClusterClientFactory clusterClients,
     ILiveScrapeStateReader reader,
     IClusterChangeGate gate,
-    ILogger<ScrapeMonitorService> logger)
+    ILogger<ScrapeMonitorService> logger) : IScrapeMonitors
 {
     /// <summary>
     /// How long reading one cluster, or writing to it with nobody waiting, may take. One that does

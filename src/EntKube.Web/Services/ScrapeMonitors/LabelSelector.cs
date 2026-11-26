@@ -125,15 +125,20 @@ public sealed record LabelSelector(
         foreach (LabelRequirement requirement in MatchExpressions)
         {
             bool present = labels.TryGetValue(requirement.Key, out string? have);
+            bool valued = requirement.Values.Count > 0;
 
-            bool? met = requirement.Operator switch
+            // A requirement Kubernetes refuses to build (apimachinery's NewRequirement: no key, In or
+            // NotIn without values, Exists or DoesNotExist with some) is not evaluated by the
+            // operator either, so what it selects cannot be told. Read as written, an In without
+            // values selected nothing and a NotIn without values everything.
+            bool? met = requirement.Key.Length == 0 ? null : requirement.Operator switch
             {
-                "In" => present && requirement.Values.Contains(have!, StringComparer.Ordinal),
+                "In" when valued => present && requirement.Values.Contains(have!, StringComparer.Ordinal),
                 // An absent label satisfies NotIn. That is Kubernetes' rule, and it is what lets
                 // "component not in (gateway)" select a pod with no component label at all.
-                "NotIn" => !present || !requirement.Values.Contains(have!, StringComparer.Ordinal),
-                "Exists" => present,
-                "DoesNotExist" => !present,
+                "NotIn" when valued => !present || !requirement.Values.Contains(have!, StringComparer.Ordinal),
+                "Exists" when !valued => present,
+                "DoesNotExist" when !valued => !present,
                 _ => null,
             };
 

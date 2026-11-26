@@ -51,6 +51,23 @@ public class ScrapeLabelSelectorTests
     public void What_cannot_be_read_cannot_be_told(string selector)
         => Selects(selector).Should().BeNull();
 
+    /// <summary>
+    /// Requirements Kubernetes refuses to build a selector from (apimachinery's NewRequirement): In
+    /// and NotIn without values, Exists and DoesNotExist with some, and no key. The operator cannot
+    /// evaluate them either, so EntKube cannot say what they select. Read as written, an In without
+    /// values selected nothing and a NotIn without values everything.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"matchExpressions":[{"key":"role","operator":"In"}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"role","operator":"In","values":[]}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"missing","operator":"NotIn"}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"missing","operator":"NotIn","values":[]}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"role","operator":"Exists","values":["leader"]}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"missing","operator":"DoesNotExist","values":["x"]}]}""")]
+    [InlineData("""{"matchExpressions":[{"key":"","operator":"DoesNotExist"}]}""")]
+    public void A_requirement_kubernetes_would_refuse_cannot_be_told(string selector)
+        => Selects(selector).Should().BeNull();
+
     /// <summary>An operator nobody knows can only narrow, so a label that is plainly wrong still decides.</summary>
     [Fact]
     public void A_requirement_that_is_plainly_unmet_decides_whatever_else_cannot_be_told()
