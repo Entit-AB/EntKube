@@ -78,16 +78,23 @@ public abstract class ValuesAtApply : IDisposable
         return component.Id;
     }
 
-    protected void InstallPrometheus(
-        Guid? cluster = null, string? @namespace = "monitoring", ComponentStatus status = ComponentStatus.Installed)
+    /// <param name="configuration">
+    /// The component's Configuration JSON, where an adopted stack records the namespace it really runs in.
+    /// </param>
+    protected ClusterComponent InstallPrometheus(
+        Guid? cluster = null, string? @namespace = "monitoring", ComponentStatus status = ComponentStatus.Installed,
+        string? configuration = null)
     {
-        Db.ClusterComponents.Add(new ClusterComponent
+        ClusterComponent prometheus = new()
         {
             Id = Guid.NewGuid(), ClusterId = cluster ?? ClusterId, Name = "kube-prometheus-stack",
             ComponentType = "HelmChart", HelmChartName = "kube-prometheus-stack",
             ReleaseName = "kube-prometheus-stack", Namespace = @namespace, Status = status,
-        });
+            Configuration = configuration,
+        };
+        Db.ClusterComponents.Add(prometheus);
         Db.SaveChanges();
+        return prometheus;
     }
 
     protected async Task<string> ApplyAsync(Guid componentId)
@@ -198,20 +205,49 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     }
 
     /// <summary>
-    /// The install that failed: "no matches for kind ServiceMonitor". And the one that did not, whose chart
-    /// monitor now has to make room for EntKube's.
+    /// Where EntKube's own Prometheus serves the cluster, its engine makes Keycloak's monitor, and the chart's
+    /// beside it would be a second scrape of the same pods.
     /// </summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task The_block_the_old_catalog_stored_is_turned_off_whether_or_not_there_is_a_prometheus(bool prometheus)
+    [Fact]
+    public async Task Where_entkubes_prometheus_serves_the_cluster_the_old_catalog_block_is_turned_off()
     {
-        if (prometheus) InstallPrometheus();
+        InstallPrometheus();
 
         string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
 
         Scalar(values, "serviceMonitor", "enabled").Should().Be("false",
             "off in words rather than removed: an absent key is what the catalog fill-in writes into");
+    }
+
+    /// <summary>
+    /// Everywhere else the engine makes nothing: it runs only where Catalog's kube-prometheus-stack serves the
+    /// cluster. A Prometheus Operator EntKube did not install (the customer's own, Rancher's) may be the one
+    /// scraping the chart's monitor, and turning it off would leave Keycloak unscraped with nothing to say so.
+    /// So the block is handed to helm as it was stored.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(ComponentStatus.NotInstalled)]
+    [InlineData(ComponentStatus.Failed)]
+    [InlineData(ComponentStatus.Installing)]
+    public async Task Where_entkubes_prometheus_does_not_serve_the_cluster_the_block_is_left_as_stored(ComponentStatus? status)
+    {
+        if (status is { } prometheus) InstallPrometheus(status: prometheus);
+
+        string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
+
+        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}",
+            "no EntKube monitor follows here, so the chart's is the only one there is");
+    }
+
+    [Fact]
+    public async Task A_prometheus_on_another_cluster_does_not_hand_keycloak_over()
+    {
+        InstallPrometheus(cluster: StrangersClusterId);
+
+        string values = await ApplyAsync(Install("keycloak", StoredByTheOldCatalog));
+
+        Said(At(Parse(values), "serviceMonitor")!).Should().Be("{enabled:true}");
     }
 
     [Theory]
@@ -220,6 +256,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [InlineData("serviceMonitor:\n  # chart default is off\n  enabled: true # scrape it")]
     public async Task The_same_block_written_another_way_is_still_the_catalogs(string block)
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", "metrics:\n  enabled: true\n" + block + "\n");
 
         Scalar(await ApplyAsync(keycloak), "serviceMonitor", "enabled").Should().Be("false");
@@ -256,6 +293,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [Fact]
     public async Task Turning_it_off_leaves_one_serviceMonitor_key_and_the_rest_as_it_was()
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
 
         string values = await ApplyAsync(keycloak);
@@ -281,6 +319,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [Fact]
     public async Task A_keycloak_with_themes_and_volumes_of_its_own_is_handed_over_too()
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog + "\nextraVolumes: |\n  - name: ours\n    emptyDir: {}\n");
         KeycloakComponentConfig config = new()
         {
@@ -311,6 +350,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [Fact]
     public async Task Certificates_and_manifests_kept_in_the_values_come_through_whole()
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog + """
 
             secrets:
@@ -346,6 +386,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [Fact]
     public async Task The_last_text_in_the_document_keeps_its_newline()
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", CatalogDefaults("keycloak")
             + "\nserviceMonitor:\n  enabled: true\nstartupScripts:\n  init.sh: |\n    #!/bin/sh\n    echo ready\n");
 
@@ -358,6 +399,7 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
     [Fact]
     public async Task The_stored_values_are_not_rewritten()
     {
+        InstallPrometheus();
         Guid keycloak = Install("keycloak", StoredByTheOldCatalog);
 
         await ApplyAsync(keycloak);
@@ -382,9 +424,23 @@ public class KeycloakMonitorHandoverTests : ValuesAtApply
 /// </summary>
 public class SeaweedFsLetsPrometheusInTests : ValuesAtApply
 {
-    private static string ThePrometheusRule(string @namespace) =>
+    private static string ThePrometheusRule(string @namespace, params int[] ports) =>
         "{from:[{namespaceSelector:{matchLabels:{kubernetes.io/metadata.name:'" + @namespace
-        + "'}},podSelector:{matchLabels:{app.kubernetes.io/name:prometheus}}}],ports:[{port:9327,protocol:TCP}]}";
+        + "'}},podSelector:{matchLabels:{app.kubernetes.io/name:prometheus}}}],ports:["
+        + string.Join(",", (ports.Length == 0 ? [9327] : ports).Select(p => $"{{port:{p},protocol:TCP}}")) + "]}";
+
+    /// <summary>The catalog's values with <paramref name="line"/> as the first line of each server's block.</summary>
+    private static string CatalogWithServerLines(params (string Server, string Line)[] lines)
+    {
+        string values = CatalogDefaults("seaweedfs");
+        foreach ((string server, string line) in lines)
+        {
+            string header = $"\n{server}:\n";
+            values.Should().Contain(header);
+            values = values.Replace(header, $"{header}  {line}\n");
+        }
+        return values;
+    }
 
     private const string TheS3Rule = "{ports:[{port:8333,protocol:TCP}]}";
 
@@ -594,6 +650,31 @@ public class SeaweedFsLetsPrometheusInTests : ValuesAtApply
         (await ApplyAsync(Install("seaweedfs", stored))).Should().Be(stored);
     }
 
+    /// <summary>
+    /// The engine places Prometheus where <see cref="PrometheusService.GetPrometheusConfig(ClusterComponent)"/>
+    /// says, and an adopted stack's Configuration overrides the column. Opening the port to the column's
+    /// namespace instead lets in prometheus-labelled pods of a namespace that is not Prometheus's, and leaves
+    /// the real one blocked while the panel tells the operator to allow it in.
+    /// </summary>
+    [Theory]
+    [InlineData("monitoring", "{\"namespace\":\"observability\"}", "observability")]
+    [InlineData(null, "{\"namespace\":\"observability\"}", "observability")]
+    [InlineData("  ", "{\"Namespace\":\"observability\"}", "observability")]
+    [InlineData("monitoring", "{\"namespace\":\"\"}", "monitoring")]
+    [InlineData("monitoring", "{\"serviceName\":\"prom\"}", "monitoring")]
+    [InlineData("monitoring", "not json", "monitoring")]
+    public async Task The_rule_names_the_namespace_the_engine_places_prometheus_in(
+        string? column, string configuration, string expected)
+    {
+        ClusterComponent prometheus = InstallPrometheus(@namespace: column, configuration: configuration);
+
+        string values = await ApplyAsync(Install("seaweedfs", CatalogDefaults("seaweedfs")));
+
+        Rules(values).Should().Equal(TheS3Rule, ThePrometheusRule(expected));
+        PrometheusService.GetPrometheusConfig(prometheus).Namespace.Should().Be(expected,
+            "the apply and the engine give one answer");
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("  ")]
@@ -631,6 +712,83 @@ public class SeaweedFsLetsPrometheusInTests : ValuesAtApply
         await Db.SaveChangesAsync();
 
         (await ApplyAsync(seaweed)).Should().Be(withPrometheus);
+    }
+
+    /// <summary>
+    /// The engine finds each server's port by its name, wherever its <c>metricsPort</c> put it; the rule has
+    /// to open that same number, or a release with a port of its own stays blocked for good.
+    /// </summary>
+    [Fact]
+    public async Task Each_servers_configured_metrics_port_is_opened()
+    {
+        InstallPrometheus();
+        string stored = CatalogWithServerLines(
+            ("master", "metricsPort: 9401"), ("volume", "metricsPort: \"9402\""), ("filer", "metricsPort: 9401"));
+
+        string values = await ApplyAsync(Install("seaweedfs", stored));
+
+        // The S3 gateway sets none, so it has the chart's 9327. Each number once, in order.
+        Rules(values).Should().Equal(TheS3Rule, ThePrometheusRule("monitoring", 9327, 9401, 9402));
+    }
+
+    [Fact]
+    public async Task Where_every_server_names_one_port_only_that_port_is_opened()
+    {
+        InstallPrometheus();
+        string stored = CatalogWithServerLines(
+            ("master", "metricsPort: 9500"), ("volume", "metricsPort: 9500"),
+            ("filer", "metricsPort: 9500"), ("s3", "metricsPort: 9500"));
+
+        Rules(await ApplyAsync(Install("seaweedfs", stored)))
+            .Should().Equal(TheS3Rule, ThePrometheusRule("monitoring", 9500));
+    }
+
+    /// <summary>
+    /// A port EntKube cannot read is not one it may guess: 9327 may be something else on that server. The
+    /// others are still opened.
+    /// </summary>
+    [Theory]
+    [InlineData("\"{{ .Values.port }}\"")]
+    [InlineData("0")]
+    [InlineData("70000")]
+    [InlineData("{port: 9500}")]
+    public async Task A_metrics_port_that_is_not_a_port_number_is_not_guessed(string unreadable)
+    {
+        InstallPrometheus();
+        string stored = CatalogWithServerLines(
+            ("master", $"metricsPort: {unreadable}"), ("volume", "metricsPort: 9500"),
+            ("filer", "metricsPort: 9500"), ("s3", "metricsPort: 9500"));
+
+        Rules(await ApplyAsync(Install("seaweedfs", stored)))
+            .Should().Equal(TheS3Rule, ThePrometheusRule("monitoring", 9500));
+    }
+
+    /// <summary>
+    /// ⚠️ With no port it can read, there is no rule at all. A rule with an empty ports list is not "no
+    /// port": it admits Prometheus's pods to every port, the unauthenticated gRPC ones among them.
+    /// </summary>
+    [Fact]
+    public async Task Where_no_server_has_a_port_that_can_be_read_nothing_is_opened()
+    {
+        InstallPrometheus();
+        string stored = CatalogWithServerLines(
+            ("master", "metricsPort: abc"), ("volume", "metricsPort: abc"),
+            ("filer", "metricsPort: abc"), ("s3", "metricsPort: abc"));
+
+        (await ApplyAsync(Install("seaweedfs", stored))).Should().Be(stored);
+    }
+
+    [Fact]
+    public async Task A_server_switched_off_opens_no_port_of_its_own()
+    {
+        InstallPrometheus();
+        string stored = CatalogWithServerLines(
+            ("master", "metricsPort: 9500"), ("volume", "metricsPort: 9500"), ("filer", "metricsPort: 9500"))
+            .Replace("\ns3:\n  enabled: true\n", "\ns3:\n  enabled: false\n  metricsPort: 9600\n");
+        stored.Should().Contain("metricsPort: 9600");
+
+        Rules(await ApplyAsync(Install("seaweedfs", stored)))
+            .Should().Equal(TheS3Rule, ThePrometheusRule("monitoring", 9500));
     }
 
     [Fact]
