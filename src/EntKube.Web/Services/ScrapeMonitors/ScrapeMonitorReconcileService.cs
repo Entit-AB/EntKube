@@ -13,6 +13,11 @@ namespace EntKube.Web.Services.ScrapeMonitors;
 /// <para>Each run is declared unattended: it changes clusters with nobody to acknowledge, and the
 /// audit trail records it under that name. What a cluster that refuses its monitors costs there is
 /// why the backoff lives here, for as long as this process does.</para>
+///
+/// <para><b>On every instance.</b> Registered as singleton work, which is placement and not a
+/// lease, so with the default configuration each instance runs this. Each cluster is claimed for
+/// its read and its write (<see cref="ScrapeMonitorClaim"/>), and an instance that finds it claimed
+/// leaves it for that pass; the backoff is still this instance's own.</para>
 /// </summary>
 public class ScrapeMonitorReconcileService(
     IServiceScopeFactory scopeFactory,

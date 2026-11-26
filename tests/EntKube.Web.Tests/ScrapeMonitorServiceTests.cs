@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using EntKube.Contracts.Catalog;
 using EntKube.Contracts.DataServices;
@@ -11,6 +12,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
@@ -732,6 +734,222 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         recorder.Invocations.Should().HaveCount(2);
     }
 
+    // ── Several instances ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The other instance's pass runs while this one is between its read and its write. Without a
+    /// claim both plan from the same read and both write it: two audit rows, and where a monitor is
+    /// made again, the second delete removes what the first apply has just made.
+    /// </summary>
+    [Fact]
+    public async Task Two_instances_never_plan_and_write_one_cluster_at_once()
+    {
+        ADatabaseWithoutAMonitor();
+        AnOrphan();
+        Claims claims = new();
+        ScrapeMonitorService first = Instance(claims), second = Instance(claims);
+        ScrapeMonitorBackoff secondsOwn = new(clock);
+        bool otherHasRun = false;
+        reader.Setup(r => r.ReadMonitoringAsync(world.TenantId, cluster.Object, It.IsAny<CancellationToken>()))
+            .Returns(async (Guid _, IClusterClient _, CancellationToken _) =>
+            {
+                log.Add("monitors");
+                LiveMonitoring read = world.Monitoring();
+                if (!otherHasRun)
+                {
+                    otherHasRun = true;
+                    await second.ReconcileAllAsync(secondsOwn);
+                }
+
+                return read;
+            });
+
+        await first.ReconcileAllAsync(backoff);
+
+        log.Should().Equal("monitors", "components", "data services", "workloads", "delete", "apply");
+        claims.Held.Should().BeEmpty("it is given back after the write");
+    }
+
+    [Fact]
+    public async Task A_cluster_another_instance_holds_is_left_to_it_for_this_pass()
+    {
+        ADatabaseWithoutAMonitor();
+        Claims claims = new();
+        claims.Held.Add(world.ClusterId);
+
+        await Instance(claims).ReconcileAllAsync(backoff);
+        log.Should().BeEmpty("not even read: what it would plan from is about to change");
+
+        claims.Held.Clear();
+        await Instance(claims).ReconcileAllAsync(backoff);
+        log.Should().Contain("apply", "skipping is not failing, so there is nothing to wait for");
+    }
+
+    [Fact]
+    public async Task Pressing_apply_while_another_instance_writes_changes_nothing_and_says_so()
+    {
+        ADatabaseWithoutAMonitor();
+        Claims claims = new();
+        claims.Held.Add(world.ClusterId);
+
+        KubernetesOperationResult<ScrapeMonitorPlan> result = await Instance(claims).ApplyAsync(world.TenantId, world.ClusterId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Another EntKube instance").And.Contain("Nothing was changed");
+        log.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Pressing_apply_holds_the_cluster_until_it_has_written()
+    {
+        ADatabaseWithoutAMonitor();
+        AnOrphan();
+        Claims claims = new();
+        List<bool> heldWhileWriting = [];
+        cluster.Setup(c => c.ApplyManifestInNamespaceAsync(It.IsAny<string>(), "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string manifest, string _, string _, CancellationToken _) =>
+            {
+                heldWhileWriting.Add(claims.Held.Contains(world.ClusterId));
+                ApplyWhatWasSent(manifest);
+                return "";
+            });
+        cluster.Setup(c => c.DeleteManifestSetAsync(It.IsAny<string>(), "", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string manifest, string _, string _, CancellationToken _) =>
+            {
+                heldWhileWriting.Add(claims.Held.Contains(world.ClusterId));
+                DeleteWhatWasNamed(manifest);
+                return "";
+            });
+
+        (await Instance(claims).ApplyAsync(world.TenantId, world.ClusterId)).IsSuccess.Should().BeTrue();
+
+        heldWhileWriting.Should().Equal(true, true);
+        claims.Held.Should().BeEmpty();
+    }
+
+    /// <summary>Whether somebody else is writing is not known, so nothing is read and nothing written.</summary>
+    [Fact]
+    public async Task A_claim_that_cannot_be_asked_for_reads_and_writes_nothing()
+    {
+        ADatabaseWithoutAMonitor();
+        AnOrphan();
+        Claims claims = new() { Unanswerable = true };
+
+        await Instance(claims).ReconcileAllAsync(backoff);
+        KubernetesOperationResult<ScrapeMonitorPlan> pressed = await Instance(claims).ApplyAsync(world.TenantId, world.ClusterId);
+
+        log.Should().BeEmpty();
+        pressed.Error.Should().Contain("the database did not answer");
+    }
+
+    [Fact]
+    public async Task The_claim_is_given_back_when_the_write_fails()
+    {
+        ADatabaseWithoutAMonitor();
+        EveryApplyFails();
+        Claims claims = new();
+
+        await Instance(claims).ReconcileAllAsync(backoff);
+        claims.Held.Should().BeEmpty();
+
+        await Instance(claims).ApplyAsync(world.TenantId, world.ClusterId);
+        claims.Held.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Every instance has to ask for the same lock for a cluster, so the key is pinned: a key from
+    /// <c>GetHashCode</c> would differ between processes and lock nothing.
+    /// </summary>
+    [Fact]
+    public void Every_instance_asks_for_the_same_lock_for_a_cluster_and_another_for_the_next()
+    {
+        Guid one = Guid.Parse("7a1e5f0c-94c9-4f0e-8f5c-0a8f9b5a6d11");
+        Guid two = Guid.Parse("5b1e5f0c-94c9-4f0e-8f5c-0a8f9b5a6d22");
+
+        ScrapeMonitorClaim.Key(one).Should().Be(PinnedKey);
+        ScrapeMonitorClaim.Key(two).Should().NotBe(ScrapeMonitorClaim.Key(one));
+        new[] { AdvisoryLock.MigrationsKey, AdvisoryLock.SingletonWorkKey }.Should().NotContain(ScrapeMonitorClaim.Key(one));
+
+        ScrapeMonitorClaim.AcquireSql("Npgsql.EntityFrameworkCore.PostgreSQL", one)
+            .Should().Be($"SELECT pg_try_advisory_lock({PinnedKey})");
+        ScrapeMonitorClaim.AcquireSql("Microsoft.EntityFrameworkCore.SqlServer", one)
+            .Should().Contain("@Resource = 'EntKube:ScrapeMonitors:7a1e5f0c-94c9-4f0e-8f5c-0a8f9b5a6d11'")
+            .And.Contain("@LockTimeout = 0");
+        ScrapeMonitorClaim.AcquireSql("Microsoft.EntityFrameworkCore.Sqlite", one).Should().BeNull();
+    }
+
+    private const long PinnedKey = 3375976061574135216;
+
+    /// <summary>
+    /// The key is written into the statement with the culture's own number format, and Swedish
+    /// writes a minus as U+2212, which Postgres reads as the name of a column. Found on a real
+    /// Postgres (<see cref="ScrapeMonitorClaimPostgresTests"/>): half of all clusters could never
+    /// be claimed, and so never reconciled.
+    /// </summary>
+    [Fact]
+    public void Every_clusters_lock_is_a_statement_Postgres_can_read_in_any_culture()
+    {
+        CultureInfo before = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("sv-SE");
+
+            for (int i = 0; i < 200; i++)
+            {
+                ScrapeMonitorClaim.AcquireSql("Npgsql.EntityFrameworkCore.PostgreSQL", Guid.NewGuid())
+                    .Should().MatchRegex(@"^SELECT pg_try_advisory_lock\([0-9]+\)$");
+            }
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = before;
+        }
+    }
+
+    private ScrapeMonitorService Instance(Claims claims) => new ClaimingService(
+        claims, factory, catalog.Object, dataServices.Object, clusterClients.Object, reader.Object,
+        gate.Object, NullLogger<ScrapeMonitorService>.Instance);
+
+    /// <summary>Who holds which cluster, shared by the instances of one test the way the database is.</summary>
+    private sealed class Claims
+    {
+        public readonly HashSet<Guid> Held = [];
+
+        public bool Unanswerable { get; init; }
+
+        public IAsyncDisposable? TryTake(Guid clusterId)
+        {
+            if (Unanswerable) throw new InvalidOperationException("the database did not answer");
+
+            return Held.Add(clusterId) ? new GivenBack(() => Held.Remove(clusterId)) : null;
+        }
+    }
+
+    private sealed class GivenBack(Action back) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            back();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>One instance of EntKube, claiming through <see cref="Claims"/> instead of the database.</summary>
+    private sealed class ClaimingService(
+        Claims claims,
+        IDbContextFactory<TelemetryDbContext> dbFactory,
+        ICatalogApi catalog,
+        IDataServicesApi dataServices,
+        IClusterClientFactory clusterClients,
+        ILiveScrapeStateReader reader,
+        IClusterChangeGate gate,
+        ILogger<ScrapeMonitorService> logger)
+        : ScrapeMonitorService(dbFactory, catalog, dataServices, clusterClients, reader, gate, logger)
+    {
+        protected override Task<IAsyncDisposable?> TryClaimAsync(Guid clusterId, CancellationToken ct)
+            => Task.FromResult(claims.TryTake(clusterId));
+    }
+
     /// <summary>The seam as the real factory has it: each write asks the gate first.</summary>
     private void Acknowledged(IClusterChangeGate through)
     {
@@ -764,5 +982,89 @@ public sealed class ScrapeMonitorServiceTests : IDisposable
         public override DateTimeOffset GetUtcNow() => now;
 
         public void Pass(TimeSpan time) => now += time;
+    }
+}
+
+/// <summary>
+/// <see cref="ScrapeMonitorClaim"/> against a real Postgres, which is where it has to work: two
+/// instances are two connection pools on one database. Skipped unless
+/// <c>ENTKUBE_TEST_POSTGRES</c> holds a connection string; the database needs no tables.
+/// </summary>
+public sealed class ScrapeMonitorClaimPostgresTests
+{
+    public const string Variable = "ENTKUBE_TEST_POSTGRES";
+
+    private static string ConnectionString => System.Environment.GetEnvironmentVariable(Variable)!;
+
+    private readonly Guid clusterId = Guid.NewGuid();
+
+    private static Task<IAsyncDisposable?> TakeAsync(string applicationName, Guid clusterId)
+        => ScrapeMonitorClaim.TryTakeAsync(
+            new NpgsqlTelemetry($"{ConnectionString};Application Name={applicationName}"),
+            clusterId, NullLogger.Instance, CancellationToken.None);
+
+    [PostgresFact]
+    public async Task One_instance_holds_a_cluster_and_the_other_is_told_so()
+    {
+        IAsyncDisposable? first = await TakeAsync("instance-a", clusterId);
+        IAsyncDisposable? second = await TakeAsync("instance-b", clusterId);
+        IAsyncDisposable? elsewhere = await TakeAsync("instance-b", Guid.NewGuid());
+
+        first.Should().NotBeNull();
+        second.Should().BeNull();
+        elsewhere.Should().NotBeNull("another cluster is another lock");
+
+        await first!.DisposeAsync();
+        await elsewhere!.DisposeAsync();
+        IAsyncDisposable? afterwards = await TakeAsync("instance-b", clusterId);
+        afterwards.Should().NotBeNull();
+        await afterwards!.DisposeAsync();
+    }
+
+    /// <summary>
+    /// A pooled connection is reset only when it is next used, so a claim that only closed its
+    /// connection would go on holding the cluster from the idle pool. It is given back explicitly.
+    /// </summary>
+    [PostgresFact]
+    public async Task A_claim_given_back_holds_nothing_from_the_pool()
+    {
+        IAsyncDisposable? claim = await TakeAsync("instance-a", clusterId);
+        (await AdvisoryLocksOn(clusterId)).Should().Be(1);
+
+        await claim!.DisposeAsync();
+
+        (await AdvisoryLocksOn(clusterId)).Should().Be(0);
+    }
+
+    /// <summary>Asked over a connection of its own, outside every pool.</summary>
+    private static async Task<long> AdvisoryLocksOn(Guid clusterId)
+    {
+        long key = ScrapeMonitorClaim.Key(clusterId);
+        await using Npgsql.NpgsqlConnection connection = new($"{ConnectionString};Pooling=false");
+        await connection.OpenAsync();
+        await using Npgsql.NpgsqlCommand command = new(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            + "AND classid = (($1 >> 32) & 4294967295)::oid AND objid = ($1 & 4294967295)::oid AND objsubid = 1",
+            connection);
+        command.Parameters.AddWithValue(key);
+        return (long)(await command.ExecuteScalarAsync())!;
+    }
+
+    private sealed class NpgsqlTelemetry(string connectionString) : IDbContextFactory<TelemetryDbContext>
+    {
+        public TelemetryDbContext CreateDbContext()
+            => new(new DbContextOptionsBuilder<TelemetryDbContext>().UseNpgsql(connectionString).Options);
+    }
+}
+
+/// <summary>A test that needs the Postgres <see cref="ScrapeMonitorClaimPostgresTests.Variable"/> names.</summary>
+public sealed class PostgresFactAttribute : FactAttribute
+{
+    public PostgresFactAttribute()
+    {
+        if (string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable(ScrapeMonitorClaimPostgresTests.Variable)))
+        {
+            Skip = $"Needs a Postgres: set {ScrapeMonitorClaimPostgresTests.Variable}.";
+        }
     }
 }

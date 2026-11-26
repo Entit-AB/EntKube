@@ -1,7 +1,10 @@
+using System.Buffers.Binary;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Contracts.Catalog;
 using EntKube.Contracts.DataServices;
+using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Services.Clusters;
@@ -61,6 +64,9 @@ public class ScrapeMonitorService(
     /// <summary>
     /// Makes the monitors on one cluster what they should be, now, with the operator asked once. The
     /// result is the plan as it stands afterwards.
+    ///
+    /// <para>Not while another instance's sweep is writing them (<see cref="ScrapeMonitorClaim"/>):
+    /// that is a failure that changed nothing, and pressing again a minute later works.</para>
     /// </summary>
     public async Task<KubernetesOperationResult<ScrapeMonitorPlan>> ApplyAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
@@ -70,6 +76,15 @@ public class ScrapeMonitorService(
 
         try
         {
+            // Held while the dialog is open, too: what the operator is asked about is what is written.
+            await using IAsyncDisposable? claim = await TryClaimAsync(clusterId, ct);
+            if (claim is null)
+            {
+                return KubernetesOperationResult<ScrapeMonitorPlan>.Failure(
+                    "Another EntKube instance is writing the monitors on this cluster right now. "
+                    + "Nothing was changed; try again in a minute.");
+            }
+
             (IClusterClient? cluster, ScrapeMonitorPlan plan) = await ReadAsync(tenantId, clusterId, ct);
 
             if (cluster is null || !plan.HasChanges)
@@ -147,6 +162,16 @@ public class ScrapeMonitorService(
     {
         try
         {
+            // From before the read until after the write: another instance's write in between would
+            // make this one's plan out of date.
+            await using IAsyncDisposable? claim = await TryClaimAsync(clusterId, ct);
+            if (claim is null)
+            {
+                // Its pass, not a failure: nothing to back off from, and the next pass may be ours.
+                logger.LogDebug("Monitors on cluster {ClusterId} are being reconciled by another instance", clusterId);
+                return;
+            }
+
             (IClusterClient? cluster, ScrapeMonitorPlan plan) = await ReadAsync(tenantId, clusterId, ct);
 
             if (cluster is null || !plan.HasChanges)
@@ -325,6 +350,13 @@ public class ScrapeMonitorService(
         return ns != 0 ? ns : string.CompareOrdinal(a.Name, b.Name);
     });
 
+    /// <summary>
+    /// This instance's claim on one cluster's monitors, or null while another instance has it
+    /// (<see cref="ScrapeMonitorClaim"/>). Virtual so the tests can be two instances at once.
+    /// </summary>
+    protected virtual Task<IAsyncDisposable?> TryClaimAsync(Guid clusterId, CancellationToken ct)
+        => ScrapeMonitorClaim.TryTakeAsync(dbFactory, clusterId, logger, ct);
+
     private static CancellationTokenSource Limited(CancellationToken ct)
     {
         CancellationTokenSource limited = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -339,4 +371,139 @@ public class ScrapeMonitorService(
         k8s.Autorest.HttpOperationException { Response: { } response } http => $"{response.StatusCode}: {http.Message}",
         _ => ex.Message,
     };
+}
+
+/// <summary>
+/// Which instance may read and write one cluster's monitors now: a database advisory lock keyed by
+/// the cluster, taken before the read and given back after the write.
+///
+/// <para><b>Why there has to be one.</b> Every instance runs the sweep (the singleton-work flag is
+/// placement, not a lease), and a panel's button can be pressed on any of them. Two that read the
+/// same cluster before either writes plan the same changes, and both carry them out: two audit
+/// rows where one would do, and where a monitor is made again, the second one's delete, planned
+/// from a read before the first one's apply, removes the monitor the first one has just made.</para>
+///
+/// <para><b>Why this lock.</b> It is <see cref="AdvisoryLock"/>, the one the migrations and the
+/// singleton witness take, with a key of its own for each cluster. It is released when the
+/// connection closes, so an instance that dies holding it holds nothing. No table and no
+/// migration, and no staleness rule to get wrong.</para>
+///
+/// <para><b>What it does not share.</b> <see cref="ScrapeMonitorBackoff"/> stays in each
+/// instance's memory. With the lock, two instances never write one cluster at once; without a
+/// shared backoff, each of them still waits on its own clock after a refusal.</para>
+/// </summary>
+public static class ScrapeMonitorClaim
+{
+    /// <summary>What SQL Server's lock is called, and what the Postgres key is derived from.</summary>
+    public static string Resource(Guid clusterId) => $"EntKube:ScrapeMonitors:{clusterId:D}";
+
+    /// <summary>
+    /// The Postgres key for one cluster. Derived and not stored, so every instance asks for the same
+    /// number; from SHA-256 and not <c>GetHashCode</c>, which is different in every process.
+    ///
+    /// <para><b>Never negative.</b> <see cref="AdvisoryLock"/> writes the key into the statement in
+    /// the current culture, and Swedish writes a minus as U+2212, which Postgres reads as the name of
+    /// a column: half of all clusters could never be claimed. A key without a sign reads the same in
+    /// every culture.</para>
+    /// </summary>
+    public static long Key(Guid clusterId)
+        => BinaryPrimitives.ReadInt64BigEndian(SHA256.HashData(Encoding.UTF8.GetBytes(Resource(clusterId))))
+           & long.MaxValue;
+
+    /// <summary>The statement that asks for it without waiting, or null where the provider takes no lock.</summary>
+    public static string? AcquireSql(string? provider, Guid clusterId)
+        => AdvisoryLock.TryAcquireSql(provider, Key(clusterId), Resource(clusterId));
+
+    /// <summary>
+    /// The claim on one cluster, or null when another instance holds it. A database that cannot be
+    /// asked is an exception: whether somebody else is writing is not known, so nothing is.
+    ///
+    /// <para>SQLite takes no lock and needs none: one file, one process. A provider nobody has
+    /// taught a lock goes on without one and says so, as the migrations do.</para>
+    /// </summary>
+    public static async Task<IAsyncDisposable?> TryTakeAsync(
+        IDbContextFactory<TelemetryDbContext> dbFactory, Guid clusterId, ILogger logger, CancellationToken ct)
+    {
+        TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        try
+        {
+            string? provider = db.Database.ProviderName;
+            string? acquire = AcquireSql(provider, clusterId);
+
+            if (acquire is null)
+            {
+                if (!AdvisoryLock.NeedsNoLock(provider))
+                {
+                    logger.LogWarning(
+                        "No lock is implemented for provider {Provider}; the monitors on cluster {ClusterId} "
+                        + "are written unclaimed, and two instances could write them at once.", provider, clusterId);
+                }
+
+                await db.DisposeAsync();
+                return NoLock.Instance;
+            }
+
+            DbConnection connection = db.Database.GetDbConnection();
+            await connection.OpenAsync(ct);
+
+            bool granted;
+            await using (DbCommand command = connection.CreateCommand())
+            {
+                command.CommandText = acquire;
+                granted = AdvisoryLock.WasGranted(await command.ExecuteScalarAsync(ct));
+            }
+
+            if (!granted)
+            {
+                await db.DisposeAsync();
+                return null;
+            }
+
+            return new Held(db, provider, clusterId, logger);
+        }
+        catch
+        {
+            await db.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>Where there is nothing to hold.</summary>
+    private sealed class NoLock : IAsyncDisposable
+    {
+        public static readonly NoLock Instance = new();
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// The lock, on the connection that took it. Given back explicitly before the connection goes
+    /// back to the pool: a pooled connection is not reset until it is next used, and until then it
+    /// would go on holding the cluster for an instance that has finished with it.
+    /// </summary>
+    private sealed class Held(TelemetryDbContext db, string? provider, Guid clusterId, ILogger logger) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (AdvisoryLock.ReleaseSql(provider, Key(clusterId), Resource(clusterId)) is { } release)
+                {
+                    await using DbCommand command = db.Database.GetDbConnection().CreateCommand();
+                    command.CommandText = release;
+                    await command.ExecuteScalarAsync(CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Closing the connection gives it back too, once the pool lets the connection go.
+                logger.LogWarning(ex, "Could not give back the claim on the monitors of cluster {ClusterId}", clusterId);
+            }
+            finally
+            {
+                await db.DisposeAsync();
+            }
+        }
+    }
 }

@@ -12,7 +12,13 @@ namespace EntKube.Web.Services.ScrapeMonitors;
 ///
 /// <para>Five minutes after the first failure, twice that after each further one, up to six hours.
 /// A success clears it, and so does a different set of changes: whatever was wrong with the last one
-/// says nothing about this one. In memory, on the host that sweeps; a restart tries again at once.</para>
+/// says nothing about this one.</para>
+///
+/// <para><b>⚠️ In memory, on each instance.</b> Every instance sweeps. <see cref="ScrapeMonitorClaim"/>
+/// keeps two of them from writing one cluster at once, but not from each attempting it on its own
+/// clock: with N instances a cluster that refuses its monitors is asked up to N times per wait, so
+/// up to N unattended audit rows where one would do, and an instance that restarts asks again at
+/// once. Bounded by N, and by the wait growing on each of them. Sharing it would take a table.</para>
 /// </summary>
 public sealed class ScrapeMonitorBackoff(TimeProvider clock)
 {
