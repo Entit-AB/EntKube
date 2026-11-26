@@ -167,6 +167,50 @@ public sealed class LiveScrapeStateReaderTests
         await FluentActions.Awaiting(ReadMonitoringAsync).Should().ThrowAsync<FormatException>();
     }
 
+    /// <summary>
+    /// When it was last written is the latest of its writers' times, the status's writer left out:
+    /// the operator writing what it made of the monitor is not an edit of what the monitor selects.
+    /// </summary>
+    [Fact]
+    public async Task A_monitor_says_when_it_was_last_written_and_how_often_its_spec_was()
+    {
+        Answer($"{Monitoring}/podmonitors", List("""
+            {"metadata":{"name":"orders","namespace":"databases","creationTimestamp":"2026-11-20T08:00:00Z","generation":3,
+              "managedFields":[
+                {"manager":"helm","operation":"Update","time":"2026-11-20T08:00:00Z"},
+                {"manager":"kubectl-edit","operation":"Update","time":"2026-11-26T11:58:00Z"},
+                {"manager":"prometheus-operator","operation":"Update","subresource":"status","time":"2026-11-26T11:59:30Z"}]},
+             "spec":{}}
+            """));
+
+        LiveMonitor orders = (await ReadMonitoringAsync())!.Monitors.Single(m => m.Identity.Name == "orders");
+
+        orders.Changed.Should().Be(new DateTimeOffset(2026, 11, 26, 11, 58, 0, TimeSpan.Zero));
+        orders.Generation.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task A_monitor_with_no_record_of_its_writers_says_nothing_of_when_it_was_written()
+    {
+        LiveMonitor events = (await ReadMonitoringAsync())!.Monitors.Single(m => m.Identity.Name == "events-metrics");
+
+        events.Changed.Should().BeNull();
+        events.Generation.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(""" "generation":"three" """)]
+    [InlineData(""" "managedFields":[{"manager":"helm","time":"soon"}] """)]
+    [InlineData(""" "managedFields":[{"manager":"helm","time":12}] """)]
+    [InlineData(""" "managedFields":{"manager":"helm"} """)]
+    public async Task A_record_of_writes_that_cannot_be_read_is_not_a_monitor_never_written(string metadata)
+    {
+        Answer($"{Monitoring}/podmonitors", List(
+            $$$"""{"metadata":{"name":"orders","namespace":"databases",{{{metadata}}}},"spec":{}}"""));
+
+        await FluentActions.Awaiting(ReadMonitoringAsync).Should().ThrowAsync<FormatException>();
+    }
+
     // ── What Prometheus says ──────────────────────────────────────────────────
 
     [Fact]

@@ -406,9 +406,17 @@ public static class ScrapeTargetCatalog
             new MonitorIdentity(kind, ns, $"entkube-{slug}-{release}"), selector, [endpoint]));
     }
 
+    /// <summary>
+    /// A chart that annotates its pods for an annotation scrape job. The sentence says what the chart
+    /// does and nothing of whether a job takes them, which only Prometheus's list can tell: the planner
+    /// adds that (<see cref="ScrapeTargetSpec.LeftToAnnotationJob"/>).
+    /// </summary>
     private static ScrapeTargetSpec Annotated(InstalledComponent c, string what) => NotYet(c, what,
-        "Its pods carry prometheus.io/scrape annotations, which the Prometheus stack already scrapes. A monitor "
-        + "beside them would count everything twice.");
+        "Its chart puts prometheus.io/scrape annotations on its pods for an annotation scrape job to take, so "
+        + "EntKube adds no monitor: beside such a job, one would count everything twice.") with
+    {
+        LeftToAnnotationJob = true,
+    };
 
     private static ScrapeTargetSpec MakesItsOwn(InstalledComponent c, string what) => NotYet(c, what,
         "It creates its own monitors, so EntKube adds none.");

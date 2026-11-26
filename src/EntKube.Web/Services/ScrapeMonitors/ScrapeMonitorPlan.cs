@@ -25,8 +25,10 @@ public enum MonitorState
 
     /// <summary>
     /// Something else scrapes some of its endpoints and nothing scrapes the rest. Ours would scrape all of
-    /// them, so it is neither made nor kept: a gap the row names beats a silent double. Ours, if there is
-    /// one, is removed.
+    /// them, so it is not made: a gap the row names beats a silent double. Ours, if there is one, is
+    /// removed where Prometheus lists that other job's target on a covered endpoint. Where the only
+    /// evidence is still in its grace (a monitor still loading, a pod the annotation job is about to
+    /// take), ours is kept as it is until Prometheus lists it.
     /// </summary>
     PartlyCovered,
 
