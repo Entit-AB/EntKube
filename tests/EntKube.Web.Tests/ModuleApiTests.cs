@@ -299,6 +299,141 @@ public class ModuleApiTests : IDisposable
         }
     }
 
+    /// <summary>One of every kind of data service, with nothing that looks like a default value.</summary>
+    private async Task SeedDataServicesAsync(Guid tenantId, Guid clusterId, string label)
+    {
+        db.CnpgClusters.Add(new CnpgCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-pg", Namespace = "databases",
+            PostgresVersion = "17", StorageSize = "1Gi", Status = CnpgClusterStatus.Restoring,
+        });
+        db.MongoClusters.Add(new MongoCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-mongo", Namespace = "databases",
+            MongoVersion = "7.0", StorageSize = "1Gi", Status = MongoClusterStatus.Upgrading,
+            ExternalUri = "mongodb+srv://elsewhere.example",
+        });
+        db.RedisClusters.Add(new RedisCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-redis", Namespace = "caches",
+            RedisVersion = "7", StorageSize = "1Gi", Status = RedisClusterStatus.Failed,
+        });
+        db.KafkaClusters.Add(new KafkaCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-kafka", Namespace = "streams",
+            KafkaVersion = "4.3.0", StorageSize = "1Gi", Status = KafkaClusterStatus.Updating,
+        });
+        db.RabbitMQClusters.Add(new RabbitMQCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-rabbit", Namespace = "queues",
+            RabbitMQVersion = "3.13", StorageSize = "1Gi", Status = RabbitMQClusterStatus.Deleting,
+            IsOperatorManaged = false,
+        });
+        db.ElasticsearchClusters.Add(new ElasticsearchCluster
+        {
+            TenantId = tenantId, KubernetesClusterId = clusterId, Name = $"{label}-es", Namespace = "search",
+            Status = ElasticsearchClusterStatus.Running, MonitoringEnabled = true,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task DataServices_lists_every_kind_of_the_asking_tenants_services_and_none_of_the_neighbours()
+    {
+        await SeedDataServicesAsync(ourTenant, ourCluster, "ours");
+        await SeedDataServicesAsync(theirTenant, theirCluster, "theirs");
+
+        IReadOnlyList<ManagedServiceSummary> ours = await DataServices.GetManagedServicesForTenantAsync(ourTenant);
+
+        ours.Should().OnlyContain(s => s.TenantId == ourTenant && s.ClusterId == ourCluster);
+        ours.Should().OnlyContain(s => s.Name.StartsWith("ours-"));
+
+        ours.Select(s => s.Kind).Order().Should().Equal(Enum.GetValues<ManagedServiceKind>(),
+            "the monitor reconcile deletes the monitor of whatever is missing from this list, so a kind "
+            + "that was forgotten is every database of that kind no longer scraped");
+    }
+
+    /// <summary>
+    /// What each row says about itself, for the facts a caller cannot see from the cluster. Every
+    /// status is one its enum does not default to, because a cast that lost it would read as zero.
+    /// </summary>
+    [Fact]
+    public async Task A_managed_service_carries_what_only_its_row_knows()
+    {
+        await SeedDataServicesAsync(ourTenant, ourCluster, "ours");
+
+        Dictionary<ManagedServiceKind, ManagedServiceSummary> ours =
+            (await DataServices.GetManagedServicesForTenantAsync(ourTenant)).ToDictionary(s => s.Kind);
+
+        ManagedServiceSummary postgres = ours[ManagedServiceKind.Postgres];
+        (postgres.Name, postgres.Namespace, postgres.Status).Should()
+            .Be(("ours-pg", "databases", ManagedServiceStatus.Restoring));
+        (postgres.IsOperatorManaged, postgres.IsInCluster, postgres.HasExporter).Should().Be((true, true, false));
+
+        ours[ManagedServiceKind.MongoDb].Status.Should().Be(ManagedServiceStatus.Upgrading);
+        ours[ManagedServiceKind.MongoDb].IsInCluster.Should().BeFalse(
+            "a MongoDB reached by a connection string may have nothing in the cluster");
+
+        ours[ManagedServiceKind.Redis].Status.Should().Be(ManagedServiceStatus.Failed,
+            "failed is a state of something that exists, so it is listed");
+
+        ours[ManagedServiceKind.Kafka].Status.Should().Be(ManagedServiceStatus.Updating);
+
+        ours[ManagedServiceKind.RabbitMq].Status.Should().Be(ManagedServiceStatus.Deleting);
+        ours[ManagedServiceKind.RabbitMq].IsOperatorManaged.Should().BeFalse();
+
+        ours[ManagedServiceKind.Elasticsearch].Status.Should().Be(ManagedServiceStatus.Running);
+        ours[ManagedServiceKind.Elasticsearch].HasExporter.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The whole list or an exception. One kind's table made unreadable here stands for any reason
+    /// its query could fail.
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(CnpgCluster))]
+    [InlineData(typeof(MongoCluster))]
+    [InlineData(typeof(RedisCluster))]
+    [InlineData(typeof(KafkaCluster))]
+    [InlineData(typeof(RabbitMQCluster))]
+    [InlineData(typeof(ElasticsearchCluster))]
+    public async Task A_kind_that_cannot_be_read_is_an_exception_and_not_a_shorter_list(Type kind)
+    {
+        await SeedDataServicesAsync(ourTenant, ourCluster, "ours");
+
+        string table = db.Model.FindEntityType(kind)!.GetTableName()!;
+        using (SqliteCommand rename = connection.CreateCommand())
+        {
+            rename.CommandText = $"ALTER TABLE \"{table}\" RENAME TO \"{table}_gone\"";
+            rename.ExecuteNonQuery();
+        }
+
+        Func<Task> list = () => DataServices.GetManagedServicesForTenantAsync(ourTenant);
+
+        await list.Should().ThrowAsync<SqliteException>().WithMessage($"*no such table: {table}*");
+    }
+
+    /// <summary>
+    /// The contract's status is mapped from six enums by name, and <c>Enum.Parse</c> throws on one it
+    /// does not have, so a status added to one kind would stop every reconcile. Both directions: a
+    /// contract member no kind has is a state nobody can be in.
+    /// </summary>
+    [Fact]
+    public void The_managed_service_statuses_agree_member_for_member()
+    {
+        string[] entities =
+        [
+            .. Enum.GetNames<CnpgClusterStatus>(), .. Enum.GetNames<MongoClusterStatus>(),
+            .. Enum.GetNames<RedisClusterStatus>(), .. Enum.GetNames<KafkaClusterStatus>(),
+            .. Enum.GetNames<RabbitMQClusterStatus>(), .. Enum.GetNames<ElasticsearchClusterStatus>(),
+        ];
+
+        Enum.GetNames<ManagedServiceStatus>().Order().Should().Equal(entities.Distinct().Order());
+
+        // "Not being deleted" is what the one caller asks, so every kind has to be able to say it.
+        entities.Count(n => n == nameof(ManagedServiceStatus.Deleting)).Should().Be(6);
+    }
+
     /// <summary>
     /// The three enums a deployment carries survive the trip through the contract.
     ///

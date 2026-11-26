@@ -23,8 +23,13 @@ public class CnpgService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Contracts.Delivery.IDeliveryApi delivery,
-    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    Microsoft.Extensions.Logging.ILogger<CnpgService>? logger = null)
 {
+    /// <summary>Where a choice made on an answer that could not be had is said. The container always gives one.</summary>
+    private readonly Microsoft.Extensions.Logging.ILogger log =
+        logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<CnpgService>.Instance;
+
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why.
     ///
@@ -39,6 +44,46 @@ public class CnpgService(
            ?? throw new InvalidOperationException(
                "The cluster has no stored kubeconfig, or does not belong to this tenant, "
                + "so nothing can be applied to it.");
+
+    /// <summary>
+    /// Whether the monitor engine's own PodMonitor for this database stands on the cluster right now
+    /// (<c>entkube-cnpg-&lt;name&gt;</c>, ours by the planner's own rule, <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>):
+    /// the one case in which the
+    /// operator's own PodMonitor may be switched off. See <see cref="EngineMonitorOnCluster"/> for why this
+    /// question, and not whether EntKube's Prometheus serves the cluster.
+    ///
+    /// <para><b>The handover, step by step.</b> Where EntKube's Prometheus selects the operator's PodMonitor,
+    /// the planner sees the database covered and never makes ours, so this answers false and the operator's
+    /// stays on and goes on scraping. Where it does not select it (an older kube-prometheus-stack that selects
+    /// by its release label), the planner makes ours, and the next re-apply (the drift banner, a backup's
+    /// re-apply, an upgrade) finds it here and switches the operator's off; until then the unselected
+    /// operator's monitor beside ours doubles nothing. Where the planner makes nothing (no catalog Prometheus,
+    /// sharded, ambiguous, a selector it cannot read), nothing of ours stands and a working monitor is never
+    /// removed. Where ours outlives the catalog's Prometheus, it still stands, so the operator's is not turned
+    /// back on beside it.</para>
+    ///
+    /// <para><b>Asked before anything is written.</b> A failed read propagates: neither value is safe to
+    /// write blind (one may double the scrape, the other may end it), so the action fails whole rather than
+    /// half-done. The drift check reports Unknown and the backup skips only its re-apply.</para>
+    /// </summary>
+    private static async Task<bool> EnginesPodMonitorStandsAsync(
+        Clusters.IClusterClient client, string name, string ns, CancellationToken ct)
+    {
+        ScrapeMonitors.MonitorSpec ours = EngineMonitorOnCluster.ForPostgres(name, ns);
+
+        // No PodMonitor kind, nothing of ours: an answer, and nothing more is asked.
+        if (!await EngineMonitorOnCluster.KindIsServedAsync(client, ours.Identity.Kind, ct)) return false;
+
+        // Ours by the function the planner keeps and prunes by, asked of what the cluster lists, so a monitor the
+        // planner would keep is one this hands over to, and one it would not is not.
+        return ScrapeMonitors.ScrapeMonitorIdentity.Stands(
+            await EngineMonitorOnCluster.ListAsync(client, ours.Identity.Kind, ours.Identity.Namespace, ct),
+            ours, client.ClusterId);
+    }
+
+    /// <summary>The one line of <c>spec.monitoring</c> both Cluster builders write.</summary>
+    private static string PodMonitorLine(bool enginesPodMonitorStands)
+        => enginesPodMonitorStands ? "    enablePodMonitor: false" : "    enablePodMonitor: true";
 
     // ──────── Live storage ────────
 
@@ -281,6 +326,10 @@ public class CnpgService(
                 .FirstOrDefaultAsync(s => s.Id == storageLinkId.Value && s.TenantId == tenantId, ct);
         }
 
+        // Before the record: a question the cluster cannot answer must not leave one behind.
+        bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(
+            await ClusterFor(tenantId, kubernetesClusterId, ct), name, ns, ct);
+
         // Create the database record.
 
         CnpgCluster cnpgCluster = new()
@@ -315,7 +364,7 @@ public class CnpgService(
 
         // Generate and apply the CNPG Cluster manifest.
 
-        string manifest = BuildClusterManifest(cnpgCluster, storageLink, s3SecretName);
+        string manifest = BuildClusterManifest(cnpgCluster, storageLink, s3SecretName, enginesPodMonitorStands);
 
         // Ensure the target namespace exists before applying any resources.
 
@@ -664,6 +713,7 @@ public class CnpgService(
         }
 
         Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+        bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(client, cnpg.Name, cnpg.Namespace, ct);
 
         // The manifest carries spec.storage.size; a stale stored size would ask CNPG to shrink.
         await AlignStorageSizeAsync(db, cnpg, client, ct);
@@ -677,7 +727,7 @@ public class CnpgService(
         // the old primary—zero downtime for clients using the -rw service endpoint.
 
         string s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null!;
-        string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName);
+        string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName, enginesPodMonitorStands);
 
         await client.ApplyManifestAsync(manifest, ct);
     }
@@ -689,40 +739,6 @@ public class CnpgService(
     /// (replicas first, then a switchover before recreating the old primary), which also lets
     /// the scheduler re-place pods according to the cluster's anti-affinity.
     /// </summary>
-    /// <summary>
-    /// Re-applies the Cluster manifest exactly as EntKube would build it today, so a database
-    /// created by an older version picks up spec changes made since — most visibly
-    /// <c>spec.monitoring.enablePodMonitor</c>, without which nothing scrapes its metrics.
-    ///
-    /// Nothing else about the database changes: the manifest is rebuilt from the same stored
-    /// settings, so the change gate's dry-run shows only what the current code adds. Until this
-    /// existed the only ways to re-apply were incidental — running a backup, or an upgrade — and
-    /// neither is an obvious thing to reach for when metrics are missing.
-    /// </summary>
-    public async Task ReapplyClusterSpecAsync(
-        Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
-    {
-        using DataServicesDbContext db = dbFactory.CreateDbContext();
-
-        CnpgCluster cnpg = await db.CnpgClusters
-            .Include(c => c.KubernetesCluster)
-            .Include(c => c.StorageLink)
-            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
-            ?? throw new InvalidOperationException("CNPG cluster not found.");
-
-        // ClusterFor refuses for the same reason the explicit guard here used to, and says so.
-        Clusters.IClusterClient reapplyTo = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
-
-        await AlignStorageSizeAsync(db, cnpg, reapplyTo, ct);
-
-        // Same secret-name convention as every other apply path, so the rebuilt manifest matches
-        // the live spec everywhere except the parts this version of EntKube changed.
-        string? s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null;
-
-        await reapplyTo.ApplyManifestAsync(
-            BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
-    }
-
     public async Task RestartClusterAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
@@ -786,6 +802,18 @@ public class CnpgService(
                 $"Target version ({targetVersion}) must be a higher major version than current ({source.PostgresVersion}).");
         }
 
+        // Before the first write: this upgrade deletes the source, and must not get that far for a
+        // replacement it cannot write. Two names, two answers: the engine's monitor for the source selects the
+        // source's pods only, so the temporary cluster keeps the operator's until it is renamed back. The source's
+        // answer is asked here so an unknown stops the upgrade before it deletes anything, and again just before
+        // the final cluster is written (below).
+        string tempName = $"{source.Name}-v{targetMajor}";
+        Clusters.IClusterClient upgradeClient = await ClusterFor(tenantId, source.KubernetesClusterId, ct);
+        bool enginesTempPodMonitorStands = await EnginesPodMonitorStandsAsync(
+            upgradeClient, tempName, source.Namespace, ct);
+        bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(
+            upgradeClient, source.Name, source.Namespace, ct);
+
         // The new cluster is created with the source's size, and must hold all of its data.
         await AlignStorageSizeAsync(
             db, source, await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
@@ -804,8 +832,6 @@ public class CnpgService(
 
         // Step 2: Create the new cluster with a temporary name, targeting the new major version.
         // It bootstraps from the source's Barman backup (latest point in time).
-
-        string tempName = $"{source.Name}-v{targetMajor}";
 
         CnpgCluster upgraded = new()
         {
@@ -832,7 +858,8 @@ public class CnpgService(
 
         // Use current time as recovery target — we want the very latest state.
 
-        string restoreManifest = BuildRestoreManifest(upgraded, source, DateTime.UtcNow, s3SecretName);
+        string restoreManifest = BuildRestoreManifest(
+            upgraded, source, DateTime.UtcNow, s3SecretName, enginesTempPodMonitorStands);
         restoreManifest += "\n---\n" + BuildObjectStoreManifest(tempName, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays);
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(restoreManifest, ct);
 
@@ -865,8 +892,32 @@ public class CnpgService(
         upgraded.Status = CnpgClusterStatus.Running;
         await db.SaveChangesAsync(ct);
 
+        // Asked again, now: the answer above is as old as the restore. In between, the database had no row under
+        // its own name, so a planner pass may have pruned ours (or, once the row was back, made it). The final
+        // cluster is written with what stands as it is written.
+        //
+        // If the cluster cannot answer now, the source and the temporary cluster are both gone already, and failing
+        // here would leave no database at all. So the answer from before the first write is used: a real read, at
+        // worst one pass old, and either way the planner's next pass ends it (it makes ours where nothing scrapes,
+        // and prunes ours where the operator's is scraped).
+        try
+        {
+            enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(
+                await ClusterFor(tenantId, source.KubernetesClusterId, ct), source.Name, source.Namespace, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Kept: enginesPodMonitorStands as read before the first write. Said, because the database is then
+            // written on an answer that may be a pass old.
+            log.LogWarning(ex,
+                "Major upgrade of {Cluster} in {Namespace}: whether the monitor engine's own PodMonitor stands could "
+                + "not be asked again before the final cluster was written, so the answer from before the upgrade "
+                + "began was used (enablePodMonitor: {EnablePodMonitor}). The next monitor pass corrects either way.",
+                source.Name, source.Namespace, !enginesPodMonitorStands);
+        }
+
         string s3SecretFinal = $"{source.Name}-s3-credentials";
-        string finalManifest = BuildClusterManifest(upgraded, source.StorageLink, s3SecretFinal);
+        string finalManifest = BuildClusterManifest(upgraded, source.StorageLink, s3SecretFinal, enginesPodMonitorStands);
         finalManifest += "\n---\n" + BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, s3SecretFinal, source.RetentionDays);
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(finalManifest, ct);
 
@@ -1062,11 +1113,14 @@ public class CnpgService(
 
         try
         {
+            // Inside the try: when the cluster cannot say, the re-apply is skipped and the backup still runs.
+            bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(client, cnpg.Name, cnpg.Namespace, ct);
+
             await AlignStorageSizeAsync(db, cnpg, client, ct);
 
             string s3SecretName = $"{cnpg.Name}-s3-credentials";
             await client.ApplyManifestAsync(
-                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
+                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName, enginesPodMonitorStands), ct);
         }
         catch { /* non-fatal */ }
 
@@ -1122,6 +1176,7 @@ public class CnpgService(
         }
 
         Clusters.IClusterClient client = await ClusterFor(tenantId, source.KubernetesClusterId, ct);
+        bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(client, newClusterName, source.Namespace, ct);
 
         // The restored cluster is sized from the source, and a stale 50Gi cannot hold 300GB.
         await AlignStorageSizeAsync(db, source, client, ct);
@@ -1178,7 +1233,8 @@ public class CnpgService(
         // only evaluated on initial cluster creation, so this must be applied to a name
         // that has no existing Cluster CR or PVCs in K8s.
         await client.ApplyManifestAsync(
-            BuildRestoreManifest(restored, source, targetTime, s3SecretName, barmanBackupId: barmanBackupId), ct);
+            BuildRestoreManifest(
+                restored, source, targetTime, s3SecretName, enginesPodMonitorStands, barmanBackupId: barmanBackupId), ct);
 
         return restored;
     }
@@ -1205,6 +1261,10 @@ public class CnpgService(
             throw new InvalidOperationException(
                 "Cluster has no backup storage configured. Cannot restore without backups.");
         }
+
+        // Before the delete too: a cluster deleted for a recovery that cannot be written stays deleted.
+        bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(
+            await ClusterFor(tenantId, source.KubernetesClusterId, ct), source.Name, source.Namespace, ct);
 
         // ⚠️ Read the real size BEFORE the delete. Deleting the Cluster resource takes its claims
         // with it, and the recovery recreates them from StorageSize — so a stale value here
@@ -1242,7 +1302,8 @@ public class CnpgService(
         // Use "backup-source" as the external cluster alias so the manifest does not
         // reference the cluster by its own name (CNPG rejects self-referential bootstraps).
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(
-            BuildRestoreManifest(source, source, targetTime, s3SecretName, sourceAlias: "backup-source"),
+            BuildRestoreManifest(
+                source, source, targetTime, s3SecretName, enginesPodMonitorStands, sourceAlias: "backup-source"),
              ct);
 
         return source;
@@ -2085,8 +2146,14 @@ public class CnpgService(
             Clusters.IClusterClient client =
                 await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
+            // The question the re-apply asks, of the same cluster and the same name, or the banner reports a
+            // difference the re-apply would not make (and invites it). Unanswerable is Unknown, below.
+            bool enginesPodMonitorStands =
+                await EnginesPodMonitorStandsAsync(client, cluster.Name, cluster.Namespace, ct);
+
             Clusters.ManifestDiff diff = await client.DiffManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"),
+                BuildClusterManifest(
+                    cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials", enginesPodMonitorStands),
                 cluster.Namespace, ct);
 
             detail.ConfigurationDrift = diff.Outcome;
@@ -2133,11 +2200,14 @@ public class CnpgService(
         {
             Clusters.IClusterClient client =
                 await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+            // The drift check's question, asked the same way (see DetectManifestDriftAsync).
+            bool enginesPodMonitorStands = await EnginesPodMonitorStandsAsync(client, cluster.Name, cluster.Namespace, ct);
 
             await AlignStorageSizeAsync(db, cluster, client, ct);
 
             string output = await client.ApplyManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"), ct);
+                BuildClusterManifest(
+                    cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials", enginesPodMonitorStands), ct);
 
             if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule))
             {
@@ -2480,7 +2550,12 @@ public class CnpgService(
     /// Builds the CNPG Cluster CRD manifest. Includes Barman backup configuration
     /// if a storage link is configured.
     /// </summary>
-    private static string BuildClusterManifest(CnpgCluster cnpg, StorageLink? storageLink, string? s3SecretName)
+    /// <param name="enginesPodMonitorStands">
+    /// <see cref="EnginesPodMonitorStandsAsync"/>'s answer, read by the caller so this stays a pure function
+    /// of its inputs: the drift check diffs against it, and must see what the re-apply would write.
+    /// </param>
+    private static string BuildClusterManifest(
+        CnpgCluster cnpg, StorageLink? storageLink, string? s3SecretName, bool enginesPodMonitorStands)
     {
         StringBuilder sb = new();
 
@@ -2511,11 +2586,17 @@ public class CnpgService(
         sb.AppendLine("  primaryUpdateMethod: switchover");
         sb.AppendLine("  switchoverDelay: 600");
 
-        // Every CNPG instance already serves metrics on :9187, but nothing scrapes them until
-        // the operator is told to create a PodMonitor for the cluster. Without this the database
-        // monitoring panel has no cnpg_* series to query and simply shows nothing.
+        // Where the monitor engine's own PodMonitor for this database already stands, the operator's own is
+        // off: two monitors on one pod would double every sum. Everywhere else it stays on, as it was before
+        // the engine existed, and where EntKube's Prometheus selects it the engine never makes ours. See
+        // EnginesPodMonitorStandsAsync.
+        //
+        // Written out, never left out: a client-side apply that drops a block the last apply had
+        // deletes all of spec.monitoring, a user's tls settings with it, and losing those rolls the
+        // database. With the field present only the field changes: the operator removes its
+        // PodMonitor, and ours, which is already there, goes on alone.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: true");
+        sb.AppendLine(PodMonitorLine(enginesPodMonitorStands));
 
         // Synchronous replication requires at least 2 instances. For HA clusters,
         // we guarantee one synchronous replica so no committed transactions are lost.
@@ -2656,7 +2737,7 @@ public class CnpgService(
     /// </summary>
     private static string BuildRestoreManifest(
         CnpgCluster restored, CnpgCluster source, DateTime? targetTime, string s3SecretName,
-        string? sourceAlias = null, string? barmanBackupId = null)
+        bool enginesPodMonitorStands, string? sourceAlias = null, string? barmanBackupId = null)
     {
         // Always use externalClusters — the barman-cloud plugin requires an explicit
         // ObjectStore reference to authenticate against the source backup archive.
@@ -2674,10 +2755,10 @@ public class CnpgService(
         sb.AppendLine("spec:");
         sb.AppendLine($"  instances: {restored.Instances}");
         sb.AppendLine($"  imageName: ghcr.io/cloudnative-pg/postgresql:{restored.PostgresVersion}");
-        // Same PodMonitor opt-in as a freshly created cluster — a restored cluster should not
-        // come back monitoring-blind.
+        // As in BuildClusterManifest: off only where the engine's monitor stands, and the block is written
+        // so that a later apply changes this field and not the whole of spec.monitoring.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: true");
+        sb.AppendLine(PodMonitorLine(enginesPodMonitorStands));
         sb.AppendLine("  postgresql:");
         sb.AppendLine("    parameters:");
         sb.AppendLine("      archive_timeout: \"5min\"");
@@ -2849,4 +2930,136 @@ public class CnpgService(
 
         return [.. pods.OrderBy(p => p.Role == "primary" ? 0 : 1).ThenBy(p => p.Name)];
     }
+}
+
+/// <summary>
+/// Whether the monitor engine's own monitor for one target stands on a cluster right now: the one question that
+/// decides whether an operator's or a chart's own monitor (CNPG's PodMonitor, Keycloak's ServiceMonitor) may be
+/// switched off. Asked by the callers, read through the cluster-client seam, so the builders stay pure.
+///
+/// <para><b>Why "ours stands" and not "EntKube's Prometheus serves the cluster".</b> The planner makes ours only
+/// where nothing else scrapes the target. Where EntKube's Prometheus selects the operator's monitor, it sees the
+/// target covered and never makes ours, so the operator's stays on and goes on scraping. Where it does not select
+/// it (an older kube-prometheus-stack that selects by its release label), the planner makes ours, and the next
+/// re-apply (the drift banner, a backup, an upgrade) switches the operator's off; an unselected monitor beside ours
+/// doubles nothing in the meantime. Where the planner makes nothing at all (no catalog Prometheus, a sharded or
+/// ambiguous one, a selector it cannot evaluate), ours does not stand and a working monitor is never removed. And
+/// where ours outlives the catalog's Prometheus (kube-prometheus-stack uninstalling, its row removed), ours still
+/// stands, so the operator's is not switched back on beside it.</para>
+///
+/// <para><b>Ours is the planner's word.</b> The engine's name for that target, in the target's namespace, and ours by
+/// the rule the planner prunes and keeps by. This class only reads (<see cref="KindIsServedAsync"/>,
+/// <see cref="ListAsync"/>); each caller decides by asking <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/> of
+/// what was listed, the very function the planner's own rule is, so the handover can never call a monitor ours that
+/// the planner would not keep, or the other way round. That takes in the planner's one exception too: an unlabelled
+/// monitor that one the engine wants takes over (<see cref="ScrapeMonitors.ScrapeTargetCatalog"/> marks only
+/// RabbitMQ's so, which has no handover; were CNPG's or Keycloak's ever marked, handing over to it keeps a double
+/// from following, at the price of a gap of one pass where the planner then prunes it).</para>
+///
+/// <para><b>Unknown is an exception.</b> A cluster that does not serve the monitor kind at all is an answer (no CRD,
+/// so nothing of ours can stand). Every other failed or unreadable answer throws, and the caller's action fails whole
+/// rather than switching a monitor on or off on a guess.</para>
+/// </summary>
+public static class EngineMonitorOnCluster
+{
+    private const string CrdResource = "customresourcedefinitions.apiextensions.k8s.io";
+
+    /// <summary>
+    /// The engine's monitor for one CNPG cluster, named as the engine's catalog names it. Only the name and the
+    /// namespace go into it; the ids of the summary are not part of the answer.
+    /// </summary>
+    public static ScrapeMonitors.MonitorSpec ForPostgres(string name, string ns)
+        => ScrapeMonitors.ScrapeMonitorIdentity.MonitorsFor(
+                new EntKube.Contracts.DataServices.ManagedServiceSummary(
+                    Guid.Empty, Guid.Empty, Guid.Empty, EntKube.Contracts.DataServices.ManagedServiceKind.Postgres,
+                    name, ns, EntKube.Contracts.DataServices.ManagedServiceStatus.Running,
+                    IsOperatorManaged: true, IsInCluster: true, HasExporter: false))
+            .Single();
+
+    /// <summary>
+    /// The engine's monitor for one installed component, as the engine's catalog gives it; null where the engine
+    /// makes none for it (no namespace recorded, a chart it does not monitor).
+    /// </summary>
+    /// <remarks>Whatever its status: the name does not depend on it, and an apply runs while it is Installing.</remarks>
+    public static ScrapeMonitors.MonitorSpec? ForComponent(EntKube.Contracts.Catalog.InstalledComponent component)
+        => ScrapeMonitors.ScrapeMonitorIdentity.MonitorsFor(component).FirstOrDefault();
+
+    /// <summary>The resource kubectl names a monitor kind by.</summary>
+    public static string Resource(ScrapeMonitors.MonitorKind kind)
+        => kind == ScrapeMonitors.MonitorKind.PodMonitor
+            ? "podmonitors.monitoring.coreos.com"
+            : "servicemonitors.monitoring.coreos.com";
+
+    /// <summary>Whether the cluster serves the Prometheus Operator's kind at all. Absent is false; a failed read throws.</summary>
+    public static Task<bool> KindIsServedAsync(
+        Clusters.IClusterClient cluster, ScrapeMonitors.MonitorKind kind, CancellationToken ct)
+        => cluster.ResourceExistsAsync(CrdResource, Resource(kind), "", ct);
+
+    /// <summary>
+    /// Every monitor of <paramref name="kind"/> in <paramref name="ns"/>, whoever wrote it, with its name, labels and
+    /// spec as the API server lists them. Nothing is filtered here: which of them is ours is
+    /// <see cref="ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>, asked of the answer. Ask <see cref="KindIsServedAsync"/> first; a list of a kind the cluster does not serve
+    /// is a failed read like any other, and throws.
+    /// </summary>
+    public static async Task<IReadOnlyList<ScrapeMonitors.LiveMonitor>> ListAsync(
+        Clusters.IClusterClient cluster, ScrapeMonitors.MonitorKind kind, string ns, CancellationToken ct)
+    {
+        string json = await cluster.GetJsonAsync(Resource(kind), ns, "", ct);
+
+        try
+        {
+            System.Text.Json.Nodes.JsonArray items =
+                System.Text.Json.Nodes.JsonNode.Parse(json ?? "")?["items"] as System.Text.Json.Nodes.JsonArray
+                ?? throw new FormatException("the answer holds no list of monitors");
+
+            return [.. items.Select(item => Listed(kind, item))];
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or FormatException or InvalidOperationException)
+        {
+            throw new InvalidOperationException(
+                $"The {Resource(kind)} in {ns} on {cluster.ClusterName} could not be read: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>One listed monitor. Anything that is not the shape every monitor has is an answer that cannot be read.</summary>
+    private static ScrapeMonitors.LiveMonitor Listed(ScrapeMonitors.MonitorKind kind, System.Text.Json.Nodes.JsonNode? item)
+    {
+        if (item?["metadata"] is not System.Text.Json.Nodes.JsonObject meta
+            || Text(meta["name"]) is not { Length: > 0 } name
+            || Text(meta["namespace"]) is not { Length: > 0 } itsNamespace)
+        {
+            throw new FormatException("a monitor in the list has no name or namespace");
+        }
+
+        Dictionary<string, string> labels = new(StringComparer.Ordinal);
+        switch (meta["labels"])
+        {
+            case null:
+                break;
+            case System.Text.Json.Nodes.JsonObject pairs:
+                foreach ((string key, System.Text.Json.Nodes.JsonNode? value) in pairs)
+                {
+                    labels[key] = Text(value) ?? throw new FormatException($"the label {key} of {name} is not a text");
+                }
+                break;
+            default:
+                throw new FormatException($"the labels of {name} are not a map");
+        }
+
+        // The spec, for the one rule's takeover of an unlabelled monitor, which compares what it selects.
+        System.Text.Json.Nodes.JsonObject spec = item["spec"] switch
+        {
+            null => [],
+            System.Text.Json.Nodes.JsonObject given => (System.Text.Json.Nodes.JsonObject)given.DeepClone(),
+            _ => throw new FormatException($"the spec of {name} is not an object"),
+        };
+
+        return new ScrapeMonitors.LiveMonitor(
+            new ScrapeMonitors.MonitorIdentity(kind, itsNamespace, name), labels, new Dictionary<string, string>(), spec);
+    }
+
+    private static string? Text(System.Text.Json.Nodes.JsonNode? node)
+        => node is System.Text.Json.Nodes.JsonValue value && value.GetValueKind() == System.Text.Json.JsonValueKind.String
+            ? value.GetValue<string>()
+            : null;
 }

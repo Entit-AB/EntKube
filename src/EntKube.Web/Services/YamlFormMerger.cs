@@ -392,11 +392,19 @@ public static class YamlFormMerger
         using StringWriter writer = new();
         stream.Save(writer, assignAnchors: false);
 
-        // YamlDotNet adds "..." at the end and "---" at the start. Strip them
+        // YamlDotNet adds "..." at the end, and may add "---" at the start. Strip them
         // for cleaner output that matches what users expect in Helm values.
+        //
+        // ⚠️ The start marker only where it IS the start. Deleting every "---" at the end of a line also
+        // took the dashes off "-----BEGIN CERTIFICATE-----" and the separators out of a text holding
+        // several manifests, so saving a form broke the certificate that was in the values.
 
         string output = writer.ToString();
-        output = output.Replace("---\r\n", "").Replace("---\n", "");
+        if (output.StartsWith("---\r\n", StringComparison.Ordinal) || output.StartsWith("---\n", StringComparison.Ordinal))
+        {
+            output = output[(output.IndexOf('\n') + 1)..];
+        }
+
         output = output.TrimEnd('\r', '\n', ' ');
 
         if (output.EndsWith("..."))
@@ -1123,6 +1131,193 @@ public static class YamlFormMerger
                 && TryGetValue(y, key, out YamlNode? other) && SameYaml(kv.Value, other!)),
         _ => false,
     };
+
+    /// <summary>
+    /// Turns off the ServiceMonitor the Keycloak chart makes, where it was EntKube that turned it on.
+    ///
+    /// <para><b>Why.</b> From 2026-08-20 the catalog switched it on for every install. The chart renders it
+    /// without asking whether the cluster knows the kind, so on a cluster without the Prometheus Operator helm
+    /// refused the whole release ("no matches for kind ServiceMonitor") and Keycloak did not install at all.
+    /// Where the monitor engine's own ServiceMonitor for this Keycloak stands, a second one reading the same
+    /// pods would double every number on the Keycloak panel.</para>
+    ///
+    /// <para><b>Only there.</b> The caller reads the cluster first and calls this in those two cases only: no
+    /// ServiceMonitor kind, or the engine's own monitor already standing. Everywhere else a Prometheus may be
+    /// scraping the chart's, nothing replaces it, and this is not called.</para>
+    ///
+    /// <para><b>Only the catalog's own block</b>, which was <c>enabled: true</c> with nothing beside it. Any
+    /// other key in it — an interval, a label — means an operator made it theirs, and their monitor stays;
+    /// EntKube sees it and makes none.</para>
+    ///
+    /// <para>Off in words rather than taken out: an absent key is one the catalog fill-in may write into. Only
+    /// the ServiceMonitor object differs between the two renders, so nothing restarts.</para>
+    /// </summary>
+    public static string TurnOffCatalogKeycloakMonitor(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        if (CatalogKeycloakMonitor(root) is not { } monitor) return yaml;
+
+        SetScalar(monitor, "enabled", "false");
+        return SerializeKeepingTheLastNewline(root);
+    }
+
+    /// <summary>
+    /// Whether these values carry the block <see cref="TurnOffCatalogKeycloakMonitor"/> turns off: the
+    /// catalog's own <c>serviceMonitor: {enabled: true}</c>, nothing beside it. Lets the caller ask the
+    /// cluster only where the answer can change something.
+    /// </summary>
+    public static bool CarriesCatalogKeycloakMonitor(string yaml)
+        => !string.IsNullOrWhiteSpace(yaml) && CatalogKeycloakMonitor(ParseOrCreateRoot(yaml)) is not null;
+
+    private static YamlMappingNode? CatalogKeycloakMonitor(YamlMappingNode root)
+        => TryGetMapping(root, "serviceMonitor", out YamlMappingNode? monitor)
+           && monitor!.Children.Count == 1
+           && IsTrue(monitor, "enabled")
+            ? monitor
+            : null;
+
+    /// <summary>
+    /// The port a SeaweedFS server answers Prometheus on when its block sets no <c>metricsPort</c> (the chart's
+    /// default for master, volume, filer and S3 gateway alike).
+    /// </summary>
+    private const int SeaweedFsDefaultMetricsPort = 9327;
+
+    /// <summary>The chart's servers, each with a <c>metricsPort</c> of its own.</summary>
+    private static readonly string[] SeaweedFsServers = ["master", "volume", "filer", "s3"];
+
+    /// <summary>
+    /// Lets this cluster's Prometheus through SeaweedFS's NetworkPolicies, to the metrics ports and nothing else.
+    ///
+    /// <para><b>Why.</b> The catalog turns the chart's policies on, because the master, filer and volume
+    /// servers are open to anyone who can reach them. They admit the release's own pods and the S3 port — and
+    /// so not Prometheus, whose targets would simply be down. The chart's own answer is a rule in
+    /// <c>networkPolicy.extraIngress</c>, which it puts in every server's policy.</para>
+    ///
+    /// <para><b>Prometheus's pods only, in Prometheus's namespace only.</b> Go's pprof is served on the same
+    /// port, without a password. Both selectors therefore sit in ONE <c>from</c> entry, where they both have
+    /// to match; as two entries either would do.</para>
+    ///
+    /// <para><b>The ports the servers are configured with.</b> The monitor engine finds each server's port by
+    /// its name, wherever that server's <c>metricsPort</c> put it, so the rule opens the same numbers: each
+    /// server's <c>metricsPort</c>, 9327 where it sets none, each number once. A server switched off
+    /// (<c>enabled: false</c>) adds none. A <c>metricsPort</c> that is not a port number adds none either: what
+    /// it renders to cannot be told, and 9327 may be something else on that server. The chart puts the one
+    /// rule into every server's policy, so a port one server uses is opened to Prometheus's pods on all of
+    /// them; to those pods only.</para>
+    ///
+    /// <para><b>Never a first policy.</b> Only where <c>networkPolicy.enabled</c> is already true. Where it is
+    /// off every port is reachable, and the first policy to select these pods would cut off S3.</para>
+    ///
+    /// <para><b>One rule, appended once.</b> The rest of the list is the operator's and is neither changed nor
+    /// reordered, and a list that already holds this rule is left as it is. There is no counterpart that takes
+    /// the rule away: it is only ever in the copy handed to helm, so the first apply after Prometheus is gone
+    /// renders without it. A rule found in the STORED values was put there by someone, nothing tells it from
+    /// the operator's own, and with Prometheus gone no pod is left for it to admit.</para>
+    /// </summary>
+    /// <param name="prometheusNamespace">
+    /// Where the cluster's Prometheus runs. Blank means unknown, and then nothing is opened: a guessed
+    /// namespace would let somebody else's pods in.
+    /// </param>
+    public static string LetPrometheusReachSeaweedFs(string yaml, string? prometheusNamespace)
+    {
+        if (string.IsNullOrWhiteSpace(yaml) || string.IsNullOrWhiteSpace(prometheusNamespace)) return yaml;
+
+        YamlMappingNode root = ParseOrCreateRoot(yaml);
+        if (!TryGetMapping(root, "networkPolicy", out YamlMappingNode? policy) || !IsTrue(policy!, "enabled")) return yaml;
+
+        YamlSequenceNode rules = new();
+        if (TryGetValue(policy!, "extraIngress", out YamlNode? existing) && !IsNull(existing!))
+        {
+            // Not a list: whatever was meant by it, replacing it is not ours to do.
+            if (existing is not YamlSequenceNode list) return yaml;
+            rules = list;
+        }
+
+        // ⚠️ No port, no rule. A rule whose ports list is empty admits Prometheus to EVERY port, gRPC included.
+        IReadOnlyList<int> ports = SeaweedFsMetricsPorts(root);
+        if (ports.Count == 0) return yaml;
+
+        YamlMappingNode rule = SeaweedFsMetricsRule(prometheusNamespace.Trim(), ports);
+        if (rules.Children.Any(stored => SameYaml(stored, rule))) return yaml;
+
+        // A new list rather than an addition to the old, so one written as `[]` is not written back inline.
+        YamlScalarNode key = policy!.Children.Keys.OfType<YamlScalarNode>().FirstOrDefault(k => k.Value == "extraIngress")
+            ?? new YamlScalarNode("extraIngress");
+        policy.Children[key] = new YamlSequenceNode(rules.Children.Append(rule));
+
+        return SerializeKeepingTheLastNewline(root);
+    }
+
+    /// <summary>
+    /// The rule itself. Built node by node: text put together and parsed would turn an unreadable namespace
+    /// into an empty rule, and an empty ingress rule admits everyone.
+    /// </summary>
+    private static YamlMappingNode SeaweedFsMetricsRule(string prometheusNamespace, IReadOnlyList<int> ports)
+    {
+        // Quoted, because a namespace may be called 2026 and a label value that is a number is refused.
+        YamlMappingNode fromPrometheus = new(
+            new YamlScalarNode("namespaceSelector"), MatchLabel("kubernetes.io/metadata.name",
+                new YamlScalarNode(prometheusNamespace) { Style = YamlDotNet.Core.ScalarStyle.DoubleQuoted }),
+            new YamlScalarNode("podSelector"), MatchLabel("app.kubernetes.io/name", new YamlScalarNode("prometheus")));
+
+        IEnumerable<YamlMappingNode> metricsPorts = ports.Select(port => new YamlMappingNode(
+            new YamlScalarNode("protocol"), new YamlScalarNode("TCP"),
+            new YamlScalarNode("port"), new YamlScalarNode(port.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+
+        return new YamlMappingNode(
+            new YamlScalarNode("from"), new YamlSequenceNode(fromPrometheus),
+            new YamlScalarNode("ports"), new YamlSequenceNode(metricsPorts));
+
+        static YamlMappingNode MatchLabel(string label, YamlScalarNode value)
+            => new(new YamlScalarNode("matchLabels"), new YamlMappingNode(new YamlScalarNode(label), value));
+    }
+
+    /// <summary>
+    /// Each running server's <c>metricsPort</c>, distinct and in order: 9327 where a server sets none, nothing
+    /// for a server switched off, and nothing for a value that is not a port number.
+    /// </summary>
+    private static IReadOnlyList<int> SeaweedFsMetricsPorts(YamlMappingNode root)
+    {
+        SortedSet<int> ports = [];
+        foreach (string server in SeaweedFsServers)
+        {
+            TryGetMapping(root, server, out YamlMappingNode? block);
+            if (block is not null && IsFalse(block, "enabled")) continue;
+
+            if (block is null || !TryGetValue(block, "metricsPort", out YamlNode? value) || IsNull(value!))
+            {
+                ports.Add(SeaweedFsDefaultMetricsPort);
+                continue;
+            }
+
+            if (value is YamlScalarNode { Value: { } text }
+                && int.TryParse(text, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int port)
+                && port is >= 1 and <= 65535)
+            {
+                ports.Add(port);
+            }
+        }
+        return [.. ports];
+    }
+
+    private static bool IsFalse(YamlMappingNode parent, string key)
+        => TryGetValue(parent, key, out YamlNode? value)
+           && value is YamlScalarNode scalar
+           && string.Equals(scalar.Value, "false", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A key with nothing after it, or YAML's word for nothing: what helm reads as absent.</summary>
+    private static bool IsNull(YamlNode node)
+        => node is YamlScalarNode { Style: YamlDotNet.Core.ScalarStyle.Plain, Value: null or "" or "~" or "null" or "Null" or "NULL" };
+
+    /// <summary>
+    /// <see cref="SerializeToYaml"/> with the document's last newline left on. Without it, a text block that
+    /// happens to come last loses ITS newline, and a chart that hashes that text into a pod template — the
+    /// Keycloak chart does, for its startup scripts — would restart the pods over it.
+    /// </summary>
+    private static string SerializeKeepingTheLastNewline(YamlMappingNode root) => SerializeToYaml(root) + "\n";
 
     private static bool TryGetMapping(YamlMappingNode parent, string key, out YamlMappingNode? mapping)
     {

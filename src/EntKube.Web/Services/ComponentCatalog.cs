@@ -2665,7 +2665,7 @@ public static class ComponentCatalog
         {
             Key = "seaweedfs",
             DisplayName = "SeaweedFS",
-            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. NetworkPolicies admit only the S3 port from outside the release; the master, filer and volume servers (HTTP and gRPC) are reachable only by the release's own pods, which needs a CNI that enforces NetworkPolicy. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
+            Description = "S3-compatible object storage (Apache-2.0) for application data, backups and artifacts. Runs a master, a volume server, a filer and an S3 gateway; with the default release name the gateway is seaweedfs-s3.<namespace>:8333 and its admin keys are in the seaweedfs-s3-secret Secret, which the chart keeps on uninstall. NetworkPolicies admit only the S3 port from outside the release (and, where EntKube runs Prometheus on the cluster, Prometheus to the metrics port); the master, filer and volume servers (HTTP and gRPC) are reachable only by the release's own pods, which needs a CNI that enforces NetworkPolicy. One per cluster under the default release name, because the chart's ClusterRole name is not per namespace. Replaces MinIO, whose server image is no longer published.",
             Icon = "bi-bucket",
             Category = "Storage",
             HelmRepoUrl = "https://seaweedfs.github.io/seaweedfs/helm",
@@ -2703,6 +2703,11 @@ public static class ComponentCatalog
                 # So the release's NetworkPolicies admit the S3 port (8333) from anywhere and
                 # everything else only from the release's own pods. On a CNI that does not enforce
                 # NetworkPolicy (flannel, for one) this protection is absent.
+                #
+                # Prometheus has to reach the metrics port (each server's metricsPort, 9327 unless
+                # set). Where EntKube runs one on this cluster, each apply adds that rule for its
+                # pods alone; do not open the port to everyone, because Go's pprof is served on it
+                # without a password.
                 networkPolicy:
                   enabled: true
                   extraIngress:
@@ -3251,14 +3256,17 @@ public static class ComponentCatalog
                   - start
 
                 # Keycloak serves Prometheus metrics and health probes on its management
-                # interface (port 9000, named http-internal by the chart). The chart turns both
-                # on by default, but leaves serviceMonitor off — so without this block the
-                # metrics exist on the pod and nothing ever scrapes them.
+                # interface (port 9000, named http-internal by the chart). The chart's
+                # serviceMonitor is deliberately not turned on: it fails the install on a cluster
+                # without the Prometheus Operator, and where EntKube's own kube-prometheus-stack
+                # serves the cluster EntKube makes the monitor itself. Where some other Prometheus
+                # should scrape Keycloak, turn the chart's on yourself. A bare enabled: true is
+                # turned off at apply only where the cluster has no ServiceMonitor kind, or where
+                # EntKube's own monitor for this Keycloak already runs; give the block a setting of
+                # your own (an interval, say) beside it and EntKube leaves it alone everywhere.
                 metrics:
                   enabled: true
                 health:
-                  enabled: true
-                serviceMonitor:
                   enabled: true
 
                 # HTTP configuration

@@ -1,9 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
+@using EntKube.Web.Services.ScrapeMonitors
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
 @inject RabbitMQService RabbitMQService
+@inject IScrapeMonitors Monitors
 @inject IDbContextFactory<DataServicesDbContext> DbFactory
 
 @* ═══════════════════════════════════════════════════════════════════════════
@@ -61,6 +63,7 @@ else
             <div class="card-header py-2 d-flex align-items-center gap-2 flex-wrap">
                 <span class="bi bi-collection-fill text-success"></span>
                 <strong>@b.Name</strong>
+                <span class="text-muted small font-monospace">@b.Namespace</span>
 
                 @if (m is not null && m.HasData)
                 {
@@ -68,7 +71,7 @@ else
                     {
                         <span class="badge bg-warning text-dark">@w</span>
                     }
-                    @if (Warnings(m).Count == 0)
+                    @if (Warnings(m).Count == 0 && m.UnansweredQueries is null)
                     {
                         <span class="badge bg-success-subtle text-success-emphasis">Healthy</span>
                     }
@@ -89,7 +92,19 @@ else
                     </div>
                 }
 
-                @if (m is null || !m.HasData)
+                @if (m is { HasData: true, UnansweredQueries: { } unanswered })
+                {
+                    <div class="alert alert-warning py-2 small mb-3">
+                        <span class="bi bi-exclamation-triangle me-1"></span>
+                        Some figures below are missing and read as zero. @unanswered
+                    </div>
+                }
+
+                @if (m is null)
+                {
+                    @* The query above failed. That says nothing about whether the broker is scraped. *@
+                }
+                else if (!m.HasData)
                 {
                     <div class="alert alert-secondary py-2 small mb-3">
                         <div class="fw-semibold mb-1">
@@ -99,27 +114,55 @@ else
                         <div class="text-muted">
                             RabbitMQ exposes its Prometheus plugin on port 15692, but nothing scrapes it
                             until a ServiceMonitor exists.
-                        </div>
-                        <div class="mt-2 d-flex gap-2 flex-wrap">
                             @if (b.IsOperatorManaged)
                             {
-                                <button class="btn btn-sm btn-primary"
-                                        @onclick="() => EnableScrapeAsync(b)" disabled="@b.Busy">
-                                    <span class="bi bi-toggles me-1"></span> Enable metrics
-                                </button>
+                                <text>
+                                    EntKube keeps one for every broker it installed on a cluster where it installed
+                                    Prometheus, and puts a missing one in place by itself every few minutes.
+                                </text>
                             }
+                            else
+                            {
+                                <text>
+                                    Its series are found by the cluster name RabbitMQ reports for itself, so they
+                                    appear here only if that name is "@b.Name".
+                                </text>
+                            }
+                        </div>
+                        @* The wording agrees with ScrapeDiagnostician.ApplyMonitors, the remedy the diagnosis below
+                           gives. A broker EntKube did not install gets no monitor from the engine, so no button. *@
+                        @if (b.IsOperatorManaged)
+                        {
+                            <div class="mt-2 d-flex align-items-center flex-wrap gap-2" data-apply>
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="() => ApplyMonitorsAsync(b)" disabled="@b.Busy">
+                                    <span class="bi bi-arrow-repeat me-1"></span>Apply monitors now
+                                </button>
+                                <span class="text-muted">
+                                    Applies the monitors of every database and component on this Kubernetes cluster,
+                                    not only this broker's. EntKube creates its own monitor, labelled the way this
+                                    Prometheus asks for, and none where another monitor already scrapes the broker.
+                                    It writes monitors and nothing else: the broker itself is not touched.
+                                </span>
+                                @if (b.Applied is { } said)
+                                {
+                                    <div class="w-100 text-@said.Tone">
+                                        <span class="bi @(said.Tone == "success" ? "bi-check-circle" : said.Tone == "danger" ? "bi-x-circle" : "bi-exclamation-triangle") me-1"></span>@said.Text
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <div class="mt-2 d-flex gap-2 flex-wrap">
                             <button class="btn btn-sm btn-outline-secondary"
                                     @onclick="() => DiagnoseAsync(b)" disabled="@b.Busy">
                                 <span class="bi bi-stethoscope me-1"></span> Why is this empty?
                             </button>
                         </div>
 
-                        @if (b.ScrapeJustEnabled)
+                        @if (b.DiagnosisError is not null)
                         {
-                            <div class="alert alert-success py-2 small mt-2 mb-0">
-                                <span class="bi bi-check-circle me-1"></span>
-                                ServiceMonitor created. Prometheus picks it up and completes a first
-                                scrape within about a minute — use Refresh above once it has.
+                            <div class="text-danger mt-2" data-diagnosis-error>
+                                <span class="bi bi-x-circle me-1"></span>@b.DiagnosisError
                             </div>
                         }
 
@@ -194,7 +237,13 @@ else
                                 <thead>
                                     <tr class="small text-muted">
                                         <th>Node</th><th>Memory</th><th>Disk free</th>
-                                        <th>File descriptors</th><th>Sockets</th><th></th>
+                                        <th>File descriptors</th>
+                                        @* RabbitMQ 4 exports no socket gauges. *@
+                                        @if (m.NodeMetrics.Any(n => n.ReportsSockets))
+                                        {
+                                            <th>Sockets</th>
+                                        }
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -211,7 +260,14 @@ else
                                                 </span>
                                             </td>
                                             <td>@Meter(n.FdUsedPercent, $"{n.OpenFds:N0} / {n.MaxFds:N0}")</td>
-                                            <td>@Meter(n.SocketUsedPercent, $"{n.OpenSockets:N0} / {n.MaxSockets:N0}")</td>
+                                            @if (n.ReportsSockets)
+                                            {
+                                                <td>@Meter(n.SocketUsedPercent, $"{n.OpenSockets:N0} / {n.MaxSockets:N0}")</td>
+                                            }
+                                            else if (m.NodeMetrics.Any(x => x.ReportsSockets))
+                                            {
+                                                <td class="text-muted small">not reported</td>
+                                            }
                                             <td>
                                                 @if (n.MemoryAlarm)
                                                 {
@@ -332,8 +388,12 @@ else
     {
         public required Guid Id { get; init; }
         public required string Name { get; init; }
+        public required string Namespace { get; init; }
         public required Guid TenantId { get; init; }
         public bool IsOperatorManaged { get; init; }
+
+        /// <summary>The StatefulSet of a broker EntKube did not install.</summary>
+        public required string StatefulSet { get; init; }
 
         public RabbitMQMetricsSummary? Metrics { get; set; }
         public string? Error { get; set; }
@@ -341,8 +401,15 @@ else
         public string? QueueError { get; set; }
         public List<ChartView> Charts { get; set; } = [];
         public ScrapeDiagnosis? Diagnosis { get; set; }
+
+        /// <summary>Why the diagnosis has no answer. Its own field: shown as "Prometheus query failed" it blamed Prometheus for a monitor list the cluster would not give.</summary>
+        public string? DiagnosisError { get; set; }
         public bool Busy { get; set; }
-        public bool ScrapeJustEnabled { get; set; }
+
+        /// <summary>What the last "Apply monitors now" came to, shown beside the button.</summary>
+        public MonitorsApplied? Applied { get; set; }
+
+        public RabbitMQBrokerIdentity Identity => new(Name, Namespace, IsOperatorManaged);
     }
 
     private sealed record ChartView(string Title, List<TimeSeriesDataPoint> Points, string Color, string? Unit);
@@ -380,7 +447,7 @@ else
                 // a tenant, so the unbounded case has no callers rather than a safer default.
                 clusters = await db.RabbitMQClusters
                     .Where(c => c.KubernetesClusterId == ClusterId && c.TenantId == TenantId)
-                    .OrderBy(c => c.Name)
+                    .OrderBy(c => c.Name).ThenBy(c => c.Namespace)
                     .ToListAsync();
             }
 
@@ -388,8 +455,10 @@ else
             {
                 Id = c.Id,
                 Name = c.Name,
+                Namespace = c.Namespace,
                 TenantId = c.TenantId,
                 IsOperatorManaged = c.IsOperatorManaged,
+                StatefulSet = c.StatefulSetName ?? c.Name,
             })];
 
             // Brokers are independent of one another, so load them together rather than in series.
@@ -412,7 +481,7 @@ else
         // and vice versa. Nothing here may propagate — these run under one Task.WhenAll, and a
         // single throwing broker would abandon the others and leave the panel spinning.
         Task<KubernetesOperationResult<RabbitMQMetricsSummary>> metricsTask =
-            PrometheusService.GetRabbitMQMetricsAsync(b.TenantId, ClusterId, b.Name);
+            PrometheusService.GetRabbitMQMetricsAsync(b.TenantId, ClusterId, b.Identity);
 
         // Queue depth comes off the broker itself, so it still works when Prometheus does not.
         Task<List<RabbitMQQueueStats>> queuesTask = RabbitMQService.GetQueueStatsAsync(b.TenantId, b.Id);
@@ -454,7 +523,7 @@ else
 
         // Reuses the panel's own query builder so the charts cannot drift from the tiles above
         // them — in particular the identity-info join, without which every one of these is empty.
-        Dictionary<string, string> q = PrometheusService.BuildRabbitMQQueries(b.Name);
+        Dictionary<string, string> q = PrometheusService.BuildRabbitMQQueries(b.Identity);
 
         (string Title, string Query, string Color, string? Unit)[] specs =
         [
@@ -482,26 +551,31 @@ else
         return charts;
     }
 
-    private async Task EnableScrapeAsync(BrokerView b)
+    /// <summary>
+    /// Has the engine apply this cluster's monitors now rather than on its next pass, then diagnoses
+    /// again. The engine owns the broker's <c>{name}-metrics</c>, the monitor the button it replaces
+    /// used to write; it writes monitors only, so nothing here can restart the broker.
+    /// </summary>
+    private async Task ApplyMonitorsAsync(BrokerView b)
     {
         b.Busy = true;
+        b.Applied = null;
         try
         {
-            await RabbitMQService.EnableMetricsScrapeAsync(b.TenantId, b.Id);
-            b.Diagnosis = null;
-
-            // Prometheus has to notice the new ServiceMonitor and then complete a scrape before
-            // anything can be queried, so say so rather than reloading into the same empty state.
-            b.ScrapeJustEnabled = true;
+            KubernetesOperationResult<ScrapeMonitorPlan> result = await Monitors.ApplyAsync(b.TenantId, ClusterId);
+            b.Applied = MonitorsApplied.From(result, MonitorsApplied.BrokerKey(b.Namespace, b.Name));
         }
         catch (Exception ex)
         {
-            b.Error = ex.Message;
+            b.Applied = MonitorsApplied.Failed(ex.Message);
         }
         finally
         {
             b.Busy = false;
         }
+
+        // Read-only, and worth it after a failure too: it says what is on the cluster now.
+        await DiagnoseAsync(b);
     }
 
     private async Task DiagnoseAsync(BrokerView b)
@@ -509,28 +583,22 @@ else
         b.Busy = true;
         try
         {
-            string ns;
-            using (DataServicesDbContext db = DbFactory.CreateDbContext())
-            {
-                ns = await db.RabbitMQClusters.Where(c => c.Id == b.Id)
-                        .Select(c => c.Namespace).FirstAsync();
-            }
-
-            KubernetesOperationResult<ScrapeDiagnosis> result =
+            // Where the remedy is the button, the engine's own row for this broker decides whether
+            // the button would do anything. A broker EntKube did not install is never sent to it.
+            KubernetesOperationResult<ScrapeDiagnosis> result = await ScrapeDiagnostician.CheckedAgainstThePlanAsync(
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
-                    b.TenantId, ClusterId, ns, b.Name,
+                    b.TenantId, ClusterId,
                     b.IsOperatorManaged
-                        ? "Use \"Enable metrics\" above — it creates the ServiceMonitor the operator does not."
-                        : "This broker was not installed by EntKube. Create a ServiceMonitor for its "
-                          + "metrics port by hand; RabbitMQ publishes one at rabbitmq/cluster-operator "
-                          + "under observability/prometheus/monitors.");
+                        ? MonitoredWorkload.RabbitMQ(b.Name, b.Namespace)
+                        : MonitoredWorkload.ExternalRabbitMQ(b.StatefulSet, b.Namespace)),
+                Monitors, b.TenantId, ClusterId, MonitorsApplied.BrokerKey(b.Namespace, b.Name));
 
-            if (result.IsSuccess) b.Diagnosis = result.Data;
-            else b.Error = result.Error;
+            b.Diagnosis = result.IsSuccess ? result.Data : null;
+            b.DiagnosisError = result.IsSuccess ? null : result.Error;
         }
         catch (Exception ex)
         {
-            b.Error = ex.Message;
+            b.DiagnosisError = ex.Message;
         }
         finally
         {

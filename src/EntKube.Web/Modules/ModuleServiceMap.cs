@@ -6,6 +6,7 @@ using EntKube.Web.Data.Modules;
 using EntKube.Web.Data;
 using EntKube.Web.Modules.Composition;
 using EntKube.Web.Services.Agents;
+using EntKube.Web.Services.ScrapeMonitors;
 using EntKube.Web.Services.Telemetry;
 using EntKube.Web.Services.Tickets.Bridge;
 using EntKube.Web.Services.Tickets;
@@ -211,6 +212,10 @@ public static partial class ModuleMap
         [typeof(PromMetricsService)] = Module.Telemetry,
         [typeof(PrometheusService)] = Module.Telemetry,
         [typeof(RumSiteService)] = Module.Telemetry,
+        [typeof(LiveScrapeStateReader)] = Module.Telemetry,
+        [typeof(ScrapeMonitorService)] = Module.Telemetry,
+        [typeof(IScrapeMonitors)] = Module.Telemetry,
+        [typeof(ScrapeMonitorReconcileService)] = Module.Telemetry,
         [typeof(SloService)] = Module.Telemetry,
         [typeof(SloTallySweep)] = Module.Telemetry,
         [typeof(ErrorTrackingService)] = Module.Telemetry,

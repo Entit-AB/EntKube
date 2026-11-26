@@ -54,6 +54,22 @@ public class HelmCommand
 }
 
 /// <summary>
+/// An apply that could not be prepared because EntKube could not ask the cluster whether its own monitor for the
+/// component stands, which decides whether the chart's own monitor goes to helm (see
+/// <c>ComponentLifecycleService.KeycloakChartMonitorGoesAsync</c>). Nothing has been handed to helm when this is
+/// thrown. Its own type so the install flow can end the component Failed on it, as it does a helm that failed,
+/// without catching every other refusal that is meant to reach the person who pressed the button.
+/// </summary>
+public sealed class MonitorHandoverUnknownException(string message, Exception? inner = null)
+    : InvalidOperationException(message, inner)
+{
+    /// <summary>The sentence every one of these starts with, and why.</summary>
+    public static string Say(string component, string why)
+        => $"EntKube could not ask the cluster whether its own monitor for '{component}' stands, "
+           + $"so nothing was handed to helm: {why}";
+}
+
+/// <summary>
 /// Manages the full lifecycle of cluster components — registration, configuration,
 /// install preparation, result tracking, and uninstall. The service handles the
 /// data/state side of lifecycle management; actual Helm CLI execution is delegated
@@ -908,6 +924,21 @@ public class ComponentLifecycleService(
             }
         }
 
+        // Keycloak: the chart's own ServiceMonitor, where the catalog put it there, is turned off in two cases
+        // only, both read from the cluster (see KeycloakChartMonitorGoesAsync). Elsewhere the stored block is
+        // handed to helm as it is.
+        //
+        // ⚠️ BEFORE the theme fragments below. They are joined on as text, so a component with extraVolumes
+        // of its own gets that key twice: helm takes the last, and the YAML parser refuses the document —
+        // after them, this step would read such a Keycloak as empty and leave its monitor on.
+        if (component.HelmChartName == "keycloakx"
+            && valuesYaml is not null
+            && YamlFormMerger.CarriesCatalogKeycloakMonitor(valuesYaml)
+            && await KeycloakChartMonitorGoesAsync(tenantId, component, ct))
+        {
+            valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
+        }
+
         // Keycloak: render any named-theme volumes / copier init container / login mount into
         // the chart's extra* values so Helm manages them alongside the StatefulSet. Without
         // this, `helm upgrade` resets the chart-managed volumes (dropping the out-of-band theme
@@ -971,6 +1002,20 @@ public class ComponentLifecycleService(
             valuesYaml = YamlFormMerger.EnsurePrometheusScrapeDefaults(valuesYaml ?? "", valuesCatalog?.DefaultValues);
         }
 
+        // SeaweedFS: its NetworkPolicies close the metrics port to everyone but its own pods, so the cluster's
+        // Prometheus is let in by name. Asked of Catalog's one answer at every apply, like OBI above.
+        //
+        // ⚠️ AFTER FillMissingCatalogDefaults: an install with no networkPolicy key gets the catalog's, enabled,
+        // from that step. Run before it, this would find no policy to add to, and the port would then be closed.
+        if (component.HelmChartName == "seaweedfs" && valuesYaml is not null)
+        {
+            EntKube.Contracts.Catalog.InstalledComponent? prometheus =
+                await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
+                    db.ClusterComponents, tenantId, component.ClusterId, ct);
+
+            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(valuesYaml, PrometheusNamespaceToAdmit(prometheus));
+        }
+
         string releaseName = component.ReleaseName ?? component.Name;
         string chartRef = !string.IsNullOrWhiteSpace(component.HelmRepoUrl)
             ? $"{component.HelmRepoUrl}/{component.HelmChartName}"
@@ -995,6 +1040,64 @@ public class ComponentLifecycleService(
     }
 
     /// <summary>
+    /// Whether the catalog's Keycloak ServiceMonitor block is turned off for this apply. Asked only of a Keycloak
+    /// that carries that block, and read from the cluster:
+    ///
+    /// <list type="number">
+    /// <item><b>The cluster does not serve the ServiceMonitor kind</b> (no monitoring.coreos.com CRD). The chart
+    /// renders the object without asking, and helm refuses the whole release ("no matches for kind
+    /// ServiceMonitor"), so Keycloak would not install at all. Off, whatever else is true.</item>
+    /// <item><b>The monitor engine's own ServiceMonitor for this Keycloak already stands</b>
+    /// (its name for this release, in this namespace, on this Keycloak's own cluster, ours by
+    /// <see cref="EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands"/>, the planner's own rule). The
+    /// chart's beside it would double every number. Off.</item>
+    /// </list>
+    ///
+    /// <para><b>Everywhere else it stays as stored.</b> Where EntKube's Prometheus selects the chart's monitor,
+    /// the planner sees Keycloak covered and never makes ours, so the chart's goes on scraping. Where it does not
+    /// select it, the planner makes ours and the next apply turns the chart's off; until then an unselected
+    /// monitor beside ours doubles nothing. Where the planner makes nothing (no catalog Prometheus, a sharded
+    /// or ambiguous one, a Prometheus EntKube did not install), a working monitor is never removed.</para>
+    ///
+    /// <para><b>Unknown fails the apply.</b> A cluster that cannot be reached, a CRD probe or a monitor read that
+    /// fails: this throws <see cref="MonitorHandoverUnknownException"/> before helm is given anything, rather than
+    /// guess which of a refused release, a double scrape or a lost one to risk. The install flow ends the
+    /// component Failed on it, as it does a helm that failed.</para>
+    /// </summary>
+    private async Task<bool> KeycloakChartMonitorGoesAsync(
+        Guid tenantId, ClusterComponent component, CancellationToken ct)
+    {
+        try
+        {
+            EntKube.Web.Services.Clusters.IClusterClient cluster =
+                await clusterClients.ForAsync(tenantId, component.ClusterId, ct)
+                ?? throw new MonitorHandoverUnknownException(MonitorHandoverUnknownException.Say(
+                    component.Name, "the cluster has no stored kubeconfig, or is not this tenant's."));
+
+            if (!await EngineMonitorOnCluster.KindIsServedAsync(
+                    cluster, EntKube.Web.Services.ScrapeMonitors.MonitorKind.ServiceMonitor, ct))
+            {
+                return true;
+            }
+
+            EntKube.Web.Services.ScrapeMonitors.MonitorSpec? ours = EngineMonitorOnCluster.ForComponent(
+                new EntKube.Contracts.Catalog.InstalledComponent(
+                    component.Id, tenantId, component.ClusterId, "", Guid.Empty, component.Name,
+                    component.ComponentType, EntKube.Contracts.Catalog.ComponentStatus.Installed,
+                    component.Namespace, component.ReleaseName, component.HelmChartName, component.HelmChartVersion,
+                    component.HelmValues, component.Configuration, null, component.InstalledAt));
+
+            return ours is not null && EntKube.Web.Services.ScrapeMonitors.ScrapeMonitorIdentity.Stands(
+                await EngineMonitorOnCluster.ListAsync(cluster, ours.Identity.Kind, ours.Identity.Namespace, ct),
+                ours, cluster.ClusterId);
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or MonitorHandoverUnknownException))
+        {
+            throw new MonitorHandoverUnknownException(MonitorHandoverUnknownException.Say(component.Name, ex.Message), ex);
+        }
+    }
+
+    /// <summary>
     /// The helm release the cluster's kube-prometheus-stack actually runs under — the value its
     /// <c>release: &lt;name&gt;</c> monitor selector matches when the NilUsesHelmValues flags are still true.
     ///
@@ -1010,6 +1113,25 @@ public class ComponentLifecycleService(
             ? release.Trim()
             : ComponentCatalog.GetByKey(EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName)?.DefaultReleaseName
               ?? EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName;
+    }
+
+    /// <summary>
+    /// The namespace a NetworkPolicy rule lets Prometheus in from: the one the monitor engine judges admission
+    /// against, <see cref="PrometheusService.GetPrometheusConfig(EntKube.Contracts.Catalog.InstalledComponent)"/>,
+    /// whose Configuration override (set for adopted stacks) wins over the column. Two answers would open the
+    /// port to prometheus-labelled pods of a namespace that is not Prometheus's and leave the real one out.
+    ///
+    /// <para>Except that a blank column is unknown, never the engine's <c>monitoring</c> default: a guessed
+    /// namespace would admit somebody else's pods to a port that serves pprof. Only an explicit override then
+    /// names it, and with none the answer is blank and nothing is opened.</para>
+    /// </summary>
+    private static string? PrometheusNamespaceToAdmit(EntKube.Contracts.Catalog.InstalledComponent? prometheus)
+    {
+        if (prometheus is null) return null;
+
+        // "" rather than null: GetPrometheusConfig fills only a null column with its default.
+        string column = string.IsNullOrWhiteSpace(prometheus.Namespace) ? "" : prometheus.Namespace;
+        return PrometheusService.GetPrometheusConfig(prometheus with { Namespace = column }).Namespace;
     }
 
     /// <summary>

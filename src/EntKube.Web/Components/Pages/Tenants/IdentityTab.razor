@@ -1950,7 +1950,9 @@ else if (selectedKeycloak is not null)
                    the entry's default, which is what the metrics selector needs. *@
                 <KeycloakMonitoringPanel TenantId="TenantId" ClusterId="monitored.ClusterId"
                                          Namespace="@(string.IsNullOrWhiteSpace(monitored.Namespace) ? "keycloak" : monitored.Namespace)"
-                                         InstanceName="@selectedKeycloak.DisplayName" />
+                                         ReleaseName="@(monitored.ReleaseName ?? monitored.Name)"
+                                         InstanceName="@selectedKeycloak.DisplayName"
+                                         Component="monitored" />
             }
             else
             {
