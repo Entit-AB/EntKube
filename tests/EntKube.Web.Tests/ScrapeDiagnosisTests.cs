@@ -618,6 +618,12 @@ public sealed class ScrapeDiagnosisTests
     [InlineData("""{"targetPort":15692}""", true)]
     [InlineData("""{"targetPort":"prometheus"}""", true)]
     [InlineData("""{}""", true)]
+    // An empty port and a targetPort of 0 or "" are no port to prometheus-operator (promcfg.go tests
+    // ep.Port != "", then StrVal != "" or IntVal != 0), so each keeps every target as {} does.
+    [InlineData("""{"port":""}""", true)]
+    [InlineData("""{"targetPort":0}""", true)]
+    [InlineData("""{"targetPort":""}""", true)]
+    [InlineData("""{"port":"","targetPort":15692}""", true)]
     [InlineData("""{"port":"amqp"}""", false)]
     public async Task A_monitor_through_a_service_without_the_metrics_port_still_reaches_it(string endpoint, bool doubled)
     {

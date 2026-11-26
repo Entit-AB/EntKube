@@ -718,9 +718,9 @@ public static class ScrapeDiagnostician
 
         foreach (JsonNode? endpoint in listed)
         {
-            string? port = Text(endpoint?["port"])
-                ?? Text(endpoint?["portNumber"])
-                ?? Text(endpoint?["targetPort"]);
+            string? port = PortGiven(endpoint?["port"])
+                ?? PortGiven(endpoint?["portNumber"])
+                ?? PortGiven(endpoint?["targetPort"]);
             if (port is null)
             {
                 if (endpoint is not JsonObject) continue;
@@ -776,6 +776,15 @@ public static class ScrapeDiagnostician
 
         return said.Count == 0 ? "everything" : string.Join(", ", said);
     }
+
+    /// <summary>
+    /// A port the endpoint really names, or null. prometheus-operator reads an empty name and a number of 0 as
+    /// no port at all (promcfg.go: <c>ep.Port != ""</c>, then the targetPort's <c>StrVal != ""</c> or
+    /// <c>IntVal != 0</c>), and so does the engine; read as a port they matched none of the workload's and the
+    /// monitor was left out, though it keeps every target.
+    /// </summary>
+    private static string? PortGiven(JsonNode? node) =>
+        Text(node) is { Length: > 0 } given && given != "0" ? given : null;
 
     /// <summary>A scalar as text. Ports are a name in one monitor and a number in the next.</summary>
     private static string? Text(JsonNode? node) =>
