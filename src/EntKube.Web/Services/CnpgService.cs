@@ -40,6 +40,27 @@ public class CnpgService(
                "The cluster has no stored kubeconfig, or does not belong to this tenant, "
                + "so nothing can be applied to it.");
 
+    /// <summary>
+    /// Whether EntKube's own Prometheus serves this cluster, which is the one case in which its monitor
+    /// engine (ScrapeMonitors) makes each database's PodMonitor. The Cluster builders take the answer:
+    /// only then may the operator's PodMonitor be switched off.
+    ///
+    /// <para><b>Why not always off.</b> The engine runs only where Catalog's kube-prometheus-stack serves
+    /// the cluster. Elsewhere a Prometheus EntKube did not install (the customer's own, Rancher's) may be
+    /// the one scraping the operator's PodMonitor, and switching it off ends that scrape with nothing to
+    /// replace it and nothing to say so.</para>
+    ///
+    /// <para><b>Asked before anything is written.</b> A failure here propagates: neither value is safe to
+    /// write blind (one may double the scrape, the other may end it), so the action fails whole rather
+    /// than half-done. The drift check and the backup's re-apply catch it and leave the cluster alone.</para>
+    /// </summary>
+    private async Task<bool> EngineMakesThePodMonitorAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await catalog.FindPrometheusAsync(tenantId, clusterId, ct) is not null;
+
+    /// <summary>The one line of <c>spec.monitoring</c> both Cluster builders write.</summary>
+    private static string PodMonitorLine(bool engineMakesPodMonitor)
+        => engineMakesPodMonitor ? "    enablePodMonitor: false" : "    enablePodMonitor: true";
+
     // ──────── Live storage ────────
 
     /// <summary>
@@ -281,6 +302,9 @@ public class CnpgService(
                 .FirstOrDefaultAsync(s => s.Id == storageLinkId.Value && s.TenantId == tenantId, ct);
         }
 
+        // Before the record: a question Catalog cannot answer must not leave one behind.
+        bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, kubernetesClusterId, ct);
+
         // Create the database record.
 
         CnpgCluster cnpgCluster = new()
@@ -315,7 +339,7 @@ public class CnpgService(
 
         // Generate and apply the CNPG Cluster manifest.
 
-        string manifest = BuildClusterManifest(cnpgCluster, storageLink, s3SecretName);
+        string manifest = BuildClusterManifest(cnpgCluster, storageLink, s3SecretName, engineMakesPodMonitor);
 
         // Ensure the target namespace exists before applying any resources.
 
@@ -664,6 +688,7 @@ public class CnpgService(
         }
 
         Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+        bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, cnpg.KubernetesClusterId, ct);
 
         // The manifest carries spec.storage.size; a stale stored size would ask CNPG to shrink.
         await AlignStorageSizeAsync(db, cnpg, client, ct);
@@ -677,7 +702,7 @@ public class CnpgService(
         // the old primary—zero downtime for clients using the -rw service endpoint.
 
         string s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null!;
-        string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName);
+        string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName, engineMakesPodMonitor);
 
         await client.ApplyManifestAsync(manifest, ct);
     }
@@ -752,6 +777,10 @@ public class CnpgService(
                 $"Target version ({targetVersion}) must be a higher major version than current ({source.PostgresVersion}).");
         }
 
+        // Before the first write: this upgrade deletes the source, and must not get that far for a
+        // replacement it cannot write.
+        bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, source.KubernetesClusterId, ct);
+
         // The new cluster is created with the source's size, and must hold all of its data.
         await AlignStorageSizeAsync(
             db, source, await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
@@ -798,7 +827,8 @@ public class CnpgService(
 
         // Use current time as recovery target — we want the very latest state.
 
-        string restoreManifest = BuildRestoreManifest(upgraded, source, DateTime.UtcNow, s3SecretName);
+        string restoreManifest = BuildRestoreManifest(
+            upgraded, source, DateTime.UtcNow, s3SecretName, engineMakesPodMonitor);
         restoreManifest += "\n---\n" + BuildObjectStoreManifest(tempName, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays);
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(restoreManifest, ct);
 
@@ -832,7 +862,7 @@ public class CnpgService(
         await db.SaveChangesAsync(ct);
 
         string s3SecretFinal = $"{source.Name}-s3-credentials";
-        string finalManifest = BuildClusterManifest(upgraded, source.StorageLink, s3SecretFinal);
+        string finalManifest = BuildClusterManifest(upgraded, source.StorageLink, s3SecretFinal, engineMakesPodMonitor);
         finalManifest += "\n---\n" + BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, s3SecretFinal, source.RetentionDays);
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(finalManifest, ct);
 
@@ -1028,11 +1058,14 @@ public class CnpgService(
 
         try
         {
+            // Inside the try: when Catalog cannot say, the re-apply is skipped and the backup still runs.
+            bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, cnpg.KubernetesClusterId, ct);
+
             await AlignStorageSizeAsync(db, cnpg, client, ct);
 
             string s3SecretName = $"{cnpg.Name}-s3-credentials";
             await client.ApplyManifestAsync(
-                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
+                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName, engineMakesPodMonitor), ct);
         }
         catch { /* non-fatal */ }
 
@@ -1088,6 +1121,7 @@ public class CnpgService(
         }
 
         Clusters.IClusterClient client = await ClusterFor(tenantId, source.KubernetesClusterId, ct);
+        bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, source.KubernetesClusterId, ct);
 
         // The restored cluster is sized from the source, and a stale 50Gi cannot hold 300GB.
         await AlignStorageSizeAsync(db, source, client, ct);
@@ -1144,7 +1178,8 @@ public class CnpgService(
         // only evaluated on initial cluster creation, so this must be applied to a name
         // that has no existing Cluster CR or PVCs in K8s.
         await client.ApplyManifestAsync(
-            BuildRestoreManifest(restored, source, targetTime, s3SecretName, barmanBackupId: barmanBackupId), ct);
+            BuildRestoreManifest(
+                restored, source, targetTime, s3SecretName, engineMakesPodMonitor, barmanBackupId: barmanBackupId), ct);
 
         return restored;
     }
@@ -1171,6 +1206,9 @@ public class CnpgService(
             throw new InvalidOperationException(
                 "Cluster has no backup storage configured. Cannot restore without backups.");
         }
+
+        // Before the delete too: a cluster deleted for a recovery that cannot be written stays deleted.
+        bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, source.KubernetesClusterId, ct);
 
         // ⚠️ Read the real size BEFORE the delete. Deleting the Cluster resource takes its claims
         // with it, and the recovery recreates them from StorageSize — so a stale value here
@@ -1208,7 +1246,8 @@ public class CnpgService(
         // Use "backup-source" as the external cluster alias so the manifest does not
         // reference the cluster by its own name (CNPG rejects self-referential bootstraps).
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(
-            BuildRestoreManifest(source, source, targetTime, s3SecretName, sourceAlias: "backup-source"),
+            BuildRestoreManifest(
+                source, source, targetTime, s3SecretName, engineMakesPodMonitor, sourceAlias: "backup-source"),
              ct);
 
         return source;
@@ -2051,8 +2090,14 @@ public class CnpgService(
             Clusters.IClusterClient client =
                 await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
+            // The same answer the re-apply asks for, or the banner reports a difference the re-apply
+            // would not make (and invites it). Unanswerable is Unknown, below.
+            bool engineMakesPodMonitor =
+                await EngineMakesThePodMonitorAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+
             Clusters.ManifestDiff diff = await client.DiffManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"),
+                BuildClusterManifest(
+                    cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials", engineMakesPodMonitor),
                 cluster.Namespace, ct);
 
             detail.ConfigurationDrift = diff.Outcome;
@@ -2099,11 +2144,13 @@ public class CnpgService(
         {
             Clusters.IClusterClient client =
                 await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+            bool engineMakesPodMonitor = await EngineMakesThePodMonitorAsync(tenantId, cluster.KubernetesClusterId, ct);
 
             await AlignStorageSizeAsync(db, cluster, client, ct);
 
             string output = await client.ApplyManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"), ct);
+                BuildClusterManifest(
+                    cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials", engineMakesPodMonitor), ct);
 
             if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule))
             {
@@ -2446,7 +2493,12 @@ public class CnpgService(
     /// Builds the CNPG Cluster CRD manifest. Includes Barman backup configuration
     /// if a storage link is configured.
     /// </summary>
-    private static string BuildClusterManifest(CnpgCluster cnpg, StorageLink? storageLink, string? s3SecretName)
+    /// <param name="engineMakesPodMonitor">
+    /// <see cref="EngineMakesThePodMonitorAsync"/>'s answer, asked by the caller so this stays a pure function
+    /// of its inputs: the drift check diffs against it, and must see what the re-apply would write.
+    /// </param>
+    private static string BuildClusterManifest(
+        CnpgCluster cnpg, StorageLink? storageLink, string? s3SecretName, bool engineMakesPodMonitor)
     {
         StringBuilder sb = new();
 
@@ -2477,16 +2529,17 @@ public class CnpgService(
         sb.AppendLine("  primaryUpdateMethod: switchover");
         sb.AppendLine("  switchoverDelay: 600");
 
-        // EntKube's monitor engine (ScrapeMonitors) makes the PodMonitor for this database, so the
-        // operator's own is off. enablePodMonitor is deprecated upstream, and two monitors on one
-        // pod would double every sum.
+        // Where EntKube's own Prometheus serves the cluster, its monitor engine (ScrapeMonitors) makes the
+        // PodMonitor for this database, so the operator's own is off: two monitors on one pod would
+        // double every sum. Everywhere else the engine makes none, and the operator's stays on, as it
+        // was before the engine existed. See EngineMakesThePodMonitorAsync.
         //
         // Written out, never left out: a client-side apply that drops a block the last apply had
         // deletes all of spec.monitoring, a user's tls settings with it, and losing those rolls the
         // database. With the field present only the field changes: the operator removes its
         // PodMonitor, and the engine makes ours on its next pass.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: false");
+        sb.AppendLine(PodMonitorLine(engineMakesPodMonitor));
 
         // Synchronous replication requires at least 2 instances. For HA clusters,
         // we guarantee one synchronous replica so no committed transactions are lost.
@@ -2627,7 +2680,7 @@ public class CnpgService(
     /// </summary>
     private static string BuildRestoreManifest(
         CnpgCluster restored, CnpgCluster source, DateTime? targetTime, string s3SecretName,
-        string? sourceAlias = null, string? barmanBackupId = null)
+        bool engineMakesPodMonitor, string? sourceAlias = null, string? barmanBackupId = null)
     {
         // Always use externalClusters — the barman-cloud plugin requires an explicit
         // ObjectStore reference to authenticate against the source backup archive.
@@ -2645,10 +2698,10 @@ public class CnpgService(
         sb.AppendLine("spec:");
         sb.AppendLine($"  instances: {restored.Instances}");
         sb.AppendLine($"  imageName: ghcr.io/cloudnative-pg/postgresql:{restored.PostgresVersion}");
-        // As in BuildClusterManifest: the engine monitors it, and the block is written so that a
-        // later apply changes this field and not the whole of spec.monitoring.
+        // As in BuildClusterManifest: off only where the engine monitors it, and the block is written
+        // so that a later apply changes this field and not the whole of spec.monitoring.
         sb.AppendLine("  monitoring:");
-        sb.AppendLine("    enablePodMonitor: false");
+        sb.AppendLine(PodMonitorLine(engineMakesPodMonitor));
         sb.AppendLine("  postgresql:");
         sb.AppendLine("    parameters:");
         sb.AppendLine("      archive_timeout: \"5min\"");

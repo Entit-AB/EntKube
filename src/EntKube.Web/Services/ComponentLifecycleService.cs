@@ -908,16 +908,25 @@ public class ComponentLifecycleService(
             }
         }
 
-        // Keycloak: the chart's own ServiceMonitor goes where the catalog put it there; EntKube makes the
-        // monitor. Not asked of the cluster first — with no Prometheus it fails the install, with one it is
-        // a second scrape of the same pods.
+        // Keycloak: the chart's own ServiceMonitor goes where the catalog put it there, but only where
+        // EntKube's own Prometheus serves the cluster, because only there does EntKube's monitor engine make
+        // the replacement. Asked of Catalog's one answer, the engine's own gate. Elsewhere the stored block is
+        // handed to helm as it is: a Prometheus EntKube did not install may be the one scraping the chart's
+        // monitor, and turning it off would end that scrape with nothing to say so.
         //
         // ⚠️ BEFORE the theme fragments below. They are joined on as text, so a component with extraVolumes
         // of its own gets that key twice: helm takes the last, and the YAML parser refuses the document —
         // after them, this step would read such a Keycloak as empty and leave its monitor on.
         if (component.HelmChartName == "keycloakx" && valuesYaml is not null)
         {
-            valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
+            EntKube.Contracts.Catalog.InstalledComponent? prometheus =
+                await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
+                    db.ClusterComponents, tenantId, component.ClusterId, ct);
+
+            if (prometheus is not null)
+            {
+                valuesYaml = YamlFormMerger.TurnOffCatalogKeycloakMonitor(valuesYaml);
+            }
         }
 
         // Keycloak: render any named-theme volumes / copier init container / login mount into
@@ -994,7 +1003,7 @@ public class ComponentLifecycleService(
                 await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
                     db.ClusterComponents, tenantId, component.ClusterId, ct);
 
-            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(valuesYaml, prometheus?.Namespace);
+            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(valuesYaml, PrometheusNamespaceToAdmit(prometheus));
         }
 
         string releaseName = component.ReleaseName ?? component.Name;
@@ -1036,6 +1045,25 @@ public class ComponentLifecycleService(
             ? release.Trim()
             : ComponentCatalog.GetByKey(EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName)?.DefaultReleaseName
               ?? EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName;
+    }
+
+    /// <summary>
+    /// The namespace a NetworkPolicy rule lets Prometheus in from: the one the monitor engine judges admission
+    /// against, <see cref="PrometheusService.GetPrometheusConfig(EntKube.Contracts.Catalog.InstalledComponent)"/>,
+    /// whose Configuration override (set for adopted stacks) wins over the column. Two answers would open the
+    /// port to prometheus-labelled pods of a namespace that is not Prometheus's and leave the real one out.
+    ///
+    /// <para>Except that a blank column is unknown, never the engine's <c>monitoring</c> default: a guessed
+    /// namespace would admit somebody else's pods to a port that serves pprof. Only an explicit override then
+    /// names it, and with none the answer is blank and nothing is opened.</para>
+    /// </summary>
+    private static string? PrometheusNamespaceToAdmit(EntKube.Contracts.Catalog.InstalledComponent? prometheus)
+    {
+        if (prometheus is null) return null;
+
+        // "" rather than null: GetPrometheusConfig fills only a null column with its default.
+        string column = string.IsNullOrWhiteSpace(prometheus.Namespace) ? "" : prometheus.Namespace;
+        return PrometheusService.GetPrometheusConfig(prometheus with { Namespace = column }).Namespace;
     }
 
     /// <summary>

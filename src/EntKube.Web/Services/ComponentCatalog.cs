@@ -2704,9 +2704,10 @@ public static class ComponentCatalog
                 # everything else only from the release's own pods. On a CNI that does not enforce
                 # NetworkPolicy (flannel, for one) this protection is absent.
                 #
-                # Prometheus has to reach the metrics port (9327). Where EntKube runs one on this
-                # cluster, each apply adds that rule for its pods alone; do not open the port to
-                # everyone, because Go's pprof is served on it without a password.
+                # Prometheus has to reach the metrics port (each server's metricsPort, 9327 unless
+                # set). Where EntKube runs one on this cluster, each apply adds that rule for its
+                # pods alone; do not open the port to everyone, because Go's pprof is served on it
+                # without a password.
                 networkPolicy:
                   enabled: true
                   extraIngress:
@@ -3257,8 +3258,10 @@ public static class ComponentCatalog
                 # Keycloak serves Prometheus metrics and health probes on its management
                 # interface (port 9000, named http-internal by the chart). The chart's
                 # serviceMonitor is deliberately not turned on: it fails the install on a cluster
-                # without the Prometheus Operator, and where there is a Prometheus EntKube makes
-                # the monitor itself. To run the chart's instead, give its block a setting of your
+                # without the Prometheus Operator, and where EntKube's own kube-prometheus-stack
+                # serves the cluster EntKube makes the monitor itself. Where some other Prometheus
+                # should scrape Keycloak, turn the chart's on yourself. To run the chart's beside
+                # EntKube's Prometheus instead, give its block a setting of your
                 # own (an interval, say) beside enabled: true; EntKube then leaves it alone.
                 metrics:
                   enabled: true
