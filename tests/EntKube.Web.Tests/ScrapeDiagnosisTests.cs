@@ -28,7 +28,8 @@ public sealed class ScrapeDiagnosisTests
         cluster.ServeList(PrometheusesPath, ReadsEverything);
         cluster.ServeList(PodMonitorsPath);
         cluster.ServeList(ServiceMonitorsPath);
-        cluster.ServeDatabasePods("data", "shop", instances: 3);
+        cluster.ServeList("/api/v1/namespaces/data/pods",
+            DatabasePod("shop-1", "10.0.0.1"), DatabasePod("shop-2", "10.0.0.2"), DatabasePod("shop-3", "10.0.0.3"));
         cluster.ServeList("/api/v1/namespaces/mq/services", BrokerService("orders"));
         cluster.ServeList("/api/v1/namespaces/mq/pods", BrokerPod("orders-server-0"));
     }
@@ -39,9 +40,16 @@ public sealed class ScrapeDiagnosisTests
     private static string BrokerService(string name, string moreLabels = "", string selector = "\"app.kubernetes.io/name\":\"orders\"") =>
         $$$"""{"metadata":{"name":"{{{name}}}","namespace":"mq","labels":{{{{OrdersLabels}}}{{{moreLabels}}}}},"spec":{"selector":{{{{selector}}}},"ports":[{"name":"prometheus","port":15692,"targetPort":15692}]}}""";
 
-    /// <summary>A broker pod that serves the Prometheus plugin.</summary>
-    private static string BrokerPod(string name, string moreLabels = "") =>
-        $$$"""{"metadata":{"name":"{{{name}}}","namespace":"mq","labels":{"app.kubernetes.io/name":"orders"{{{moreLabels}}}}},"spec":{"containers":[{"name":"rabbitmq","ports":[{"name":"prometheus","containerPort":15692}]}]}}""";
+    /// <summary>A running broker pod that serves the Prometheus plugin.</summary>
+    private static string BrokerPod(string name, string moreLabels = "", string ip = "10.0.1.10") =>
+        $$$"""{"metadata":{"name":"{{{name}}}","namespace":"mq","labels":{"app.kubernetes.io/name":"orders"{{{moreLabels}}}}},"spec":{"containers":[{"name":"rabbitmq","ports":[{"name":"prometheus","containerPort":15692}]}]},"status":{"phase":"Running","podIP":"{{{ip}}}"}}""";
+
+    /// <summary>
+    /// A running instance pod of the database 'shop', as CNPG labels it and with the exporter port it
+    /// declares. A monitor ends at a running pod's own address, as Prometheus scrapes it.
+    /// </summary>
+    private static string DatabasePod(string name, string ip, string moreLabels = "") =>
+        $$$"""{"metadata":{"name":"{{{name}}}","namespace":"data","labels":{"cnpg.io/cluster":"shop","cnpg.io/podRole":"instance","team":"shop"{{{moreLabels}}}}},"spec":{"containers":[{"name":"postgres","ports":[{"name":"metrics","containerPort":9187}]}]},"status":{"phase":"Running","podIP":"{{{ip}}}"}}""";
 
     private Task<KubernetesOperationResult<ScrapeDiagnosis>> AskAboutShop() =>
         cluster.Prometheus.DiagnoseCnpgScrapeAsync(cluster.TenantId, cluster.ClusterId, "shop", "data");
@@ -410,8 +418,8 @@ public sealed class ScrapeDiagnosisTests
     public async Task Two_monitors_that_select_different_pods_of_one_database_do_not_double_it()
     {
         cluster.ServeList("/api/v1/namespaces/data/pods",
-            Labelled("data", "shop-1", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"primary\""),
-            Labelled("data", "shop-2", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"replica\""));
+            DatabasePod("shop-1", "10.0.0.1", ",\"cnpg.io/instanceRole\":\"primary\""),
+            DatabasePod("shop-2", "10.0.0.2", ",\"cnpg.io/instanceRole\":\"replica\""));
         cluster.ServeList(PodMonitorsPath,
             PodMonitor("data", "db-primary", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"primary"}}"""),
             PodMonitor("data", "db-replica", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"replica"}}"""));
@@ -429,8 +437,8 @@ public sealed class ScrapeDiagnosisTests
     public async Task Two_monitors_that_share_one_pod_of_a_database_double_it()
     {
         cluster.ServeList("/api/v1/namespaces/data/pods",
-            Labelled("data", "shop-1", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"primary\""),
-            Labelled("data", "shop-2", "\"cnpg.io/cluster\":\"shop\",\"cnpg.io/podRole\":\"instance\",\"cnpg.io/instanceRole\":\"replica\""));
+            DatabasePod("shop-1", "10.0.0.1", ",\"cnpg.io/instanceRole\":\"primary\""),
+            DatabasePod("shop-2", "10.0.0.2", ",\"cnpg.io/instanceRole\":\"replica\""));
         cluster.ServeList(PodMonitorsPath,
             PodMonitor("data", "db-primary", """{"matchLabels":{"cnpg.io/cluster":"shop","cnpg.io/instanceRole":"primary"}}"""),
             PodMonitor("data", "db-all", """{"matchLabels":{"cnpg.io/cluster":"shop"}}"""));
@@ -468,7 +476,7 @@ public sealed class ScrapeDiagnosisTests
             BrokerService("orders-a", ",\"svc\":\"a\"", "\"pod\":\"a\""),
             BrokerService("orders-b", ",\"svc\":\"b\"", "\"pod\":\"b\""));
         cluster.ServeList("/api/v1/namespaces/mq/pods",
-            BrokerPod("orders-server-0", ",\"pod\":\"a\""), BrokerPod("orders-server-1", ",\"pod\":\"b\""));
+            BrokerPod("orders-server-0", ",\"pod\":\"a\""), BrokerPod("orders-server-1", ",\"pod\":\"b\"", ip: "10.0.1.11"));
         cluster.ServeList(ServiceMonitorsPath,
             ServiceMonitor("mq", "a", """{"matchLabels":{"svc":"a"}}"""),
             ServiceMonitor("mq", "b", """{"matchLabels":{"svc":"b"}}"""));
@@ -477,6 +485,72 @@ public sealed class ScrapeDiagnosisTests
 
         d.SelectedTwice.Should().BeFalse();
         d.WiringIsRight.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// ⭐ A ServiceMonitor endpoint's <c>targetPort</c> is the POD's container port, by name or by
+    /// number: prometheus-operator keeps <c>__meta_kubernetes_pod_container_port_name</c> (or
+    /// <c>_number</c>) equal to it. One monitor by the Service port's name and one by the pod port's
+    /// name both end at port 15692 of the one broker pod, and every sum counts it twice.
+    /// </summary>
+    [Fact]
+    public async Task A_monitor_by_service_port_and_one_by_the_pods_port_name_double_one_broker_pod()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "by-port", OrdersServices),
+            ServiceMonitor("mq", "by-target", OrdersServices, endpoints: """{"targetPort":"prometheus"}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeTrue("both end at port 15692 of orders-server-0");
+        d.Findings[0].Should().Contain("mq/by-port").And.Contain("mq/by-target");
+    }
+
+    /// <summary>
+    /// The same by number, where the Service's own port is another number: the Service listens on
+    /// 80 and sends to the pod's port called prometheus (15692). A targetPort of 15692 is that pod
+    /// port, whatever the Service port is called or numbered.
+    /// </summary>
+    [Fact]
+    public async Task A_target_port_number_is_the_pods_port_and_not_the_services()
+    {
+        cluster.ServeList("/api/v1/namespaces/mq/services",
+            $$$"""{"metadata":{"name":"orders","namespace":"mq","labels":{{{{OrdersLabels}}}}},"spec":{"selector":{"app.kubernetes.io/name":"orders"},"ports":[{"name":"prometheus","port":80,"targetPort":"prometheus"}]}}""");
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "by-port", OrdersServices),
+            ServiceMonitor("mq", "by-target", OrdersServices, endpoints: """{"targetPort":15692}"""));
+
+        ScrapeDiagnosis d = await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"));
+
+        d.SelectedTwice.Should().BeTrue("both end at port 15692 of orders-server-0");
+        d.Findings[0].Should().Contain("mq/by-port").And.Contain("mq/by-target");
+    }
+
+    /// <summary>A targetPort the pod does not declare by that name ends nowhere, and doubles nothing.</summary>
+    [Fact]
+    public async Task A_target_port_name_the_pod_does_not_declare_doubles_nothing()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "by-port", OrdersServices),
+            ServiceMonitor("mq", "by-target", OrdersServices, endpoints: """{"targetPort":"prometheus-tls"}"""));
+
+        (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).SelectedTwice.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A scrape that asks with parameters (RabbitMQ's <c>?family=</c>) gets other series than the
+    /// port's own, by the engine's one rule for that (<see cref="ScrapedEndpoints.ServesItsOwnMetrics"/>):
+    /// the diagnosis follows a monitor to its pods with the engine's own function, so the two agree.
+    /// </summary>
+    [Fact]
+    public async Task A_monitor_that_asks_with_parameters_doubles_nothing_by_the_engines_rule()
+    {
+        cluster.ServeList(ServiceMonitorsPath,
+            ServiceMonitor("mq", "detailed", OrdersServices, endpoints: """{"port":"prometheus","path":"/metrics/detailed"}"""),
+            ServiceMonitor("mq", "queues", OrdersServices,
+                endpoints: """{"port":"prometheus","path":"/metrics/detailed","params":{"family":["queue_coarse_metrics"]}}"""));
+
+        (await Diagnose(MonitoredWorkload.RabbitMQ("orders", "mq"))).SelectedTwice.Should().BeFalse();
     }
 
     [Fact]
@@ -572,6 +646,45 @@ public sealed class ScrapeDiagnosisTests
 
         ScrapeDiagnostician.AgainstThePlan(d, PlanWith(MonitorState.Managed, MonitorChange.Create, "Created."), ShopKey)
             .Remedy.Should().Be("Created.", "a create is not the removal the remedy counts on");
+    }
+
+    /// <summary>
+    /// ⭐ The diagnosis reads monitors only, so for a database with none it found "Prometheus was
+    /// never told to scrape it", while the remedy beside it was the engine's row saying its pods are
+    /// scraped by annotation, or by another job. Where the engine's row says something scrapes it
+    /// without a monitor, the finding says that instead.
+    /// </summary>
+    [Theory]
+    [InlineData(MonitorState.Annotated, "prometheus.io annotations")]
+    [InlineData(MonitorState.CoveredElsewhere, "already scrapes it without one")]
+    [InlineData(MonitorState.PartlyCovered, "scrapes part of it without one")]
+    public async Task Where_the_engine_says_it_is_scraped_without_a_monitor_no_finding_says_it_never_was(
+        MonitorState state, string said)
+    {
+        ScrapeDiagnosis d = await DiagnoseShop();
+        Said(d).Should().Contain("so Prometheus was never told to scrape it", "the diagnosis alone sees only monitors");
+
+        ScrapeDiagnosis held = ScrapeDiagnostician.AgainstThePlan(d, PlanWith(state, MonitorChange.None, "The engine's sentence."), ShopKey);
+
+        held.Remedy.Should().Be("The engine's sentence.");
+        Said(held).Should().NotContain("never told")
+            .And.Contain("No PodMonitor on this cluster selects the metrics port of database 'shop'")
+            .And.Contain(said);
+        held.Findings.Should().HaveCount(d.Findings.Count, "the one finding is reworded, nothing else is touched");
+    }
+
+    /// <summary>Where the engine says nothing scrapes it, nothing was told to, and the finding stands.</summary>
+    [Theory]
+    [InlineData(MonitorState.NotRunning)]
+    [InlineData(MonitorState.BlockedByNetworkPolicy)]
+    [InlineData(MonitorState.NotSelectable)]
+    public async Task Where_the_engine_says_nothing_scrapes_it_the_finding_that_nothing_was_told_to_stands(MonitorState state)
+    {
+        ScrapeDiagnosis d = await DiagnoseShop();
+
+        ScrapeDiagnosis held = ScrapeDiagnostician.AgainstThePlan(d, PlanWith(state, MonitorChange.None, "The engine's sentence."), ShopKey);
+
+        held.Findings.Should().Equal(d.Findings);
     }
 
     [Theory]

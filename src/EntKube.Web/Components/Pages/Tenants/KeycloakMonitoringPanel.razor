@@ -254,6 +254,14 @@ else
 
     [Parameter] public string InstanceName { get; set; } = "Keycloak";
 
+    /// <summary>
+    /// The installed keycloakx component. The engine's row for it is found by the key the catalog
+    /// gives this component, not by one spelled here from <see cref="Namespace"/> and
+    /// <see cref="ReleaseName"/>: those carry the Identity tab's defaults for the metrics queries
+    /// (a blank namespace read as "keycloak"), and the catalog keys a component by what it records.
+    /// </summary>
+    [Parameter] public required EntKube.Contracts.Catalog.InstalledComponent Component { get; set; }
+
     private KeycloakMetricsSummary? metrics;
     private string? error;
     private ScrapeDiagnosis? diagnosis;
@@ -347,8 +355,13 @@ else
         return result;
     }
 
-    /// <summary>The engine's key for this release, as ScrapeTargetCatalog keys an installed keycloakx chart.</summary>
-    private string EngineKey => MonitorsApplied.KeycloakKey(Namespace, ReleaseName);
+    /// <summary>
+    /// The engine's key for this component: the one ScrapeTargetCatalog gives it, asked of the
+    /// catalog rather than spelled again here. Where the catalog has no row for it (a chart it does
+    /// not know, or a component not serving yet) the engine has none either, and the empty key
+    /// finds none, which is then what the panel says.
+    /// </summary>
+    private string EngineKey => ScrapeTargetCatalog.For([Component], []) is [{ } target] ? target.Key : "";
 
     /// <summary>
     /// Has the engine apply this cluster's monitors now rather than on its next pass, then diagnoses

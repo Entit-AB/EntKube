@@ -71,6 +71,9 @@ public class ScrapeMonitorService(
     public async Task<KubernetesOperationResult<ScrapeMonitorPlan>> ApplyAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
+        const string ClaimHeldMessage =
+            "An apply of the monitors on this cluster is already running. Nothing was changed; try again in a minute.";
+
         // Up to two writes, and the operator chose one thing: opened before the first of them.
         using IDisposable operation = gate.BeginOperation("apply monitors");
 
@@ -80,9 +83,9 @@ public class ScrapeMonitorService(
             await using IAsyncDisposable? claim = await TryClaimAsync(clusterId, ct);
             if (claim is null)
             {
-                return KubernetesOperationResult<ScrapeMonitorPlan>.Failure(
-                    "Another EntKube instance is writing the monitors on this cluster right now. "
-                    + "Nothing was changed; try again in a minute.");
+                // Whose the claim is cannot be told: this instance's own sweep holds it on a
+                // connection of its own just as another instance would, so neither is named.
+                return KubernetesOperationResult<ScrapeMonitorPlan>.Failure(ClaimHeldMessage);
             }
 
             (IClusterClient? cluster, ScrapeMonitorPlan plan) = await ReadAsync(tenantId, clusterId, ct);
