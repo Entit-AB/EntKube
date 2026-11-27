@@ -104,9 +104,25 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
     public async Task<IReadOnlyList<RolePermissionUpgrade>> CarryRolesAcrossAsync(CancellationToken ct = default)
     {
         using IdentityDbContext db = dbFactory.CreateDbContext();
+        return await CarryRolesAcrossAsync(db, ct);
+    }
 
+    /// <summary>
+    /// The carry-across itself, on whichever context holds the role tables — the identity module's
+    /// at startup, the whole application's when a backup has just been restored.
+    ///
+    /// <para>Two steps, each applied once to a role that predates it:</para>
+    /// <list type="number">
+    ///   <item>Schema 0 → 1, enforcement itself: <see cref="PermissionCatalog.CarryAcross"/>.</item>
+    ///   <item>Schema 1 → 2: categories and deleting answers moved from "Knowledge base: Edit" to
+    ///     Manage. Under schema 1, Edit allowed both, so a role holding Edit then is raised to
+    ///     Manage — exactly what its members could already do.</item>
+    /// </list>
+    /// </summary>
+    public static async Task<IReadOnlyList<RolePermissionUpgrade>> CarryRolesAcrossAsync(DbContext db, CancellationToken ct = default)
+    {
         // The tenants with at least one role still waiting.
-        List<Guid> tenantIds = await db.TenantRoles.AsNoTracking()
+        List<Guid> tenantIds = await db.Set<TenantRole>().AsNoTracking()
             .Where(r => r.PermissionSchema < TenantRole.CurrentPermissionSchema)
             .Select(r => r.TenantId)
             .Distinct()
@@ -118,24 +134,37 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
         {
             await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx = await db.Database.BeginTransactionAsync(ct);
 
-            List<TenantRole> waiting = await db.TenantRoles.AsNoTracking()
+            List<TenantRole> waiting = await db.Set<TenantRole>().AsNoTracking()
                 .Where(r => r.TenantId == tenantId && r.PermissionSchema < TenantRole.CurrentPermissionSchema)
                 .ToListAsync(ct);
 
             // The knowledge base's opt-in was judged per tenant, from the roles as they stood
-            // before enforcement — which are exactly the ones still waiting.
-            bool editorsChosen = waiting.Any(r =>
-                GetPermission(DecodePermissions(r.PermissionsJson), TenantFeature.KnowledgeBase) >= AccessLevel.Edit);
+            // before enforcement — the ones still at schema 0, not ones made since.
+            bool editorsChosen = waiting.Any(r => r.PermissionSchema < 1
+                && GetPermission(DecodePermissions(r.PermissionsJson), TenantFeature.KnowledgeBase) >= AccessLevel.Edit);
 
             int carried = 0;
 
             foreach (TenantRole role in waiting)
             {
-                string json = EncodePermissions(PermissionCatalog.CarryAcross(DecodePermissions(role.PermissionsJson), editorsChosen));
+                Dictionary<TenantFeature, AccessLevel> grants = DecodePermissions(role.PermissionsJson);
 
-                // Only while it is still waiting: another instance may have got here first.
-                carried += await db.TenantRoles
-                    .Where(r => r.Id == role.Id && r.PermissionSchema < TenantRole.CurrentPermissionSchema)
+                if (role.PermissionSchema < 1)
+                {
+                    grants = PermissionCatalog.CarryAcross(grants, editorsChosen);
+                }
+
+                if (role.PermissionSchema < 2 && GetPermission(grants, TenantFeature.KnowledgeBase) == AccessLevel.Edit)
+                {
+                    grants[TenantFeature.KnowledgeBase] = AccessLevel.Manage;
+                }
+
+                string json = EncodePermissions(grants);
+                int readAt = role.PermissionSchema;
+
+                // Only if nobody has carried it since it was read: another instance may have got here first.
+                carried += await db.Set<TenantRole>()
+                    .Where(r => r.Id == role.Id && r.PermissionSchema == readAt)
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(r => r.PermissionsJson, json)
                         .SetProperty(r => r.PermissionSchema, TenantRole.CurrentPermissionSchema), ct);
@@ -145,7 +174,7 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
 
             if (carried > 0)
             {
-                string name = await db.Tenants.AsNoTracking()
+                string name = await db.Set<Tenant>().AsNoTracking()
                     .Where(t => t.Id == tenantId).Select(t => t.Name).FirstOrDefaultAsync(ct) ?? tenantId.ToString();
 
                 upgrades.Add(new RolePermissionUpgrade(tenantId, name, carried, editorsChosen));

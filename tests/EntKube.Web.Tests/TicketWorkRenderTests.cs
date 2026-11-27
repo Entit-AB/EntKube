@@ -408,7 +408,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     {
         Ticket ticket = await Raise();
         Guid role = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         db.Users.Add(new ApplicationUser { Id = "user-anna", UserName = "anna", Email = "anna@entit.example" });
         db.TenantMemberships.Add(new TenantMembership { UserId = "user-anna", TenantId = tenantId, RoleId = role });
         await db.SaveChangesAsync();
@@ -834,6 +834,38 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     }
 
     // ───────────────────────────── Phase 5 ─────────────────────────────
+
+    /// <summary>
+    /// "??" in a reply offers knowledge-base answers to insert. Agents-only ones are the knowledge
+    /// base's to show; a role that may work tickets but not read the knowledge base is offered only
+    /// the public answers, which the customer can read anyway.
+    /// </summary>
+    [Theory]
+    [InlineData(AccessLevel.None, false)]
+    [InlineData(AccessLevel.View, true)]
+    public async Task The_reply_offers_agents_only_answers_only_to_knowledge_base_readers(AccessLevel knowledgeBase, bool offered)
+    {
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Nätverk", null);
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN guide", CategoryId = cat.Id, Visibility = KbVisibility.Public,
+            Language = "sv", BodyHtml = "<p>Install the client.</p>" }, "nils");
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN reset internal", CategoryId = cat.Id, Visibility = KbVisibility.Internal,
+            Language = "sv", BodyHtml = "<p>Run the reset script.</p>" }, "nils");
+        Ticket ticket = await Raise();
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+            [TenantFeature.KnowledgeBase] = knowledgeBase,
+        });
+        JSInterop.Mode = JSRuntimeMode.Loose;
+
+        IRenderedComponent<TicketMailComposer> composer = Render<TicketMailComposer>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.Ticket, ticket).Add(c => c.Actor, "nils"));
+        await composer.InvokeAsync(() => composer.Instance.OnKnowledgeTrigger("vpn"));
+
+        composer.WaitForAssertion(() => composer.Markup.Should().Contain("VPN guide"));
+        composer.Markup.Contains("VPN reset internal", StringComparison.Ordinal).Should().Be(offered);
+    }
 
     [Fact]
     public async Task The_portal_shows_a_customer_their_public_answers_and_nothing_internal()

@@ -240,6 +240,26 @@ public class TenantPermissionsTests : IDisposable
         db.TenantRoles.AsNoTracking().Should().OnlyContain(r => r.PermissionSchema == TenantRole.CurrentPermissionSchema);
     }
 
+    /// <summary>
+    /// Instances that ran the first enforcement release carried their chosen knowledge-base editors
+    /// across at Edit — which then still allowed running the categories and deleting answers.
+    /// Those now need Manage, so a role at that release's schema with Edit is raised to Manage:
+    /// exactly what its members could already do, no more.
+    /// </summary>
+    [Fact]
+    public async Task A_role_from_the_first_enforcement_release_keeps_running_the_knowledge_base()
+    {
+        Guid editors = Role(ours, "KB editors", Grants((TenantFeature.KnowledgeBase, AccessLevel.Edit), (TenantFeature.SupportTickets, AccessLevel.Edit)), schema: 1);
+        Guid readers = Role(ours, "Agents", Grants((TenantFeature.KnowledgeBase, AccessLevel.View)), schema: 1);
+
+        await roles.CarryRolesAcrossAsync();
+
+        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
+        Stored(editors).Should().Contain(TenantFeature.SupportTickets, AccessLevel.Edit, "nothing else is touched");
+        Stored(readers).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
+        db.TenantRoles.AsNoTracking().Should().OnlyContain(r => r.PermissionSchema == TenantRole.CurrentPermissionSchema);
+    }
+
     [Fact]
     public async Task A_role_made_after_enforcement_is_never_carried_across()
     {
@@ -292,6 +312,9 @@ public class TenantPermissionsTests : IDisposable
         }
 
         byName["Member"].Should().Contain(TenantFeature.SupportTickets, AccessLevel.Edit);
+
+        // A member adds apps for the customers they work for, which is Customers: Edit.
+        byName["Member"].Should().Contain(TenantFeature.Customers, AccessLevel.Edit);
         byName["Member"].Should().NotContainKey(TenantFeature.CustomerPortalAccess);
         byName["Viewer"].Should().Contain(TenantFeature.SupportTickets, AccessLevel.View);
         byName["Viewer"].Should().NotContainKey(TenantFeature.SupportTools);

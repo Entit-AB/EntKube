@@ -877,9 +877,13 @@ public class Program
         // random 256-bit token, of which only a hash is stored. An unknown token is a plain 404 —
         // nothing says whether it ever existed.
         app.MapGet("/support/calendar/{token}.ics", async (
-            string token, EntKube.Web.Services.Tickets.CalendarFeedService feeds, HttpContext httpContext, CancellationToken ct) =>
+            string token, EntKube.Web.Services.Tickets.CalendarFeedService feeds, TenantRoleService roles, HttpContext httpContext, CancellationToken ct) =>
         {
-            string? ics = await feeds.FeedAsync(token, DateTime.UtcNow, ct);
+            // Read only while its owner may still see tickets there: their role may have changed
+            // since they subscribed, and the calendar app will never sign in to find out.
+            string? ics = await feeds.FeedAsync(token, DateTime.UtcNow,
+                async (tenantId, userId, c) => (await roles.PermissionsForAsync(tenantId, userId, c)).Allows(TenantFeature.SupportTickets, AccessLevel.View),
+                ct);
             if (ics is null)
                 return Results.NotFound();
 
@@ -1592,14 +1596,17 @@ public class Program
         {
             foreach (RolePermissionUpgrade u in await roles.CarryRolesAcrossAsync())
             {
+                // Two kinds of role reach here: ones from before enforcement, granted the most on
+                // every support and customer permission because membership used to allow all of
+                // it, and ones from the first enforcement release, whose knowledge-base editors
+                // move from Edit to Manage. Either way, nobody can do less than before.
                 logger.LogInformation(
-                    "Role permissions, tenant {Tenant}: {Roles} role(s) carried across to enforced permissions. Each was granted "
-                    + "the most on every support and customer permission, because membership used to allow all of it; "
-                    + "{KnowledgeBase}. Tighten them under Admin → Roles.",
+                    "Role permissions, tenant {Tenant}: {Roles} role(s) carried across to the rules this build enforces, "
+                    + "keeping what their members could already do; {KnowledgeBase}. Tighten them under Admin → Roles.",
                     u.TenantName, u.Roles,
                     u.KnowledgeBaseEditorsKept
-                        ? "the knowledge-base editors chosen before keep editing and everyone else reads"
-                        : "everyone keeps editing the knowledge base, as nobody had been made its editor");
+                        ? "the knowledge-base editors chosen before enforcement keep running it and everyone else reads"
+                        : "knowledge-base editors keep running it");
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

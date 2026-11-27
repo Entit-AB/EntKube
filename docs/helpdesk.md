@@ -62,6 +62,25 @@ permissions, and what their levels allow:
 | Service levels | see SLA targets | change them | — |
 | Incidents & on-call | see them | work incidents, handover notes | schedules, subconsultant register |
 
+Beyond the desk's own pages, the same permissions decide:
+
+- **Who works support.** The roster, the rotation and ticket notifications cover only members whose
+  role sees tickets (Tickets: View); going on duty, and being handed tickets by the rotation, takes
+  Tickets: Edit. A developer who is a member of the tenant is neither offered a rota place nor told
+  about tickets.
+- **Other tenants.** Moving a ticket to another tenant, or placing an inbox message with another
+  tenant's customer, is offered only where the person's role there grants Tickets: Edit.
+- **API tokens.** A token can carry no more than its minter holds: `tickets:read` needs
+  Tickets: View, `tickets:write` (which can merge) Tickets: Manage.
+- **The calendar feed** is served only while its owner may still see tickets in that tenant.
+- **Agents-only answers** are offered by `??` only to roles with Knowledge base: View.
+- **Incidents** acknowledged or resolved from the tenant page's alerts or the fleet advisor ask for
+  Incidents: Edit in the incident's tenant, as the desk does.
+
+Roles are versioned (`TenantRole.PermissionSchema`): 0 before enforcement, 1 with it, 2 since
+knowledge-base categories and deleting answers moved from Edit to Manage. Older roles are carried
+across once at startup, and straight after a backup is restored, so nobody can do less than before.
+
 Anybody with any support permission gets "My notifications & absence", and may put themselves on
 or off the rota. A component rendered outside the desk is handed no permissions and refuses every
 write. An application's runbook in the knowledge base stays editable by whoever can open the

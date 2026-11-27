@@ -101,6 +101,9 @@
     private string? mentionQuery;
     private List<KbAnswer> answers = [];
 
+    private bool MayReadAgentsOnlyAnswers =>
+        (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.KnowledgeBase, AccessLevel.View);
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (!firstRender)
@@ -169,6 +172,13 @@
 
         // Published answers only, and never one written for another customer (KnowledgeBaseService).
         answers = query is null ? [] : await KnowledgeBase.ForAgentAsync(TenantId, Ticket.CustomerId, query, DateTime.UtcNow);
+
+        // Agents-only answers are the knowledge base's to show ("Knowledge base: View"). Without
+        // that, only public answers — ones customers can read anyway — are offered.
+        if (!MayReadAgentsOnlyAnswers)
+        {
+            answers = [.. answers.Where(a => a.Visibility == KbVisibility.Public)];
+        }
         await InvokeAsync(StateHasChanged);
     }
 
@@ -216,6 +226,13 @@
         // Asked for again under the same rules (phase 11): the offered list may be minutes old,
         // and an answer since made Operations or narrowed to another customer must not go out.
         KbAnswer? current = await KnowledgeBase.ForInsertAsync(TenantId, Ticket.Id, a.Id, DateTime.UtcNow);
+
+        // Checked again, whatever the list offered: the answer id arrives from the browser.
+        if (current is not null && current.Visibility != KbVisibility.Public && !MayReadAgentsOnlyAnswers)
+        {
+            Toasts.Warning("Agents-only answers need Knowledge base: View on your role.");
+            return;
+        }
 
         if (current is null)
         {

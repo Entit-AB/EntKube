@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
+using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -39,7 +40,7 @@ public class RichNoteTests : IDisposable
         db.Customers.Add(new Customer { Id = customer, TenantId = ours, Name = "Vårdbolaget" });
         db.Customers.Add(new Customer { Id = theirCustomer, TenantId = theirs, Name = "Regionen" });
         Guid role = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         db.Users.Add(new ApplicationUser { Id = "user-anna", UserName = "anna", Email = "anna@entit.example" });
         db.TenantMemberships.Add(new TenantMembership { UserId = "user-anna", TenantId = ours, RoleId = role });
         db.SaveChanges();

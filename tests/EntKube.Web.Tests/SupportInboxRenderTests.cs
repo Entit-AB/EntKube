@@ -81,6 +81,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         // message with another tenant's customer, the detail can move a ticket there — and
         // both ask this who the person is allowed to reach before offering anything.
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
     }
 
     public new void Dispose()
@@ -89,6 +90,39 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         connection.Dispose();
         base.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>One signed-in person with an account id, which is what tenant reach is keyed by.</summary>
+    private sealed class SignedInWithId(string name, string userId) : AuthenticationStateProvider
+    {
+        public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.Name, name), new Claim(ClaimTypes.NameIdentifier, userId)], "test"))));
+    }
+
+    /// <summary>
+    /// A second tenant, with a customer, where the signed-in person is a member whose role grants
+    /// <paramref name="tickets"/> on tickets.
+    /// </summary>
+    private void MemberOfAPartnerTenant(AccessLevel tickets)
+    {
+        Guid partner = Guid.NewGuid();
+        Guid role = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = partner, Name = "Partner", Slug = "partner" });
+        db.Customers.Add(new Customer { Id = Guid.NewGuid(), TenantId = partner, Name = "Partnerbolaget AB" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantRoles.Add(new TenantRole
+        {
+            Id = role, TenantId = partner, Name = "Partner role",
+            PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel>
+            {
+                [TenantFeature.SupportTickets] = tickets,
+                [TenantFeature.Clusters] = AccessLevel.Manage,
+            }),
+        });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = partner, RoleId = role });
+        db.SaveChanges();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInWithId("nils", "user-nils"));
     }
 
     /// <summary>A provider that reports one signed-in person, as the circuit would.</summary>
@@ -266,6 +300,34 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         IRenderedComponent<SupportInbox> lead = RenderInbox();
 
         lead.WaitForAssertion(() => lead.FindAll($"#remember-{message!.Id}").Should().ContainSingle());
+    }
+
+    /// <summary>
+    /// Placing a message with another tenant's customer opens the ticket in that tenant's queue,
+    /// so that tenant's customers are offered only where the person may work tickets — the same
+    /// rule as moving a ticket there. Being a member, as a developer say, is not that.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_customers_are_offered_only_where_the_person_works_tickets()
+    {
+        await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        MemberOfAPartnerTenant(AccessLevel.View);
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        inbox.WaitForAssertion(() => inbox.Markup.Should().Contain("Fakturan"));
+        inbox.Markup.Should().NotContain("Partnerbolaget AB");
+    }
+
+    [Fact]
+    public async Task Another_tenants_customers_are_offered_where_the_person_works_tickets()
+    {
+        await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        MemberOfAPartnerTenant(AccessLevel.Edit);
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        inbox.WaitForAssertion(() => inbox.Markup.Should().Contain("Partnerbolaget AB"));
     }
 
     // ---- The way out of a dead end ------------------------------------------------------------

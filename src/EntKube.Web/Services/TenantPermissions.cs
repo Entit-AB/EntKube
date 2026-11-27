@@ -256,15 +256,16 @@ public static class PermissionCatalog
         };
     }
 
-    // A member works the queue and the platform, and looks at — but does not run — how support is
-    // set up and what customers have agreed to. Letting outsiders into the portal is left to
+    // A member works the queue and the platform — including adding apps for a customer, which is
+    // Customers: Edit — and looks at, but does not run, how support is set up and what customers
+    // have agreed to. Creating customers and letting outsiders into the portal are left to
     // administrators.
     private static AccessLevel MemberLevel(FeaturePermission f) => f.Feature switch
     {
         TenantFeature.SupportTickets or TenantFeature.SupportTools or TenantFeature.KnowledgeBase
-            or TenantFeature.Incidents => AccessLevel.Edit,
+            or TenantFeature.Incidents or TenantFeature.Customers => AccessLevel.Edit,
         TenantFeature.SupportReporting or TenantFeature.SupportRoster or TenantFeature.SupportChannels
-            or TenantFeature.ServiceLevels or TenantFeature.Customers or TenantFeature.CustomerAgreements => AccessLevel.View,
+            or TenantFeature.ServiceLevels or TenantFeature.CustomerAgreements => AccessLevel.View,
         TenantFeature.CustomerPortalAccess or TenantFeature.JitAccess => AccessLevel.None,
         _ => AccessLevel.Edit,
     };

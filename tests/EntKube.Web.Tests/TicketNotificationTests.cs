@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
+using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -43,8 +44,8 @@ public class TicketNotificationTests : IDisposable
         db.Customers.Add(new Customer { Id = theirCustomer, TenantId = theirs, Name = "Regionen" });
 
         Guid role = Guid.NewGuid(), theirRole = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin" });
-        db.TenantRoles.Add(new TenantRole { Id = theirRole, TenantId = theirs, Name = "Admin" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
+        db.TenantRoles.Add(new TenantRole { Id = theirRole, TenantId = theirs, Name = "Admin", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         foreach ((string id, string name) in new[] { (Anna, "anna"), (Nils, "nils"), (Stranger, "mallory") })
         {
             db.Users.Add(new ApplicationUser { Id = id, UserName = name, Email = $"{name}@entit.example" });
@@ -104,6 +105,29 @@ public class TicketNotificationTests : IDisposable
         For(Anna).Should().ContainSingle(n => n.Kind == NotificationKind.NewTicket && n.TicketNumber == t.Number);
         For(Nils).Should().ContainSingle(n => n.Kind == NotificationKind.NewTicket);
         For(Stranger).Should().BeEmpty("another tenant's member hears nothing of ours");
+    }
+
+    /// <summary>
+    /// A member whose role cannot see tickets — a developer, say — is told nothing about them:
+    /// a ticket's title is the ticket's, and the bell would otherwise hand it to every member.
+    /// </summary>
+    [Fact]
+    public async Task A_member_whose_role_cannot_see_tickets_hears_nothing_of_them()
+    {
+        Guid developer = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = developer, TenantId = ours, Name = "Developer",
+            PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.Clusters] = AccessLevel.Manage }) });
+        db.Users.Add(new ApplicationUser { Id = "user-carl", UserName = "carl", Email = "carl@entit.example" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-carl", TenantId = ours, RoleId = developer });
+        await db.SaveChangesAsync();
+
+        await bell.GenerateAsync(ours, DateTime.UtcNow.AddSeconds(-5));
+        Ticket t = await Raise();
+
+        await PassAsync();
+
+        For(Anna).Should().Contain(n => n.TicketNumber == t.Number, "the support members still hear about it");
+        For("user-carl").Should().BeEmpty();
     }
 
     [Fact]
@@ -410,5 +434,24 @@ public class TicketNotificationTests : IDisposable
         await calendar.RevokeAsync(ours, Anna);
         (await calendar.FeedAsync(second, DateTime.UtcNow)).Should().BeNull();
         db.CalendarFeeds.AsNoTracking().Should().NotContain(f => f.TokenHash == second, "only a hash is kept");
+    }
+
+    /// <summary>
+    /// A calendar app presents nothing but the address, and goes on polling it long after its owner
+    /// stopped working support. The feed asks, each time, whether its owner may still see tickets
+    /// in that tenant — and answers a stranger's 404 when they may not.
+    /// </summary>
+    [Fact]
+    public async Task The_calendar_feed_stops_when_its_owner_may_no_longer_see_tickets()
+    {
+        CalendarFeedService calendar = new(new TestDbContextFactory(connection), tickets);
+        Ticket t = await Raise();
+        await tickets.AssignAsync(ours, t.Id, "anna", "anna", DateTime.UtcNow, Anna);
+        string token = await calendar.ResetAsync(ours, Anna);
+
+        (await calendar.FeedAsync(token, DateTime.UtcNow, (tenant, user, _) => Task.FromResult(tenant == ours && user == Anna)))
+            .Should().NotBeNull("while she may see tickets the feed is hers");
+        (await calendar.FeedAsync(token, DateTime.UtcNow, (_, _, _) => Task.FromResult(false)))
+            .Should().BeNull("once she may not, the address answers like one that never existed");
     }
 }

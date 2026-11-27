@@ -39,7 +39,7 @@ public class SupportRosterTabTests : BunitContext, IDisposable
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         Guid role = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
 
         foreach (string name in new[] { "anna", "bertil" })
         {

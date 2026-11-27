@@ -885,6 +885,11 @@ public class BackupService(
 
             await tx.CommitAsync();
 
+            // Roles from an older bundle are carried across to the permission rules this build
+            // enforces now, not at the next start: until then their members would have no support
+            // or customer pages at all.
+            await TenantRoleService.CarryRolesAcrossAsync(db);
+
             logger.LogInformation(
                 "Restore completed: {Tenants} tenants, {Apps} apps, {Secrets} secrets, {Clusters} clusters.",
                 bundle.Tenants.Count, bundle.Apps.Count, bundle.VaultSecrets.Count, bundle.KubernetesClusters.Count);

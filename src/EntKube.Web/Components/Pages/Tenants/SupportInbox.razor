@@ -7,7 +7,7 @@
 @inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject CurrentActor Actor
-@inject UserAccessService Access
+@inject TenantRoleService Roles
 @inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -374,9 +374,11 @@
     private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
 
     /// <summary>
-    /// The tenants this person can already reach. A move into one they cannot is not
-    /// offered, so the control cannot express a placement they would not be allowed to
-    /// make; failing to read the memberships offers nothing, which is the safe end of it.
+    /// The tenants whose customers this person may place mail with: those where their role works
+    /// tickets ("Tickets: Edit"), because placing a message there opens the ticket in that
+    /// tenant's queue — the same rule as moving a ticket there. A member who may not work tickets
+    /// in a tenant is not offered its customers, so the control cannot express a placement they
+    /// would not be allowed to make; failing to read the roles offers nothing, the safe end of it.
     /// </summary>
     private async Task<List<Tenant>> ReachableTenantsAsync()
     {
@@ -387,7 +389,11 @@
             string? userId = state.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
-            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+            return userId is null
+                ? []
+                : [.. (await Roles.TenantsHoldingAsync(userId, PermissionArea.Support))
+                    .Where(t => t.Permissions.Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+                    .Select(t => t.Tenant)];
         }
         catch
         {

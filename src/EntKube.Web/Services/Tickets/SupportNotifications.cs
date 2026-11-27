@@ -645,7 +645,14 @@ public class CalendarFeedService(IDbContextFactory<SupportDbContext> dbFactory, 
     }
 
     /// <summary>The feed for a token, or null for one that is not (or no longer) valid.</summary>
-    public async Task<string?> FeedAsync(string token, DateTime now, CancellationToken ct = default)
+    /// <param name="stillAllowed">
+    /// Whether the feed's owner may still see tickets in its tenant, asked every time it is read —
+    /// a calendar app goes on polling long after somebody stops working support. Null asks nothing
+    /// (callers that have already decided).
+    /// </param>
+    public async Task<string?> FeedAsync(
+        string token, DateTime now,
+        Func<Guid, string, CancellationToken, Task<bool>>? stillAllowed = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(token) || token.Length > 100)
         {
@@ -661,6 +668,12 @@ public class CalendarFeedService(IDbContextFactory<SupportDbContext> dbFactory, 
         }
 
         if (feed is null)
+        {
+            return null;
+        }
+
+        // The same nothing as an unknown address: whether a feed exists is not for a stranger to learn.
+        if (stillAllowed is not null && !await stillAllowed(feed.TenantId, feed.UserId, ct))
         {
             return null;
         }
