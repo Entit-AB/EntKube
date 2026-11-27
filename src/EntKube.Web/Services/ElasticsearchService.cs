@@ -1918,7 +1918,7 @@ public class ElasticsearchService(
         cluster.MonitoringIndexMetrics = indexMetrics;
         cluster.MonitoringSelectorNote = DescribeSelector(selector, cluster.Namespace);
 
-        await client.ApplyManifestAsync(BuildExporterDeployment(cluster), ct);
+        await client.ApplyManifestAsync(BuildExporterDeployment(cluster, password), ct);
         await client.ApplyManifestAsync(BuildExporterService(cluster), ct);
         await client.ApplyManifestAsync(BuildExporterServiceMonitor(cluster, selector.MatchLabels), ct);
         await client.ApplyManifestAsync(BuildExporterPrometheusRule(cluster, selector.RuleLabels), ct);
@@ -3047,6 +3047,20 @@ public class ElasticsearchService(
 
         if (!char.IsAsciiLetterOrDigit(username[0]) || !char.IsAsciiLetterOrDigit(username[^1]))
             throw new InvalidOperationException("A username must start and end with a letter or digit.");
+    }
+
+    /// <summary>
+    /// A short, one-way mark of a password, for telling two passwords apart in a manifest that far
+    /// more people can read than the Secret holding the password itself.
+    ///
+    /// <para>Safe here because every password it is used on comes from
+    /// <see cref="GeneratePassword"/>: 192 random bits, which no amount of guessing gets back from a
+    /// hash. It is not for a password a person chose.</para>
+    /// </summary>
+    private static string CredentialsFingerprint(string password)
+    {
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(password));
+        return Convert.ToHexStringLower(hash)[..16];
     }
 
     private static string GeneratePassword()
@@ -4774,7 +4788,10 @@ public class ElasticsearchService(
     /// talking across the network like any other client — and is given explicit, small resources,
     /// because a metrics sidecar that competes with the data nodes it measures is worse than none.
     /// </summary>
-    public static string BuildExporterDeployment(ElasticsearchCluster c)
+    /// <param name="password">
+    /// The password just written to the exporter's Secret. Only its fingerprint reaches the manifest.
+    /// </param>
+    public static string BuildExporterDeployment(ElasticsearchCluster c, string password)
     {
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: apps/v1");
@@ -4795,6 +4812,14 @@ public class ElasticsearchService(
         sb.AppendLine("    metadata:");
         sb.AppendLine("      labels:");
         sb.AppendLine($"        app.kubernetes.io/name: {c.ExporterName}");
+
+        // The exporter reads its password from the Secret once, when the pod starts. Every enable
+        // and re-apply sets a new password in Elasticsearch, so a pod template that stayed the same
+        // kept the running exporter on the password Elasticsearch had just stopped accepting.
+        // Marking the template with the password's fingerprint makes a new password a new
+        // template — the Deployment rolls the pod — while the same password changes nothing.
+        sb.AppendLine("      annotations:");
+        sb.AppendLine($"        entkube.io/credentials-fingerprint: \"{CredentialsFingerprint(password)}\"");
         sb.AppendLine("    spec:");
         sb.AppendLine("      securityContext:");
         sb.AppendLine("        runAsNonRoot: true");
