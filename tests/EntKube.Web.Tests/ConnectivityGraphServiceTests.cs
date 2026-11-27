@@ -300,6 +300,47 @@ public class ConnectivityGraphServiceTests : IDisposable
         dnsYaml.Should().Contain("port: 53");
     }
 
+    /// <summary>
+    /// The default-deny closes the namespace to everything the graph did not name, and the cluster's
+    /// Prometheus was never in the graph — so applying the plan took the app's metrics down with it.
+    /// Judged by <see cref="EntKube.Web.Services.ScrapeMonitors.PrometheusAdmission"/> over the
+    /// whole plan as it would be applied.
+    /// </summary>
+    [Fact]
+    public async Task GenerateNetworkPolicies_WherePrometheusRuns_LetsPrometheusScrapeAndNobodyElse()
+    {
+        SeedDeployment();
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = clusterId,
+            Name = "kube-prometheus-stack",
+            ComponentType = "HelmChart",
+            HelmChartName = "kube-prometheus-stack",
+            ReleaseName = "kube-prometheus-stack",
+            Namespace = "monitoring",
+            Status = ComponentStatus.Installed
+        });
+        db.SaveChanges();
+
+        ConnectivityPolicyPlan plan = (await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId)).Single();
+
+        PrometheusJudge.LetsIn(plan.CombinedYaml, "billing", prometheusLivesIn: "monitoring").Should().BeTrue();
+        PrometheusJudge.LetsIn(plan.CombinedYaml, "billing", prometheusLivesIn: "tenant-b").Should().BeFalse(
+            "a pod that only calls itself prometheus, in a namespace of its own, is still shut out");
+    }
+
+    [Fact]
+    public async Task GenerateNetworkPolicies_WithoutPrometheus_OpensNothingForIt()
+    {
+        SeedDeployment();
+
+        ConnectivityPolicyPlan plan = (await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId)).Single();
+
+        plan.Policies.Should().NotContain(p => p.Name.Contains("prometheus"));
+        PrometheusJudge.LetsIn(plan.CombinedYaml, "billing", prometheusLivesIn: "monitoring").Should().BeFalse();
+    }
+
     [Fact]
     public async Task GenerateNetworkPolicies_ExternalDependency_ProducesUnenforceableWarning()
     {

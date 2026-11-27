@@ -2111,7 +2111,7 @@ public class ElasticsearchServiceTests : IDisposable
     [Fact]
     public void TheExporterVerifiesTheClusterCertificate_AndIsBounded()
     {
-        string manifest = ElasticsearchService.BuildExporterDeployment(SampleCluster());
+        string manifest = ElasticsearchService.BuildExporterDeployment(SampleCluster(), "exporter-password");
         YamlMappingNode root = Parse(manifest);
 
         YamlMappingNode container = (YamlMappingNode)((YamlSequenceNode)
@@ -2141,8 +2141,33 @@ public class ElasticsearchServiceTests : IDisposable
 
         // Each scrape would otherwise ask the masters for every index's stats, and every index
         // becomes its own set of series in Prometheus.
-        ElasticsearchService.BuildExporterDeployment(off).Should().NotContain("--es.indices");
-        ElasticsearchService.BuildExporterDeployment(on).Should().Contain("--es.indices");
+        ElasticsearchService.BuildExporterDeployment(off, "exporter-password").Should().NotContain("--es.indices");
+        ElasticsearchService.BuildExporterDeployment(on, "exporter-password").Should().Contain("--es.indices");
+    }
+
+    /// <summary>The exporter's pod template, as the Deployment controller compares it.</summary>
+    private static string PodTemplate(string deployment)
+        => global::k8s.KubernetesYaml.Serialize(
+            global::k8s.KubernetesYaml.Deserialize<global::k8s.Models.V1Deployment>(deployment).Spec.Template);
+
+    /// <summary>
+    /// The exporter reads its password from the Secret once, when its pod starts. A re-apply wrote a
+    /// new password to the Secret and to Elasticsearch, but left the pod template as it was, so the
+    /// running pod kept the old password and every scrape after it was refused. A new password has
+    /// to be a new pod template; the same one must not restart anything.
+    /// </summary>
+    [Fact]
+    public void ANewExporterPasswordRollsTheExporter_AndTheSameOneDoesNot()
+    {
+        string first = ElasticsearchService.BuildExporterDeployment(SampleCluster(), "first-password");
+        string again = ElasticsearchService.BuildExporterDeployment(SampleCluster(), "first-password");
+        string rotated = ElasticsearchService.BuildExporterDeployment(SampleCluster(), "second-password");
+
+        PodTemplate(again).Should().Be(PodTemplate(first), "an unchanged password is no reason to restart the exporter");
+        PodTemplate(rotated).Should().NotBe(PodTemplate(first), "the running pod still holds the old password");
+
+        // What marks the template is not the password: the Deployment is readable by far more people than the Secret.
+        rotated.Should().NotContain("second-password");
     }
 
     [Fact]
@@ -2235,6 +2260,34 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
         stored.MonitoringEnabled.Should().BeTrue();
         stored.MonitoringIndexMetrics.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// "Re-apply" on the Search page calls the same method again, and every call sets a new password.
+    /// The Deployment it applies the second time must differ in its pod template, or the exporter keeps
+    /// the password Elasticsearch has just stopped accepting.
+    /// </summary>
+    [Fact]
+    public async Task ReApplyingMetricsRestartsTheExporterOnItsNewPassword()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        k8s.Setup(x => x.GetJsonAllNamespacesAsync("prometheuses.monitoring.coreos.com",
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[]}""");
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .ReturnsAsync(string.Empty);
+
+        await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
+        await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
+
+        List<string> deployments = [.. applied.Where(m => m.Contains("kind: Deployment"))];
+        deployments.Should().HaveCount(2);
+        PodTemplate(deployments[1]).Should().NotBe(PodTemplate(deployments[0]));
     }
 
     [Fact]

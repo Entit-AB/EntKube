@@ -18,6 +18,7 @@ namespace EntKube.Web.Services;
 public class AppGovernanceService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<AppGovernanceService> logger)
 {
     // ── Namespace ─────────────────────────────────────────────────────────────
@@ -746,7 +747,13 @@ public class AppGovernanceService(
             return (false, "Cluster is not this tenant's, or has no kubeconfig configured.");
 
         AppGovernanceData data = await LoadAsync(tenantId, appId, environmentId, ct);
-        string yaml = BuildManifest(data, ns);
+
+        // Where this cluster's Prometheus runs, asked of Catalog as the tenant — the same answer
+        // the metrics views and the SeaweedFS policy get — so the namespace's policies let it in.
+        string? prometheusNamespace = EntKube.Web.Services.ScrapeMonitors.PrometheusScrapeAllowance.NamespaceToAdmit(
+            await catalog.FindPrometheusAsync(tenantId, cluster.Id, ct));
+
+        string yaml = BuildManifest(data, ns, prometheusNamespace);
 
         // The seam applies and acknowledges in one call. What this replaces was an acknowledgment
         // built here from a summary string, followed by this service running its own kubectl with
@@ -774,7 +781,14 @@ public class AppGovernanceService(
 
     // ── Manifest builder ──────────────────────────────────────────────────────
 
-    public static string BuildManifest(AppGovernanceData data, string ns)
+    /// <summary>The NetworkPolicy that lets the cluster's Prometheus through governance's own policies.</summary>
+    public const string PrometheusAllowanceName = "entkube-allow-prometheus";
+
+    /// <param name="prometheusNamespace">
+    /// Where the cluster's Prometheus runs, as Catalog records it, or null when there is none or
+    /// nobody recorded where. Only a known namespace is let through the namespace's policies.
+    /// </param>
+    public static string BuildManifest(AppGovernanceData data, string ns, string? prometheusNamespace)
     {
         var docs = new List<string>();
 
@@ -811,6 +825,13 @@ public class AppGovernanceService(
         }
 
         // 3. NetworkPolicies
+        //
+        // Every built-in type selects every pod of the namespace and restricts its ingress, so the
+        // moment one of them is applied the namespace is closed to whatever it does not name —
+        // the cluster's Prometheus included. We remember whether one was written, to let
+        // Prometheus back in below.
+        bool namespaceClosedToIngress = false;
+
         foreach (AppNetworkPolicy np in data.NetworkPolicies)
         {
             string header = Y(
@@ -822,10 +843,16 @@ public class AppGovernanceService(
                 "spec:",
                 "  podSelector: {}");
 
+            // Each body follows the header on lines of its own. The allow types used to be glued
+            // straight onto it, which put "podSelector: {}" and "ingress:" on one line — YAML that
+            // kubectl refused, taking the whole governance apply down with it.
             string policyYaml = np.PolicyType switch
             {
                 AppNetworkPolicyType.DenyAll =>
-                    header + "\n  policyTypes:\n    - Ingress\n    - Egress",
+                    Y(header,
+                        "  policyTypes:",
+                        "    - Ingress",
+                        "    - Egress"),
 
                 // The namespace list must name whatever actually terminates external traffic on
                 // the target cluster. Omitting the one in use does not fail loudly: the packets
@@ -834,7 +861,7 @@ public class AppGovernanceService(
                 // is included because an Istio ingress gateway is the common case on EntKube-managed
                 // clusters; add more via a Custom policy when a cluster fronts traffic differently.
                 AppNetworkPolicyType.AllowFromIngress =>
-                    header + Y(
+                    Y(header,
                         "  ingress:",
                         "    - from:",
                         "        - namespaceSelector:",
@@ -847,14 +874,14 @@ public class AppGovernanceService(
                         "                  - istio-system"),
 
                 AppNetworkPolicyType.AllowFromSameNamespace =>
-                    header + Y(
+                    Y(header,
                         "  ingress:",
                         "    - from:",
                         "        - podSelector: {}"),
 
                 AppNetworkPolicyType.AllowFromNamespace
                     when !string.IsNullOrWhiteSpace(np.AllowFromNamespace) =>
-                    header + Y(
+                    Y(header,
                         "  ingress:",
                         "    - from:",
                         "        - namespaceSelector:",
@@ -869,6 +896,24 @@ public class AppGovernanceService(
 
             if (!string.IsNullOrWhiteSpace(policyYaml))
                 docs.Add(policyYaml.Trim());
+
+            // A custom policy is not counted: its own selector and types decide what it closes,
+            // and an allowance over every pod beside one that closes only some of them would
+            // close the rest.
+            if (np.PolicyType != AppNetworkPolicyType.Custom && !string.IsNullOrWhiteSpace(policyYaml))
+            {
+                namespaceClosedToIngress = true;
+            }
+        }
+
+        // The cluster's Prometheus is let back in wherever a built-in policy closed the namespace,
+        // so the app's metrics keep arriving. Only where we know where Prometheus runs: a guessed
+        // namespace would let in somebody else's pods. And never on its own — an ingress allowance
+        // over every pod is itself a policy that closes the namespace to everything else.
+        if (namespaceClosedToIngress && !string.IsNullOrWhiteSpace(prometheusNamespace))
+        {
+            docs.Add(EntKube.Web.Services.ScrapeMonitors.PrometheusScrapeAllowance.BuildNetworkPolicy(
+                PrometheusAllowanceName, ns, prometheusNamespace));
         }
 
         // 4. ServiceAccount + Role + RoleBinding

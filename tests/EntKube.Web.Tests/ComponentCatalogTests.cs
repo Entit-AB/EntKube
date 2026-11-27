@@ -640,6 +640,24 @@ public class ComponentCatalogTests : IDisposable
         result.MissingDependencies.Should().Contain("cert-manager");
     }
 
+    /// <summary>
+    /// The cluster operator's release manifest (v2.23.x, fetched from <c>releases/latest</c>) ships a
+    /// cert-manager Issuer and Certificate for its webhook. Without cert-manager the apply fails on
+    /// those kinds, and the webhooks never get a CA, so the dependency has to be asked for up front.
+    /// </summary>
+    [Fact]
+    public void CheckDependencies_RabbitMqClusterOperatorRequiresCertManager()
+    {
+        CatalogEntry entry = ComponentCatalog.GetByKey("rabbitmq-cluster-operator")!;
+
+        DependencyCheckResult without = ComponentCatalog.CheckDependencies(entry, []);
+        DependencyCheckResult with = ComponentCatalog.CheckDependencies(entry, ["cert-manager"]);
+
+        without.IsSatisfied.Should().BeFalse();
+        without.MissingDependencies.Should().Equal("cert-manager");
+        with.IsSatisfied.Should().BeTrue();
+    }
+
     [Fact]
     public void CheckDependencies_CaseInsensitive()
     {

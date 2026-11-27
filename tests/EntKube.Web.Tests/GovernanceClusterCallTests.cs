@@ -62,6 +62,7 @@ public class GovernanceClusterCallTests : IDisposable
         sut = new AppGovernanceService(
             testDb.Factory,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             NullLogger<AppGovernanceService>.Instance);
     }
 
@@ -118,6 +119,36 @@ public class GovernanceClusterCallTests : IDisposable
         applied.Should().ContainSingle()
             .Which.Namespace.Should().Be("billing-ns",
                 "the namespace comes from the deployment targeting this cluster in this environment");
+    }
+
+    /// <summary>
+    /// The wiring behind <c>PrometheusScrapeAllowanceTests</c>: the apply asks Catalog where this
+    /// cluster's Prometheus runs and hands that to the manifest. Those tests pass the namespace in
+    /// by hand, so without this one an apply that never asked would pass all of them.
+    /// </summary>
+    [Fact]
+    public async Task A_deny_all_applied_where_Prometheus_runs_lets_Prometheus_scrape()
+    {
+        await SeedAsync();
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(), ClusterId = clusterId, Name = "kube-prometheus-stack",
+            ComponentType = "HelmChart", HelmChartName = "kube-prometheus-stack",
+            ReleaseName = "kube-prometheus-stack", Namespace = "observability",
+            Status = ComponentStatus.Installed,
+        });
+        db.AppNetworkPolicies.Add(new AppNetworkPolicy
+        {
+            Id = Guid.NewGuid(), AppId = appId, EnvironmentId = environmentId,
+            Name = "deny-all", PolicyType = AppNetworkPolicyType.DenyAll,
+        });
+        await db.SaveChangesAsync();
+
+        (bool ok, string output) = await sut.ApplyToClusterAsync(tenantId, appId, environmentId, Cluster());
+
+        ok.Should().BeTrue(output);
+        string manifest = applied.Should().ContainSingle().Subject.Manifest;
+        PrometheusJudge.LetsIn(manifest, "billing-ns", prometheusLivesIn: "observability").Should().BeTrue();
     }
 
     [Fact]
