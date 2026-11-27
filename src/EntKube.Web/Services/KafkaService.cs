@@ -708,6 +708,14 @@ public class KafkaService(
 
     // ── Manifest builders ─────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The Strimzi API every Kafka resource EntKube writes is spoken in. It has to be one the operator
+    /// the catalog installs actually serves: Strimzi 1.x serves <c>v1</c> only, and the API server
+    /// refuses anything written as <c>v1beta2</c> outright, so no Kafka cluster, pool, topic or user
+    /// could be created. Change it together with the catalog's chart version, never apart from it.
+    /// </summary>
+    private const string StrimziApiVersion = "kafka.strimzi.io/v1";
+
     private static string BuildBindingSecretManifest(string name, string ns, Dictionary<string, string> data)
     {
         StringBuilder sb = new();
@@ -729,7 +737,7 @@ public class KafkaService(
     private static string BuildNodePoolManifest(KafkaCluster cluster)
     {
         StringBuilder sb = new();
-        sb.AppendLine("apiVersion: kafka.strimzi.io/v1beta2");
+        sb.AppendLine($"apiVersion: {StrimziApiVersion}");
         sb.AppendLine("kind: KafkaNodePool");
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {cluster.Name}-pool");
@@ -776,7 +784,7 @@ public class KafkaService(
         int minIsr = Math.Max(1, Math.Min(cluster.Replicas - 1, 2));
 
         StringBuilder sb = new();
-        sb.AppendLine("apiVersion: kafka.strimzi.io/v1beta2");
+        sb.AppendLine($"apiVersion: {StrimziApiVersion}");
         sb.AppendLine("kind: Kafka");
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {cluster.Name}");
@@ -830,7 +838,7 @@ public class KafkaService(
     private static string BuildTopicManifest(KafkaCluster cluster, KafkaTopic topic)
     {
         StringBuilder sb = new();
-        sb.AppendLine("apiVersion: kafka.strimzi.io/v1beta2");
+        sb.AppendLine($"apiVersion: {StrimziApiVersion}");
         sb.AppendLine("kind: KafkaTopic");
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {TopicResourceName(topic)}");
@@ -852,7 +860,7 @@ public class KafkaService(
     private static string BuildUserManifest(KafkaCluster cluster, KafkaUser user)
     {
         StringBuilder sb = new();
-        sb.AppendLine("apiVersion: kafka.strimzi.io/v1beta2");
+        sb.AppendLine($"apiVersion: {StrimziApiVersion}");
         sb.AppendLine("kind: KafkaUser");
         sb.AppendLine("metadata:");
         sb.AppendLine($"  name: {user.Username}");

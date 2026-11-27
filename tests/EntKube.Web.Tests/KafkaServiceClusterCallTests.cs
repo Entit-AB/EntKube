@@ -117,6 +117,39 @@ public class KafkaServiceClusterCallTests : IDisposable
         applied.Should().Contain(m => m.Contains("Kafka"));
     }
 
+    /// <summary>
+    /// The catalog installs Strimzi 1.1.0, whose CRDs serve <c>kafka.strimzi.io/v1</c> and nothing
+    /// else. Every resource was written as <c>v1beta2</c>, which that API server refuses outright —
+    /// so no Kafka cluster, pool, topic or user could be created on a cluster set up from the catalog.
+    /// </summary>
+    [Fact]
+    public async Task Every_Strimzi_resource_is_written_in_the_version_the_installed_operator_serves()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedAsync("ours");
+
+        KafkaCluster cluster = await sut.CreateClusterAsync(
+            tenantId, clusterId, "events", "messaging", 3, "4.1.0", "10Gi", null, true,
+            null, null, null);
+        await sut.CreateTopicAsync(tenantId, cluster.Id, "orders", 3, 3, null);
+        await sut.CreateUserAsync(tenantId, cluster.Id, "orders-app", "orders", "orders", "orders-group", false);
+
+        // Each manifest as its top-level lines: (apiVersion, kind).
+        List<(string ApiVersion, string Kind)> strimzi =
+        [
+            .. applied
+                .Select(m => m.Split('\n').Select(l => l.TrimEnd('\r')).ToList())
+                .Select(lines => (
+                    ApiVersion: lines.Single(l => l.StartsWith("apiVersion: ")),
+                    Kind: lines.Single(l => l.StartsWith("kind: "))))
+                .Where(r => r.Kind.StartsWith("kind: Kafka"))
+        ];
+
+        strimzi.Select(r => r.Kind)
+            .Should().BeEquivalentTo(["kind: KafkaNodePool", "kind: Kafka", "kind: KafkaTopic", "kind: KafkaUser"],
+                "the four resources this flow creates are the ones being checked");
+        strimzi.Should().AllSatisfy(r => r.ApiVersion.Should().Be("apiVersion: kafka.strimzi.io/v1"));
+    }
+
     [Fact]
     public async Task Creating_a_topic_applies_it_to_the_clusters_own_cluster()
     {
