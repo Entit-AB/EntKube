@@ -366,6 +366,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter] public required Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -572,6 +576,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         // Switching fetching on with nothing to authenticate with would only produce a
         // failure every couple of minutes, so say so here instead.
         // Only when there is a password to need. A mailbox on a server EntKube manages gets its
@@ -646,6 +655,11 @@
 
     private async Task PollNowAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         MailPollResult result = await Mailboxes.PollAsync(TenantId);
 
         if (result.AlreadyRunning)
@@ -691,6 +705,11 @@
 
     private async Task DeleteAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         busy = true;
 
         try

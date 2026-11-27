@@ -38,8 +38,11 @@ public class TenantRole
     /// </summary>
     public int PermissionSchema { get; set; } = CurrentPermissionSchema;
 
-    /// <summary>The version of the permission rules this build enforces.</summary>
-    public const int CurrentPermissionSchema = 1;
+    /// <summary>
+    /// The version of the permission rules this build enforces. 1: role permissions enforced.
+    /// 2: knowledge-base categories and deleting answers moved from Edit to Manage.
+    /// </summary>
+    public const int CurrentPermissionSchema = 2;
 
     // Navigation
     public Tenant Tenant { get; set; } = null!;

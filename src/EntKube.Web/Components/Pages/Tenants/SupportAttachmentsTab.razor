@@ -51,6 +51,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -79,6 +83,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         // Only one of the links we listed — the tenant's own.
         Guid? id = Guid.TryParse(choice, out Guid parsed) && links.Any(l => l.Id == parsed) ? parsed : null;
 

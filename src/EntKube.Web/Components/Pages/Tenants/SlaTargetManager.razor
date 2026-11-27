@@ -151,6 +151,10 @@ else
 }
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter] public required Guid TenantId { get; set; }
 
     private List<SlaTargetRow> targets = [];
@@ -299,6 +303,11 @@ else
 
     private async Task Save()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.ServiceLevels, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         saving = true;
         try
         {
@@ -321,6 +330,11 @@ else
 
     private async Task Delete(SlaTarget target)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.ServiceLevels, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             using EntKube.Web.Data.Modules.SupportDbContext db = DbFactory.CreateDbContext();

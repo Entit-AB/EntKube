@@ -118,6 +118,10 @@ else
 }
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
     /// <summary>
     /// Who booked the time. Supplied by the ticket detail; the fallback is here because a
@@ -173,6 +177,11 @@ else
 
     private async Task LogAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (from is null || to is null || to <= from)
         {
             Toasts.Error("The end has to be after the start.");
@@ -210,6 +219,17 @@ else
 
     private async Task DeleteAsync(Guid entryId)
     {
+        // Taking back one's own hours is part of working the ticket; taking back somebody else's
+        // changes what they will be paid or billed for, and asks for more. Entries record a name,
+        // not an account, so a name is what is compared.
+        TimeEntry? entry = entries.FirstOrDefault(e => e.Id == entryId);
+        AccessLevel needs = entry?.PerformedBy == Actor ? AccessLevel.Edit : AccessLevel.Manage;
+
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
+        {
+            return;
+        }
+
         await Time.DeleteAsync(Ticket.TenantId, entryId);
         await LoadAsync();
         await OnChanged.InvokeAsync();

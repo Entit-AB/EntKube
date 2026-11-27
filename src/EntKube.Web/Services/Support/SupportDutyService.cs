@@ -12,20 +12,25 @@ namespace EntKube.Web.Services.Support;
 /// <param name="Enrolled">Whether they are on the roster at all.</param>
 /// <param name="IsActive">Whether they are taking work right now.</param>
 /// <param name="Note">Why they are not, when they are not.</param>
+/// <param name="MayWorkTickets">
+/// Whether their role in the tenant lets them work tickets ("Tickets: Edit"). Somebody on the
+/// roster may only read them; they are not handed one.
+/// </param>
 public readonly record struct SupportTechnician(
     string UserId,
     string Name,
     string? Email,
     bool Enrolled,
     bool IsActive,
-    string? Note)
+    string? Note,
+    bool MayWorkTickets = true)
 {
     /// <summary>
     /// Whether a ticket can actually be handed to them. An enrolled, active technician with
     /// no address is on the roster and cannot be written to, and assigning to them would be
     /// the silent-nothing-happened failure this subsystem is most prone to.
     /// </summary>
-    public bool CanTakeWork => Enrolled && IsActive && !string.IsNullOrWhiteSpace(Email);
+    public bool CanTakeWork => Enrolled && IsActive && MayWorkTickets && !string.IsNullOrWhiteSpace(Email);
 }
 
 /// <summary>
@@ -62,14 +67,18 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        var members = await db.TenantMemberships.AsNoTracking()
+        // The people who work support here: members whose role lets them at least see tickets.
+        // A member with no support permission — a developer, say — is not offered a place on the
+        // rota, and is not told about tickets (the notifications read this same list).
+        List<RosterMember> members = [.. (await db.TenantMemberships.AsNoTracking()
             .Where(m => m.TenantId == tenantId)
             .Join(
                 db.Users.AsNoTracking(),
                 m => m.UserId,
                 u => u.Id,
-                (m, u) => new { u.Id, u.Email, u.UserName })
-            .ToListAsync(ct);
+                (m, u) => new RosterMember(u.Id, u.Email, u.UserName, m.Role.PermissionsJson))
+            .ToListAsync(ct))
+            .Where(m => m.Grants.Allows(TenantFeature.SupportTickets, AccessLevel.View))];
 
         Dictionary<string, SupportDuty> duties = await db.SupportDuties.AsNoTracking()
             .Where(d => d.TenantId == tenantId)
@@ -86,7 +95,8 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
                     m.Email,
                     Enrolled: duty is not null,
                     IsActive: duty?.IsActive ?? false,
-                    Note: duty?.Note);
+                    Note: duty?.Note,
+                    MayWorkTickets: m.Grants.Allows(TenantFeature.SupportTickets, AccessLevel.Edit));
             })
             .OrderByDescending(t => t.Enrolled)
             .ThenByDescending(t => t.IsActive)
@@ -182,8 +192,12 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        bool isMember = await db.TenantMemberships.AsNoTracking()
-            .AnyAsync(m => m.TenantId == tenantId && m.UserId == userId, ct);
+        RoleGrants? membership = await db.TenantMemberships.AsNoTracking()
+            .Where(m => m.TenantId == tenantId && m.UserId == userId)
+            .Select(m => new RoleGrants(m.Role.PermissionsJson))
+            .FirstOrDefaultAsync(ct);
+
+        bool isMember = membership is not null;
 
         if (!isMember)
         {
@@ -192,6 +206,14 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
             // so getting here means something is wrong rather than merely unusual.
             throw new InvalidOperationException(
                 "Only a member of this tenant can be put on its support roster.");
+        }
+
+        // Going on duty means being handed the next ticket, which takes a role that works them.
+        // Standing down, or coming off the rota, never needs it.
+        if (isActive && !membership!.Grants.Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+        {
+            throw new InvalidOperationException(
+                "Only somebody whose role lets them work tickets (Tickets: Edit) can take support work.");
         }
 
         SupportDuty? duty = await db.SupportDuties
@@ -255,5 +277,18 @@ public class SupportDutyService(IDbContextFactory<ApplicationDbContext> dbFactor
             .FirstOrDefault(t =>
                 t!.Value.Email != null
                 && t.Value.Email.Trim().ToLowerInvariant() == wanted);
+    }
+
+    // A member as the roster reads them, with what their role grants.
+    private sealed record RosterMember(string Id, string? Email, string? UserName, string? PermissionsJson)
+    {
+        public EffectivePermissions Grants { get; } =
+            EffectivePermissions.Granting(TenantRoleService.DecodePermissions(PermissionsJson));
+    }
+
+    private sealed record RoleGrants(string? PermissionsJson)
+    {
+        public EffectivePermissions Grants { get; } =
+            EffectivePermissions.Granting(TenantRoleService.DecodePermissions(PermissionsJson));
     }
 }

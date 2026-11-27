@@ -413,8 +413,14 @@ public class TicketBridgeRenderTests : BunitContext, IDisposable
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid customerId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public TicketBridgeRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 

@@ -107,6 +107,63 @@ public class TenantPermissionsTests : IDisposable
         root.Allows(TenantFeature.CustomerPortalAccess, AccessLevel.Manage).Should().BeTrue();
     }
 
+    [Fact]
+    public async Task The_support_menu_lists_only_the_tenants_where_the_person_works_support()
+    {
+        // A member of both tenants, but an agent only over here: the menu offers only this one.
+        Member("user-anna", ours, Role(ours, "Agent", Grants((TenantFeature.KnowledgeBase, AccessLevel.View))));
+        Member("user-anna", theirs, Role(theirs, "Operator", Grants((TenantFeature.Clusters, AccessLevel.Manage))));
+
+        List<TenantPermissions> tenants = await roles.TenantsHoldingAsync("user-anna", PermissionArea.Support);
+
+        tenants.Select(t => t.Tenant.Id).Should().Equal(ours);
+        tenants.Single().Permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.View).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_global_admin_works_support_in_every_tenant()
+    {
+        db.Users.Add(new ApplicationUser { Id = "user-root", UserName = "root" });
+        db.Roles.Add(new IdentityRole("Admin") { Id = "role-admin", NormalizedName = "ADMIN" });
+        db.UserRoles.Add(new IdentityUserRole<string> { UserId = "user-root", RoleId = "role-admin" });
+        db.SaveChanges();
+
+        (await roles.TenantsHoldingAsync("user-root", PermissionArea.Support)).Select(t => t.Tenant.Id)
+            .Should().BeEquivalentTo([ours, theirs]);
+    }
+
+    [Fact]
+    public void Holding_something_in_an_area_means_at_least_View_on_one_of_its_permissions()
+    {
+        EffectivePermissions toolsOnly = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTools] = AccessLevel.Edit,
+        });
+
+        toolsOnly.HoldsAnyIn(PermissionArea.Support).Should().BeTrue();
+        toolsOnly.HoldsAnyIn(PermissionArea.Customers).Should().BeFalse();
+        EffectivePermissions.Nothing.HoldsAnyIn(PermissionArea.Support).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Pages outside the support desk that write incidents — the tenant page's alerts, the fleet
+    /// advisor — are handed no permissions, so they ask for them at the moment of writing, in the
+    /// tenant the incident belongs to.
+    /// </summary>
+    [Fact]
+    public async Task A_write_outside_the_desk_asks_the_incidents_tenant_at_the_moment_of_writing()
+    {
+        Member("user-anna", ours, Role(ours, "Watcher", Grants((TenantFeature.Incidents, AccessLevel.View))));
+        Member("user-anna", theirs, Role(theirs, "Responder", Grants((TenantFeature.Incidents, AccessLevel.Edit))));
+
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+            .Should().BeTrue("over here she may only look");
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, theirs, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+            .Should().BeFalse("over there she responds");
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, null, TenantFeature.Incidents, AccessLevel.View))
+            .Should().BeTrue("nobody signed in holds nothing");
+    }
+
     // ───────────────────────────── Carrying existing roles across ─────────────────────────────
 
     [Fact]
@@ -151,12 +208,13 @@ public class TenantPermissionsTests : IDisposable
     public void Where_knowledge_base_editors_were_chosen_everyone_else_keeps_reading_but_not_editing()
     {
         // The old opt-in: once some role was made the knowledge base's editor, everybody else
-        // could only read it. Both halves of that survive.
+        // could only read it. Both halves of that survive. An editor then could also run the
+        // categories and delete answers, which is Manage now — so that is what they keep.
         Dictionary<TenantFeature, AccessLevel> editor = PermissionCatalog.CarryAcross(
             new() { [TenantFeature.KnowledgeBase] = AccessLevel.Edit }, knowledgeBaseEditorsChosen: true);
         Dictionary<TenantFeature, AccessLevel> agent = PermissionCatalog.CarryAcross([], knowledgeBaseEditorsChosen: true);
 
-        editor.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        editor.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         agent.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
     }
 
@@ -174,11 +232,31 @@ public class TenantPermissionsTests : IDisposable
         second.Should().BeEmpty();
 
         // The opt-in is judged per tenant: choosing editors over here says nothing about over there.
-        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         Stored(agents).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
         Stored(elsewhere).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         Stored(agents).Should().Contain(TenantFeature.SupportTickets, AccessLevel.Manage);
 
+        db.TenantRoles.AsNoTracking().Should().OnlyContain(r => r.PermissionSchema == TenantRole.CurrentPermissionSchema);
+    }
+
+    /// <summary>
+    /// Instances that ran the first enforcement release carried their chosen knowledge-base editors
+    /// across at Edit — which then still allowed running the categories and deleting answers.
+    /// Those now need Manage, so a role at that release's schema with Edit is raised to Manage:
+    /// exactly what its members could already do, no more.
+    /// </summary>
+    [Fact]
+    public async Task A_role_from_the_first_enforcement_release_keeps_running_the_knowledge_base()
+    {
+        Guid editors = Role(ours, "KB editors", Grants((TenantFeature.KnowledgeBase, AccessLevel.Edit), (TenantFeature.SupportTickets, AccessLevel.Edit)), schema: 1);
+        Guid readers = Role(ours, "Agents", Grants((TenantFeature.KnowledgeBase, AccessLevel.View)), schema: 1);
+
+        await roles.CarryRolesAcrossAsync();
+
+        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
+        Stored(editors).Should().Contain(TenantFeature.SupportTickets, AccessLevel.Edit, "nothing else is touched");
+        Stored(readers).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
         db.TenantRoles.AsNoTracking().Should().OnlyContain(r => r.PermissionSchema == TenantRole.CurrentPermissionSchema);
     }
 
@@ -234,6 +312,9 @@ public class TenantPermissionsTests : IDisposable
         }
 
         byName["Member"].Should().Contain(TenantFeature.SupportTickets, AccessLevel.Edit);
+
+        // A member adds apps for the customers they work for, which is Customers: Edit.
+        byName["Member"].Should().Contain(TenantFeature.Customers, AccessLevel.Edit);
         byName["Member"].Should().NotContainKey(TenantFeature.CustomerPortalAccess);
         byName["Viewer"].Should().Contain(TenantFeature.SupportTickets, AccessLevel.View);
         byName["Viewer"].Should().NotContainKey(TenantFeature.SupportTools);

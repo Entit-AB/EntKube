@@ -1,3 +1,4 @@
+@using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Support
 @inject SupportDutyService Duty
@@ -155,6 +156,16 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Putting oneself on or off
+    // the rota is part of working support; changing who else is on it asks for the roster
+    // permission's top level. Nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
+    private bool Refuses(SupportTechnician technician) =>
+        technician.Name == actor
+            ? SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts)
+            : SupportGuard.Refuses(Permissions, TenantFeature.SupportRoster, AccessLevel.Manage, Toasts);
+
     [Parameter] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -197,6 +208,11 @@
 
     private async Task SetAsync(SupportTechnician technician, bool isActive)
     {
+        if (Refuses(technician))
+        {
+            return;
+        }
+
         await Duty.SetDutyAsync(TenantId, technician.UserId, isActive, null, actor);
         Toasts.Success(
             isActive
@@ -225,6 +241,11 @@
             return;
         }
 
+        if (Refuses(technician))
+        {
+            return;
+        }
+
         await Duty.SetDutyAsync(TenantId, technician.UserId, false, standDownNote, actor);
         standingDown = null;
         Toasts.Info($"{technician.Name} has stood down.");
@@ -234,6 +255,11 @@
 
     private async Task RemoveAsync(SupportTechnician technician)
     {
+        if (Refuses(technician))
+        {
+            return;
+        }
+
         await Duty.RemoveAsync(TenantId, technician.UserId);
         Toasts.Info($"{technician.Name} is off the roster.");
 

@@ -1,0 +1,58 @@
+@page "/support"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Data
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inject TenantRoleService Roles
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
+
+@* The way into support when no tenant is named: straight to the desk when there is only one
+   this person works support in, otherwise a choice between them. *@
+
+<PageTitle>Support</PageTitle>
+
+@if (tenants is null)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+    </div>
+}
+else if (tenants.Count == 0)
+{
+    <div class="alert alert-light border" data-test="support-none">
+        <i class="bi bi-life-preserver me-1"></i>Your roles do not include support in any tenant.
+        An administrator can grant it under Admin → Roles.
+    </div>
+}
+else
+{
+    <h1 class="h4 mb-3"><i class="bi bi-life-preserver me-2 text-primary"></i>Support</h1>
+    <div class="list-group" style="max-width: 32rem">
+        @foreach (Tenant t in tenants.Select(d => d.Tenant))
+        {
+            <a class="list-group-item list-group-item-action d-flex align-items-center" href="@SupportLinks.Desk(t.Slug)">
+                <i class="bi bi-building me-2 text-muted"></i>@t.Name
+                <i class="bi bi-arrow-right ms-auto text-muted"></i>
+            </a>
+        }
+    </div>
+}
+
+@code {
+    private List<TenantPermissions>? tenants;
+
+    protected override async Task OnInitializedAsync()
+    {
+        string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        tenants = userId is null ? [] : await Roles.TenantsHoldingAsync(userId, PermissionArea.Support);
+
+        // One tenant is not a choice.
+        if (tenants.Count == 1)
+        {
+            Nav.NavigateTo(SupportLinks.Desk(tenants[0].Tenant.Slug), replace: true);
+        }
+    }
+}

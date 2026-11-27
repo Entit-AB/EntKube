@@ -69,7 +69,17 @@ public sealed class EffectivePermissions
 
     /// <summary>Whether the level held on <paramref name="feature"/> is at least <paramref name="atLeast"/>.</summary>
     public bool Allows(TenantFeature feature, AccessLevel atLeast) => LevelOf(feature) >= atLeast;
+
+    /// <summary>
+    /// Whether anything in an area is held at all — at least View on one of its permissions. This
+    /// is what decides whether a whole menu, such as Support, is offered in a tenant.
+    /// </summary>
+    public bool HoldsAnyIn(PermissionArea area) =>
+        PermissionCatalog.Features.Where(f => f.Area == area).Any(f => Allows(f.Feature, AccessLevel.View));
 }
+
+/// <summary>A tenant, and what one person may do in it.</summary>
+public sealed record TenantPermissions(Tenant Tenant, EffectivePermissions Permissions);
 
 /// <summary>How many roles in one tenant were carried across, for the startup log.</summary>
 public sealed record RolePermissionUpgrade(Guid TenantId, string TenantName, int Roles, bool KnowledgeBaseEditorsKept);
@@ -122,32 +132,32 @@ public static class PermissionCatalog
             (AccessLevel.Edit, "See access requests"),
             (AccessLevel.Manage, "Approve, deny and revoke cluster access")),
 
-        Row(TenantFeature.SupportTickets, PermissionArea.Support, "Tickets", "bi-life-preserver", enforced: false,
+        Row(TenantFeature.SupportTickets, PermissionArea.Support, "Tickets", "bi-life-preserver", enforced: true,
             (AccessLevel.View, "See the queue, tickets and customer feedback"),
-            (AccessLevel.Edit, "Work tickets: reply, note, set state, priority and owner, log time, run macros"),
-            (AccessLevel.Manage, "Also merge tickets, move them between tenants, and delete them")),
-        Row(TenantFeature.SupportTools, PermissionArea.Support, "Ticket tools", "bi-tools", enforced: false,
+            (AccessLevel.Edit, "Work tickets and the support inbox: reply, note, set state, priority and owner, log time, run macros"),
+            (AccessLevel.Manage, "Also merge tickets, move them to another tenant, and remove other people's logged time")),
+        Row(TenantFeature.SupportTools, PermissionArea.Support, "Ticket tools", "bi-tools", enforced: true,
             (AccessLevel.Edit, "Write text modules, macros and templates"),
             (AccessLevel.Manage, "Also delete them")),
         Row(TenantFeature.KnowledgeBase, PermissionArea.Support, "Knowledge base", "bi-book", enforced: true,
             (AccessLevel.View, "Read agents-only answers"),
             (AccessLevel.Edit, "Write and change answers"),
             (AccessLevel.Manage, "Also run the categories and delete answers")),
-        Row(TenantFeature.SupportReporting, PermissionArea.Support, "Support reporting", "bi-bar-chart", enforced: false,
+        Row(TenantFeature.SupportReporting, PermissionArea.Support, "Support reporting", "bi-bar-chart", enforced: true,
             (AccessLevel.View, "See the dashboard and reports, and export them")),
-        Row(TenantFeature.SupportRoster, PermissionArea.Support, "Support roster", "bi-person-check", enforced: false,
+        Row(TenantFeature.SupportRoster, PermissionArea.Support, "Support roster", "bi-person-check", enforced: true,
             (AccessLevel.View, "See who is on the rota"),
-            (AccessLevel.Manage, "Change the rota and other people's absence")),
-        Row(TenantFeature.SupportChannels, PermissionArea.Support, "Support channels", "bi-envelope-at", enforced: false,
+            (AccessLevel.Manage, "Put other people on or off the rota (anybody working tickets may put themselves on it)")),
+        Row(TenantFeature.SupportChannels, PermissionArea.Support, "Support channels", "bi-envelope-at", enforced: true,
             (AccessLevel.View, "See how tickets arrive"),
             (AccessLevel.Manage, "Change the mailbox, triage phrases, attachments, ticket bridge and issue trackers")),
-        Row(TenantFeature.ServiceLevels, PermissionArea.Support, "Service levels", "bi-check2-square", enforced: false,
+        Row(TenantFeature.ServiceLevels, PermissionArea.Support, "Service levels", "bi-check2-square", enforced: true,
             (AccessLevel.View, "See the SLA targets"),
             (AccessLevel.Edit, "Change the SLA targets")),
-        Row(TenantFeature.Incidents, PermissionArea.Support, "Incidents & on-call", "bi-exclamation-octagon", enforced: false,
+        Row(TenantFeature.Incidents, PermissionArea.Support, "Incidents & on-call", "bi-exclamation-octagon", enforced: true,
             (AccessLevel.View, "See on-call and incidents"),
-            (AccessLevel.Edit, "Acknowledge and work incidents"),
-            (AccessLevel.Manage, "Also change the on-call schedule and the subconsultant register")),
+            (AccessLevel.Edit, "Acknowledge and work incidents, and write handover notes"),
+            (AccessLevel.Manage, "Also change on-call schedules and the subconsultant register")),
 
         Row(TenantFeature.Customers, PermissionArea.Customers, "Customers", "bi-building", enforced: false,
             (AccessLevel.View, "See customers and their details"),
@@ -206,12 +216,13 @@ public static class PermissionCatalog
         }
 
         // The knowledge base was opt-in. Where nobody had opted in, everybody could edit it, and
-        // so everybody may. Where editors had been chosen, they keep editing, and everybody else
-        // keeps reading — the agents-only answers were never hidden from them.
+        // so everybody may. Where editors had been chosen, they keep all an editor could do —
+        // write answers, run the categories, delete answers, which is Manage now — and everybody
+        // else keeps reading: the agents-only answers were never hidden from them.
         AccessLevel knowledgeBase = existing.GetValueOrDefault(TenantFeature.KnowledgeBase, AccessLevel.None);
 
         carried[TenantFeature.KnowledgeBase] = knowledgeBaseEditorsChosen
-            ? (knowledgeBase > AccessLevel.View ? knowledgeBase : AccessLevel.View)
+            ? (knowledgeBase >= AccessLevel.Edit ? Describe(TenantFeature.KnowledgeBase).Highest : AccessLevel.View)
             : Describe(TenantFeature.KnowledgeBase).Highest;
 
         return carried;
@@ -245,15 +256,16 @@ public static class PermissionCatalog
         };
     }
 
-    // A member works the queue and the platform, and looks at — but does not run — how support is
-    // set up and what customers have agreed to. Letting outsiders into the portal is left to
+    // A member works the queue and the platform — including adding apps for a customer, which is
+    // Customers: Edit — and looks at, but does not run, how support is set up and what customers
+    // have agreed to. Creating customers and letting outsiders into the portal are left to
     // administrators.
     private static AccessLevel MemberLevel(FeaturePermission f) => f.Feature switch
     {
         TenantFeature.SupportTickets or TenantFeature.SupportTools or TenantFeature.KnowledgeBase
-            or TenantFeature.Incidents => AccessLevel.Edit,
+            or TenantFeature.Incidents or TenantFeature.Customers => AccessLevel.Edit,
         TenantFeature.SupportReporting or TenantFeature.SupportRoster or TenantFeature.SupportChannels
-            or TenantFeature.ServiceLevels or TenantFeature.Customers or TenantFeature.CustomerAgreements => AccessLevel.View,
+            or TenantFeature.ServiceLevels or TenantFeature.CustomerAgreements => AccessLevel.View,
         TenantFeature.CustomerPortalAccess or TenantFeature.JitAccess => AccessLevel.None,
         _ => AccessLevel.Edit,
     };

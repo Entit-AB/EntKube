@@ -196,6 +196,10 @@ else if (!isLoading)
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter] public required Guid TenantId { get; set; }
 
     /// <summary>When set (via a deep link, e.g. from the Fleet/Operations Advisor), the incident
@@ -253,12 +257,22 @@ else if (!isLoading)
 
     private async Task AckStorm(IncidentGroup g)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.BulkAcknowledgeAsync(TenantId, g.IncidentIds, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private async Task ResolveStorm(IncidentGroup g)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.BulkResolveAsync(TenantId, g.IncidentIds);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
@@ -487,6 +501,11 @@ else if (!isLoading)
 
     private async Task ReNotify(AlertIncident incident)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         reNotifyingId = incident.Id;
         reNotifyResults.Remove(incident.Id);
         StateHasChanged();
@@ -519,6 +538,11 @@ else if (!isLoading)
 
     private async Task SubmitAssign(AlertIncident incident)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             string assignee = assignForm.Assignee.Trim();
@@ -536,18 +560,33 @@ else if (!isLoading)
 
     private async Task Acknowledge(AlertIncident incident)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.AcknowledgeAsync(TenantId, incident.Id, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private async Task Resolve(AlertIncident incident)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.ResolveAsync(TenantId, incident.Id, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private async Task AddNote(AlertIncident incident)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             await IncidentService.AddNoteAsync(TenantId, incident.Id, currentUser!, noteForm.Content.Trim());

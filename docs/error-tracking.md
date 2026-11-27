@@ -39,7 +39,7 @@ A line that happened before you pressed Resolve does not reopen the issue, even 
 
 ## Alerts
 
-Under **Support › Alerting › Telemetry alerts**, create a rule of type **Errors: new or regressed
+On the tenant page, under **Operations › Alerting › Telemetry alerts**, create a rule of type **Errors: new or regressed
 issues**. It raises an incident when more than the threshold of issues appear or come back within the
 rule's window. A threshold of 0 alerts on the first new issue. Browser issues belong to a site rather
 than a cluster, so these rules cover log issues only.

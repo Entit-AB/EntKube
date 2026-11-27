@@ -134,6 +134,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter] public EventCallback<Ticket> OnCreated { get; set; }
@@ -186,6 +190,11 @@
 
     private async Task SaveDraftAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         draft.Priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
 
         // Same name as the loaded draft updates it; a new name is a copy (Zammad's rule).
@@ -207,6 +216,11 @@
 
     private async Task DeleteDraftAsync(TicketDraft d)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Drafts.DeleteNewTicketDraftAsync(TenantId, d.Id);
         if (loadedDraftId == d.Id)
         {
@@ -254,6 +268,11 @@
 
     private async Task CreateAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (draft.CustomerId is not Guid customerId || customers.All(c => c.Id != customerId))
         {
             Toasts.Error("Choose the customer.");

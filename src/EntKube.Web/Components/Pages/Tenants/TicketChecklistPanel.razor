@@ -73,6 +73,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
@@ -107,8 +111,14 @@
         await OnOpenItems.InvokeAsync(view?.Open ?? 0);
     }
 
+    // Every change to the checklist runs through here, so this is where it is checked.
     private async Task Act(Func<Task> action)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             await action();

@@ -39,6 +39,53 @@ penalty when we miss (§14.6). So:
    `BackupBundle.CurrentVersion` bump. Every query must be tenant-scoped, and anything a
    customer sees must also be customer-scoped.
 
+## Where it lives, and who may do what
+
+The helpdesk has its own menu, **Support**, at `/support/{tenant}/{section}`
+(`Components/Pages/Support/`). It used to be part of the tenant page's tree, where being a member
+of the tenant was enough to do anything. Old `/tenants/{tenant}?section=…` addresses for these
+sections are sent on to the same place, including `ticket=`, `q=`, `answer=` and `incident=`.
+Alerting stayed with the tenant, under Operations; on-call, incidents and subconsultants moved.
+
+Each section asks for a role permission (`SupportSections`), and every write in it checks again
+before writing (`SupportGuard`, with the permissions the desk hands down). The support
+permissions, and what their levels allow:
+
+| Permission | View | Edit | Manage |
+|---|---|---|---|
+| Tickets | queue, tickets, feedback, inbox | work tickets and the inbox | merge, move to another tenant, remove others' logged time |
+| Ticket tools | — | write text modules, macros, templates | delete them |
+| Knowledge base | read agents-only answers | write answers | categories, delete help answers |
+| Support reporting | dashboard, reports, export | — | — |
+| Support roster | see the rota | — | put others on or off it |
+| Support channels | see the mailbox, triage, attachments, bridge, trackers | — | change them |
+| Service levels | see SLA targets | change them | — |
+| Incidents & on-call | see them | work incidents, handover notes | schedules, subconsultant register |
+
+Beyond the desk's own pages, the same permissions decide:
+
+- **Who works support.** The roster, the rotation and ticket notifications cover only members whose
+  role sees tickets (Tickets: View); going on duty, and being handed tickets by the rotation, takes
+  Tickets: Edit. A developer who is a member of the tenant is neither offered a rota place nor told
+  about tickets.
+- **Other tenants.** Moving a ticket to another tenant, or placing an inbox message with another
+  tenant's customer, is offered only where the person's role there grants Tickets: Edit.
+- **API tokens.** A token can carry no more than its minter holds: `tickets:read` needs
+  Tickets: View, `tickets:write` (which can merge) Tickets: Manage.
+- **The calendar feed** is served only while its owner may still see tickets in that tenant.
+- **Agents-only answers** are offered by `??` only to roles with Knowledge base: View.
+- **Incidents** acknowledged or resolved from the tenant page's alerts or the fleet advisor ask for
+  Incidents: Edit in the incident's tenant, as the desk does.
+
+Roles are versioned (`TenantRole.PermissionSchema`): 0 before enforcement, 1 with it, 2 since
+knowledge-base categories and deleting answers moved from Edit to Manage. Older roles are carried
+across once at startup, and straight after a backup is restored, so nobody can do less than before.
+
+Anybody with any support permission gets "My notifications & absence", and may put themselves on
+or off the rota. A component rendered outside the desk is handed no permissions and refuses every
+write. An application's runbook in the knowledge base stays editable by whoever can open the
+application (phase 11).
+
 ## How Zammad's concepts map onto ours
 
 | Zammad | EntKube today | Decision |
@@ -144,7 +191,7 @@ the existing `TicketNotifier`.
   had none. Assessing a report as a duplicate of a ticket being worked *is* the assessment
   §14.4 waits for. Without that, a merged duplicate's response clock kept running and turned
   into a breach a week later. A merge made after the deadline is recorded as late.
-- **The deep link is `?section=tickets&ticket=N`** inside the tenant explorer, rather than a
+- **The deep link was `?section=tickets&ticket=N`** inside the tenant explorer (since the support desk got its own menu it is `/support/{tenant}/tickets?ticket=N`, and the old form is sent on), rather than a
   route of its own, so that tenant access is checked where it already is.
 - **Follower mail is a digest driven by the history** (`TicketEvent.RecordedAt`), not a hook in
   every write path. It is sent once the ticket has been quiet for two minutes, and the claim is
@@ -465,7 +512,8 @@ but never built), customers downloading their files from the portal, and rich-te
   could edit. Since role permissions are enforced (`TenantRole.PermissionSchema` 1) it is an
   ordinary grant — only roles granting Edit, and global admins, may edit. Roles from before were
   carried across once at startup (`TenantRoleService.CarryRolesAcrossAsync`): where nobody had
-  been made editor every role got Manage; where editors had been chosen they kept Edit and the
+  been made editor every role got Manage; where editors had been chosen they got Manage (all an
+  editor could do: answers, categories, deleting) and the
   rest got View. The check is made on the server in each write handler, not only by hiding
   buttons. The knowledge base has no API, so those handlers are the only way to write.
 - **Not supported, with reasons** (also in the manual): video embeds (they'd need iframes on the

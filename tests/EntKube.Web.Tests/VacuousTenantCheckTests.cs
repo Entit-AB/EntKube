@@ -220,7 +220,14 @@ public class VacuousTenantCheckTests
     /// does, because the result is assigned to a long nullable type.
     /// </summary>
     private static readonly Regex Call = new(
-        @"ForAsync\(\s*([A-Za-z_][\w\.]*)\s*,\s*([A-Za-z_][\w\.]*)\s*[,)]", RegexOptions.Compiled);
+        @"(?<!\w)ForAsync\(\s*([A-Za-z_][\w\.]*)\s*,\s*([A-Za-z_][\w\.]*)\s*[,)]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The seam's own name, not a longer one ending in it. <c>TenantRoleService.PermissionsForAsync
+    /// (tenantId, userId)</c> takes a tenant and a user, not a tenant and a cluster, and matching it
+    /// as a substring counted it as an unclassified seam call.
+    /// </summary>
+    private static readonly Regex SeamName = new(@"(?<!\w)ForAsync\(", RegexOptions.Compiled);
 
     /// <summary>
     /// A private one-line forwarder onto the seam:
@@ -318,7 +325,7 @@ public class VacuousTenantCheckTests
                     lines[i].Contains($"{w}(", StringComparison.Ordinal)
                     && !Forwarder.IsMatch(lines[i]));
 
-                if (!lines[i].Contains("ForAsync(", StringComparison.Ordinal) && !viaWrapper)
+                if (!SeamName.IsMatch(lines[i]) && !viaWrapper)
                     continue;
 
                 // The call usually wraps, because the result is a long nullable type.

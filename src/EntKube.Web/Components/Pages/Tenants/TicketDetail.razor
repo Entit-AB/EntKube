@@ -8,7 +8,7 @@
 @inject SupportDutyService Duty
 @inject ToastService Toasts
 @inject CurrentActor ActorService
-@inject UserAccessService Access
+@inject TenantRoleService Roles
 @inject AuthenticationStateProvider AuthState
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject TicketWorkService Work
@@ -104,6 +104,15 @@
     <div class="col-xl-9">
 
     <TicketPresenceBar TenantId="TenantId" TicketId="ticket.Id" Name="@Actor" Editing="@(showNote || showComposer)" />
+
+    @* Said once, up front, rather than by a refusal on every button pressed. The buttons still
+       check for themselves: what a page shows decides nothing on the server. *@
+    @if (!(Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+    {
+        <div class="alert alert-light border py-2 small" data-test="ticket-read-only">
+            <i class="bi bi-eye me-1"></i>You can read this ticket. Working it needs <strong>Tickets: Edit</strong> on your role.
+        </div>
+    }
 
     @* ───────────── Clocks ───────────── *@
     <div class="row g-3 mb-4">
@@ -726,7 +735,7 @@
         <TicketChecklistPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" Editable="IsOpen"
                               OnOpenItems="n => openChecklistItems = n" />
         <TicketIssuesPanel TenantId="TenantId" TicketId="ticket.Id" Actor="@Actor" />
-        <TicketAnswersPanel TenantId="TenantId" TicketId="ticket.Id" Version="@historyVersion" />
+        <TicketAnswersPanel TenantId="TenantId" TicketId="ticket.Id" Version="@historyVersion" TenantSlug="@TenantSlug" />
         <TicketAttachmentsPanel TenantId="TenantId" TicketId="ticket.Id" TenantSlug="@TenantSlug" Actor="@Actor"
                                 Editable="IsOpen" OnChanged="ReloadAfterWorkAsync" />
     </div>
@@ -735,6 +744,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
@@ -835,11 +848,13 @@
     }
 
     /// <summary>
-    /// The tenants this person may move a ticket into: the ones they can already reach.
+    /// The tenants this person may move a ticket into: the ones where their role lets them work
+    /// tickets, since that is whose queue it lands in.
     ///
-    /// <para>A global admin gets all of them. Anyone else gets what their memberships give
-    /// them, which for most people is one — and one tenant with the ticket already in it
-    /// means the button does not appear at all.</para>
+    /// <para>A global admin gets all of them. Anyone else gets the tenants their roles give
+    /// "Tickets: Edit" or more — being a member, as a developer say, is not enough. For most
+    /// people that is one, and one tenant with the ticket already in it means the button does
+    /// not appear at all.</para>
     /// </summary>
     private async Task<List<Tenant>> ReachableTenantsAsync()
     {
@@ -850,7 +865,11 @@
             string? userId = state.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
-            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+            return userId is null
+                ? []
+                : [.. (await Roles.TenantsHoldingAsync(userId, PermissionArea.Support))
+                    .Where(t => t.Permissions.Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+                    .Select(t => t.Tenant)];
         }
         catch
         {
@@ -976,6 +995,11 @@
 
     private async Task MoveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         // Not one of the customers we offered means no destination — whether nothing was
         // chosen, or the posted value never came from the control (see CanMoveInto). Checking
         // the customer is what carries the tenant check through to the move itself:
@@ -1103,6 +1127,11 @@
     /// </summary>
     private async Task RecordIncidentReportAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Tickets.RecordIncidentReportAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         Toasts.Success("Recorded. §14.6's report is no longer outstanding for this ticket.");
         await LoadAsync();
@@ -1120,6 +1149,11 @@
     /// </summary>
     private async Task ClaimAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         SupportTechnician? me = roster?
             .Cast<SupportTechnician?>()
             .FirstOrDefault(t => t!.Value.Name == Actor);
@@ -1138,6 +1172,11 @@
     /// <summary>Hands it to somebody else on the rota, who is told by mail.</summary>
     private async Task HandToAsync(ChangeEventArgs e)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         string? userId = e.Value?.ToString();
 
         if (string.IsNullOrWhiteSpace(userId) || roster is null)
@@ -1164,6 +1203,11 @@
 
     private async Task ReleaseAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Tickets.AssignAsync(TenantId, TicketId, null, Actor, DateTime.UtcNow);
         Toasts.Info("Back in the queue.");
         await LoadAsync();
@@ -1172,12 +1216,22 @@
 
     private async Task RespondAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Tickets.RecordResponseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Response recorded.");
     }
 
     private async Task ConfirmPriorityAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(formReason))
         {
             Toasts.Error("§14.3 requires a written reason for the priority.");
@@ -1190,6 +1244,11 @@
 
     private async Task StartPauseAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(formReason))
         {
             Toasts.Error("§14.4 requires the wait to be documented.");
@@ -1202,12 +1261,22 @@
 
     private async Task EndPauseAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Tickets.EndPauseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Clock resumed.");
     }
 
     private async Task ResolveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(formReason))
         {
             Toasts.Error("Say what resolved it — the customer sees this.");
@@ -1225,6 +1294,11 @@
 
     private async Task RejectAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(formReason))
         {
             Toasts.Error("§14.4 requires the investigation to be documented.");
@@ -1237,6 +1311,11 @@
 
     private async Task CloseAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (Guard("Close", CloseAsync))
         {
             return;
@@ -1248,6 +1327,11 @@
 
     private async Task AddNoteAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (noteEditor is not null)
         {
             noteHtml = await noteEditor.GetHtmlAsync();
@@ -1324,6 +1408,11 @@
 
     private async Task NoteTypedAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        {
+            return;
+        }
+
         if (!showNote || userId is null)
         {
             return;
@@ -1347,6 +1436,11 @@
 
     private async Task ShareDraftAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             if (noteEditor is not null)
@@ -1377,6 +1471,11 @@
     /// </summary>
     private async Task DeleteNoteAsync(TicketEvent entry)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (confirmDelete != entry.Id)
         {
             confirmDelete = entry.Id;
@@ -1434,6 +1533,11 @@
 
     private async Task DeleteSharedDraftAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Drafts.DeleteSharedNoteAsync(TenantId, TicketId);
         sharedDraft = null;
         previewShared = false;
@@ -1451,6 +1555,11 @@
 
     private async Task LogPromptedTimeAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (timeMinutes is not int minutes || minutes < 1 || minutes > 24 * 60)
         {
             Toasts.Error("Say how many minutes, or skip.");
@@ -1546,6 +1655,11 @@
 
     private async Task RenameAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             await Work.RenameAsync(TenantId, TicketId, renameTo, Actor, DateTime.UtcNow);
@@ -1559,7 +1673,7 @@
     }
 
     private string TicketHref(int number) =>
-        TenantSlug is null ? "" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+        TenantSlug is null ? "" : SupportLinks.Ticket(TenantSlug, number);
 
     /// <summary>Zammad's ".", ".." and "...": the number, then the title, then the address.</summary>
     private string CopyText(int level)
@@ -1614,6 +1728,11 @@
 
     private async Task MergeAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (mergeTarget is not int number)
         {
             Toasts.Error("Which ticket is the original?");
@@ -1654,6 +1773,11 @@
 
     private async Task SplitAsync(Guid entryId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             Ticket? created = await Work.SplitAsync(TenantId, TicketId, entryId, splitTitle, Actor, DateTime.UtcNow);
@@ -1703,6 +1827,11 @@
 
     private async Task ContinueGuardedAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         Func<Task>? action = guardedAction;
         guardedAction = null;
         guardPassed = true;
@@ -1715,6 +1844,11 @@
 
     private async Task RunMacroAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (!Guid.TryParse(macroChoice, out Guid macroId) || macros.All(m => m.Id != macroId))
         {
             Toasts.Error("Choose a macro.");

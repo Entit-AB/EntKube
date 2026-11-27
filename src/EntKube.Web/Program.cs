@@ -788,7 +788,7 @@ public class Program
         // customer mailed us must not be able to run as a page in our origin.
         app.MapGet("/tenants/{slug}/support/attachments/{id:guid}", async (
             string slug, Guid id, HttpContext httpContext, TenantService tenants, UserAccessService access,
-            EntKube.Web.Services.Tickets.TicketAttachmentService attachmentService, CancellationToken ct) =>
+            TenantRoleService roles, EntKube.Web.Services.Tickets.TicketAttachmentService attachmentService, CancellationToken ct) =>
         {
             string? userId = httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
             if (httpContext.User.Identity?.IsAuthenticated != true || userId is null)
@@ -797,6 +797,13 @@ public class Program
             Tenant? tenant = await tenants.GetTenantBySlugAsync(slug);
             if (tenant is null || !await access.HasTenantAccessAsync(userId, tenant.Id))
                 return Results.NotFound();
+
+            // A member whose role may not read tickets may not read what is attached to them.
+            // Refused, rather than not found: they can know the tenant has tickets.
+            if (!(await roles.PermissionsForAsync(tenant.Id, userId, ct)).Allows(TenantFeature.SupportTickets, AccessLevel.View))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
 
             if (await attachmentService.OpenAsync(tenant.Id, id, ct) is not { } file)
                 return Results.NotFound();
@@ -840,7 +847,7 @@ public class Program
         // attachment: the tenant from the address, the person's access to it checked first.
         app.MapGet("/tenants/{slug}/support/report.xlsx", async (
             string slug, string from, string to, HttpContext httpContext, TenantService tenants, UserAccessService access,
-            EntKube.Web.Services.Tickets.SupportReportService reports, CancellationToken ct) =>
+            TenantRoleService roles, EntKube.Web.Services.Tickets.SupportReportService reports, CancellationToken ct) =>
         {
             string? userId = httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
             if (httpContext.User.Identity?.IsAuthenticated != true || userId is null)
@@ -849,6 +856,12 @@ public class Program
             Tenant? tenant = await tenants.GetTenantBySlugAsync(slug);
             if (tenant is null || !await access.HasTenantAccessAsync(userId, tenant.Id))
                 return Results.NotFound();
+
+            // The export is the reporting page's, and asks for what that page asks for.
+            if (!(await roles.PermissionsForAsync(tenant.Id, userId, ct)).Allows(TenantFeature.SupportReporting, AccessLevel.View))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
 
             if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", out DateOnly first) || !DateOnly.TryParseExact(to, "yyyy-MM-dd", out DateOnly last)
                 || last < first || last.DayNumber - first.DayNumber > 366)
@@ -864,9 +877,13 @@ public class Program
         // random 256-bit token, of which only a hash is stored. An unknown token is a plain 404 —
         // nothing says whether it ever existed.
         app.MapGet("/support/calendar/{token}.ics", async (
-            string token, EntKube.Web.Services.Tickets.CalendarFeedService feeds, HttpContext httpContext, CancellationToken ct) =>
+            string token, EntKube.Web.Services.Tickets.CalendarFeedService feeds, TenantRoleService roles, HttpContext httpContext, CancellationToken ct) =>
         {
-            string? ics = await feeds.FeedAsync(token, DateTime.UtcNow, ct);
+            // Read only while its owner may still see tickets there: their role may have changed
+            // since they subscribed, and the calendar app will never sign in to find out.
+            string? ics = await feeds.FeedAsync(token, DateTime.UtcNow,
+                async (tenantId, userId, c) => (await roles.PermissionsForAsync(tenantId, userId, c)).Allows(TenantFeature.SupportTickets, AccessLevel.View),
+                ct);
             if (ics is null)
                 return Results.NotFound();
 
@@ -1579,14 +1596,17 @@ public class Program
         {
             foreach (RolePermissionUpgrade u in await roles.CarryRolesAcrossAsync())
             {
+                // Two kinds of role reach here: ones from before enforcement, granted the most on
+                // every support and customer permission because membership used to allow all of
+                // it, and ones from the first enforcement release, whose knowledge-base editors
+                // move from Edit to Manage. Either way, nobody can do less than before.
                 logger.LogInformation(
-                    "Role permissions, tenant {Tenant}: {Roles} role(s) carried across to enforced permissions. Each was granted "
-                    + "the most on every support and customer permission, because membership used to allow all of it; "
-                    + "{KnowledgeBase}. Tighten them under Admin → Roles.",
+                    "Role permissions, tenant {Tenant}: {Roles} role(s) carried across to the rules this build enforces, "
+                    + "keeping what their members could already do; {KnowledgeBase}. Tighten them under Admin → Roles.",
                     u.TenantName, u.Roles,
                     u.KnowledgeBaseEditorsKept
-                        ? "the knowledge-base editors chosen before keep editing and everyone else reads"
-                        : "everyone keeps editing the knowledge base, as nobody had been made its editor");
+                        ? "the knowledge-base editors chosen before enforcement keep running it and everyone else reads"
+                        : "knowledge-base editors keep running it");
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

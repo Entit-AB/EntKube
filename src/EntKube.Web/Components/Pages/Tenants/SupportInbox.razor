@@ -7,7 +7,7 @@
 @inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject CurrentActor Actor
-@inject UserAccessService Access
+@inject TenantRoleService Roles
 @inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -215,8 +215,11 @@
                                     </select>
                                 </div>
                                 <div class="col-md-5">
+                                    @* Remembering the domain writes it into the customer's register — a
+                                       customer detail, offered to those who may change one. *@
                                     @if (SenderDomain.Of(message.FromAddress) is string domain
-                                         && !SenderDomain.PublicProviders.Contains(domain))
+                                         && !SenderDomain.PublicProviders.Contains(domain)
+                                         && (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.Customers, AccessLevel.Edit))
                                     {
                                         <div class="form-check">
                                             <input type="checkbox" class="form-check-input"
@@ -345,6 +348,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
     [Parameter] public string? ActorName { get; set; }
 
@@ -367,9 +374,11 @@
     private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
 
     /// <summary>
-    /// The tenants this person can already reach. A move into one they cannot is not
-    /// offered, so the control cannot express a placement they would not be allowed to
-    /// make; failing to read the memberships offers nothing, which is the safe end of it.
+    /// The tenants whose customers this person may place mail with: those where their role works
+    /// tickets ("Tickets: Edit"), because placing a message there opens the ticket in that
+    /// tenant's queue — the same rule as moving a ticket there. A member who may not work tickets
+    /// in a tenant is not offered its customers, so the control cannot express a placement they
+    /// would not be allowed to make; failing to read the roles offers nothing, the safe end of it.
     /// </summary>
     private async Task<List<Tenant>> ReachableTenantsAsync()
     {
@@ -380,7 +389,11 @@
             string? userId = state.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
-            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+            return userId is null
+                ? []
+                : [.. (await Roles.TenantsHoldingAsync(userId, PermissionArea.Support))
+                    .Where(t => t.Permissions.Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+                    .Select(t => t.Tenant)];
         }
         catch
         {
@@ -395,9 +408,32 @@
 
     private async Task AssignAsync(Guid messageId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (!assigning.TryGetValue(messageId, out Guid customerId) || customerId == Guid.Empty)
         {
             Toasts.Error("Choose which customer it is from.");
+            return;
+        }
+
+        // Only a customer this screen offered. The choice arrives from the browser as an id, and
+        // the mail service deliberately leaves "whose customer may this be" to the screen — so an
+        // id sent by hand would otherwise place the message with any customer of any tenant.
+        if (customers.All(c => c.Id != customerId))
+        {
+            Toasts.Error("That customer is not one you can place mail with.");
+            return;
+        }
+
+        // Placing this one message is ticket work. Also remembering its domain adds the domain to
+        // the customer's mail-domain register, so that all future mail from it is placed there —
+        // the same write as on the customer's Agreement tab, and asked for the same way.
+        if (remembering.Contains(messageId)
+            && SupportGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
             return;
         }
 
@@ -521,6 +557,11 @@
 
     private async Task AcceptAsync(MailSuggestion suggestion)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         // Only the kind that opens a ticket carries an application, and only then is the
         // picker rendered — so anything else accepts with no choice attached.
         AppChoice? chosen = suggestion.Kind == MailSuggestionKind.OpenTicket
@@ -547,12 +588,22 @@
 
     private async Task RejectAsync(Guid suggestionId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Mail.RejectAsync(TenantId, suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 
     private async Task DismissAsync(Guid messageId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Mail.DismissAsync(TenantId, messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }

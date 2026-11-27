@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
+using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -29,6 +30,11 @@ public class SupportDutyServiceTests : IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid roleId = Guid.NewGuid();
     private readonly Guid otherRoleId = Guid.NewGuid();
+    private readonly Guid readerRoleId = Guid.NewGuid();
+    private readonly Guid developerRoleId = Guid.NewGuid();
+
+    private static string Grants(TenantFeature feature, AccessLevel level) =>
+        TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [feature] = level });
 
     public SupportDutyServiceTests()
     {
@@ -42,9 +48,13 @@ public class SupportDutyServiceTests : IDisposable
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.Tenants.Add(new Tenant { Id = otherTenantId, Name = "Annat", Slug = "annat" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
+        // Support works tickets, which is what being on the rota takes. A reader may see them and
+        // no more; a developer is a member with no support permission at all.
         db.TenantRoles.AddRange(
-            new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support" },
-            new TenantRole { Id = otherRoleId, TenantId = otherTenantId, Name = "Support" });
+            new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support", PermissionsJson = Grants(TenantFeature.SupportTickets, AccessLevel.Edit) },
+            new TenantRole { Id = otherRoleId, TenantId = otherTenantId, Name = "Support", PermissionsJson = Grants(TenantFeature.SupportTickets, AccessLevel.Edit) },
+            new TenantRole { Id = readerRoleId, TenantId = tenantId, Name = "Reader", PermissionsJson = Grants(TenantFeature.SupportTickets, AccessLevel.View) },
+            new TenantRole { Id = developerRoleId, TenantId = tenantId, Name = "Developer", PermissionsJson = Grants(TenantFeature.Clusters, AccessLevel.Manage) });
         db.SaveChanges();
 
         factory = new TestDbContextFactory(connection);
@@ -61,7 +71,7 @@ public class SupportDutyServiceTests : IDisposable
     }
 
     /// <summary>A member of the tenant, with an address, who could be enrolled.</summary>
-    private string Member(string name, Guid? inTenant = null, string? email = null)
+    private string Member(string name, Guid? inTenant = null, string? email = null, Guid? role = null)
     {
         string id = $"user-{name}";
 
@@ -81,7 +91,7 @@ public class SupportDutyServiceTests : IDisposable
         {
             UserId = id,
             TenantId = tenant,
-            RoleId = tenant == tenantId ? roleId : otherRoleId,
+            RoleId = role ?? (tenant == tenantId ? roleId : otherRoleId),
         });
 
         db.SaveChanges();
@@ -90,6 +100,50 @@ public class SupportDutyServiceTests : IDisposable
 
     private Task Enrol(string userId, bool active = true, string? note = null) =>
         duty.SetDutyAsync(tenantId, userId, active, note, "nils");
+
+    // ---- Who may be on it ---------------------------------------------------------------------
+
+    /// <summary>
+    /// The roster is the people who work support here. A member whose role cannot even see
+    /// tickets is not among them — listing them would offer a rota place they could not use, and
+    /// tell them about tickets in every notification.
+    /// </summary>
+    [Fact]
+    public async Task A_member_whose_role_cannot_see_tickets_is_not_on_the_roster()
+    {
+        Member("anna");
+        Member("carl", role: developerRoleId);
+
+        (await duty.GetRosterAsync(tenantId)).Select(t => t.UserId).Should().Equal("user-anna");
+    }
+
+    /// <summary>
+    /// The rotation hands whoever is on duty the next ticket, so being put on duty takes a role
+    /// that works tickets. One that may only read them would be given tickets they cannot open.
+    /// </summary>
+    [Fact]
+    public async Task A_member_who_may_only_read_tickets_cannot_be_put_on_duty()
+    {
+        string reader = Member("rita", role: readerRoleId);
+
+        Func<Task> enrol = () => Enrol(reader);
+
+        await enrol.Should().ThrowAsync<InvalidOperationException>().WithMessage("*work tickets*");
+    }
+
+    [Fact]
+    public async Task Somebody_whose_role_stops_working_tickets_drops_out_of_the_rotation()
+    {
+        string anna = Member("anna");
+        await Enrol(anna);
+
+        // Their role is tightened after they went on duty.
+        TenantRole support = db.TenantRoles.Single(r => r.Id == roleId);
+        support.PermissionsJson = Grants(TenantFeature.SupportTickets, AccessLevel.View);
+        db.SaveChanges();
+
+        (await duty.NextAsync(tenantId)).Should().BeNull("nobody left on duty may work the ticket");
+    }
 
     // ---- The roster ---------------------------------------------------------------------------
 

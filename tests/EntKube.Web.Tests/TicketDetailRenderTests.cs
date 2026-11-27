@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using AngleSharp.Dom;
 using Bunit;
+using EntKube.Web.Components.Pages.Support;
 using EntKube.Web.Components.Pages.Tenants;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
@@ -43,6 +44,11 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
+
+    // What the person looking at the ticket may do, as the support desk hands it down. Everything,
+    // unless a test says otherwise: most of these tests are about what a write records, not whether
+    // it is allowed.
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
 
     public TicketDetailRenderTests()
     {
@@ -113,6 +119,10 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         // message with another tenant's customer, the detail can move a ticket there — and
         // both ask this who the person is allowed to reach before offering anything.
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
+
+        // Read when the first component renders, so a test can change it before then.
+        Services.AddCascadingValue(_ => permissions);
     }
 
     public new void Dispose()
@@ -230,6 +240,54 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         db.Set<TicketEvent>()
             .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Responded)
             .Should().OnlyContain(e => e.Actor == "nils");
+    }
+
+    // ---- Who may work the ticket --------------------------------------------------------------
+
+    private static EffectivePermissions Holding(TenantFeature feature, AccessLevel level) =>
+        EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel> { [feature] = level });
+
+    /// <summary>
+    /// A role that may look at tickets may not work them. The check is in the handler, not only
+    /// in what the screen shows: a Blazor event runs on the server whatever the page drew.
+    /// </summary>
+    [Fact]
+    public async Task Somebody_who_may_only_view_tickets_cannot_record_a_response()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+        permissions = Holding(TenantFeature.SupportTickets, AccessLevel.View);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        detail.WaitForAssertion(() => detail.Find("[data-test=ticket-read-only]").TextContent.Should().Contain("Tickets: Edit"));
+
+        // Clicked anyway — a stale page, or an event sent by hand.
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Record first response").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).FirstResponseAt.Should().BeNull();
+        db.Set<TicketEvent>().Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Responded).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Somebody_who_may_work_tickets_sees_no_read_only_notice()
+    {
+        Ticket ticket = await Raise();
+        permissions = Holding(TenantFeature.SupportTickets, AccessLevel.Edit);
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        detail.WaitForAssertion(() => detail.FindAll("button").Should().Contain(b => b.TextContent.Contains("Resolve")));
+        detail.FindAll("[data-test=ticket-read-only]").Should().BeEmpty();
+    }
+
+    /// <summary>A ticket shown outside the support desk was handed no permissions, and so works nothing.</summary>
+    [Fact]
+    public void Somebody_handed_no_permissions_is_refused_too()
+    {
+        SupportGuard.Refuses(null, TenantFeature.SupportTickets, AccessLevel.View).Should().BeTrue();
+        SupportGuard.Refuses(EffectivePermissions.Everything, TenantFeature.SupportTickets, AccessLevel.Manage).Should().BeFalse();
+        SupportGuard.RefusalFor(TenantFeature.SupportTickets, AccessLevel.Manage).Should().Contain("Tickets: Manage");
     }
 
     // ---- What the screen shows ----------------------------------------------------------------

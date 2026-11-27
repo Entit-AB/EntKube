@@ -37,8 +37,14 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public TicketWorkRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 
@@ -151,7 +157,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await detail.InvokeAsync(() => detail.Find("[data-test=merge-form] .text-end button").Click());
 
         detail.WaitForAssertion(() =>
-            detail.Markup.Should().Contain($"Merged into <a href=\"/tenants/entit?section=tickets&amp;ticket={original.Number}\">#{original.Number}</a>"));
+            detail.Markup.Should().Contain($"Merged into <a href=\"/support/entit/tickets?ticket={original.Number}\">#{original.Number}</a>"));
 
         db.ChangeTracker.Clear();
         Ticket after = db.Tickets.Single(t => t.Id == duplicate.Id);
@@ -402,7 +408,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     {
         Ticket ticket = await Raise();
         Guid role = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = tenantId, Name = "Agent", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         db.Users.Add(new ApplicationUser { Id = "user-anna", UserName = "anna", Email = "anna@entit.example" });
         db.TenantMemberships.Add(new TenantMembership { UserId = "user-anna", TenantId = tenantId, RoleId = role });
         await db.SaveChangesAsync();
@@ -790,7 +796,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         IRenderedComponent<TicketQueue> byAnswer = Render<TicketQueue>(p => p
             .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "spooler"));
         byAnswer.WaitForAssertion(() => byAnswer.Find("[data-test=quick-results] a").GetAttribute("href")
-            .Should().Contain("section=knowledge-base").And.Contain($"answer={answer.Id}"));
+            .Should().Be($"/support/entit/knowledge-base?answer={answer.Id}"));
         byAnswer.Find("[data-test=quick-results]").TextContent.Should().Contain("Printer queue stuck").And.Contain("(internal)");
     }
 
@@ -828,6 +834,38 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     }
 
     // ───────────────────────────── Phase 5 ─────────────────────────────
+
+    /// <summary>
+    /// "??" in a reply offers knowledge-base answers to insert. Agents-only ones are the knowledge
+    /// base's to show; a role that may work tickets but not read the knowledge base is offered only
+    /// the public answers, which the customer can read anyway.
+    /// </summary>
+    [Theory]
+    [InlineData(AccessLevel.None, false)]
+    [InlineData(AccessLevel.View, true)]
+    public async Task The_reply_offers_agents_only_answers_only_to_knowledge_base_readers(AccessLevel knowledgeBase, bool offered)
+    {
+        KnowledgeBaseService kb = new(new TestDbContextFactory(connection));
+        KbCategory cat = await kb.SaveCategoryAsync(tenantId, null, "Nätverk", null);
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN guide", CategoryId = cat.Id, Visibility = KbVisibility.Public,
+            Language = "sv", BodyHtml = "<p>Install the client.</p>" }, "nils");
+        await kb.SaveAnswerAsync(tenantId, new KbAnswer { Title = "VPN reset internal", CategoryId = cat.Id, Visibility = KbVisibility.Internal,
+            Language = "sv", BodyHtml = "<p>Run the reset script.</p>" }, "nils");
+        Ticket ticket = await Raise();
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+            [TenantFeature.KnowledgeBase] = knowledgeBase,
+        });
+        JSInterop.Mode = JSRuntimeMode.Loose;
+
+        IRenderedComponent<TicketMailComposer> composer = Render<TicketMailComposer>(p => p
+            .Add(c => c.TenantId, tenantId).Add(c => c.Ticket, ticket).Add(c => c.Actor, "nils"));
+        await composer.InvokeAsync(() => composer.Instance.OnKnowledgeTrigger("vpn"));
+
+        composer.WaitForAssertion(() => composer.Markup.Should().Contain("VPN guide"));
+        composer.Markup.Contains("VPN reset internal", StringComparison.Ordinal).Should().Be(offered);
+    }
 
     [Fact]
     public async Task The_portal_shows_a_customer_their_public_answers_and_nothing_internal()
@@ -937,6 +975,30 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
         tab.WaitForAssertion(() => tab.FindAll("button").Should().Contain(b => b.TextContent.Contains("New answer")));
         tab.FindAll("[data-test=kb-read-only]").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Writing answers is Edit; running the categories (and deleting help answers) is Manage —
+    /// which is what an editor could do before, and what the carry-across gave them.
+    /// </summary>
+    [Theory]
+    [InlineData(AccessLevel.Edit, false)]
+    [InlineData(AccessLevel.Manage, true)]
+    public async Task Categories_are_offered_only_at_Manage(AccessLevel level, bool offered)
+    {
+        await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        Guid agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents",
+            PermissionsJson = $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)level}}}" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
+
+        tab.WaitForAssertion(() => tab.FindAll("button").Should().Contain(b => b.TextContent.Contains("New answer")));
+        tab.FindAll("button").Any(b => b.TextContent.Contains("Add category")).Should().Be(offered);
     }
 
     /// <summary>

@@ -132,6 +132,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -180,6 +184,11 @@
 
     private async Task SaveTemplateAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         template!.Priority = Enum.TryParse(priorityChoice, out TicketPriority p) && Enum.IsDefined(p) ? p : null;
         Guid? customerId = Guid.TryParse(customerChoice, out Guid id) && customers.Any(c => c.Id == id) ? id : null;
 
@@ -205,12 +214,22 @@
 
     private async Task DeleteTemplateAsync(TicketTemplate t)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         await Templates.DeleteAsync(TenantId, t.Id);
         await ReloadAsync();
     }
 
     private async Task SaveChecklistAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         try
         {
             await Checklists.SaveTemplateAsync(TenantId, checklist!, await ActorService.NameAsync());
@@ -226,6 +245,11 @@
 
     private async Task DeleteChecklistAsync(ChecklistTemplate c)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         await Checklists.DeleteTemplateAsync(TenantId, c.Id);
         await ReloadAsync();
     }

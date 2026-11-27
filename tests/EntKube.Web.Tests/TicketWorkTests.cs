@@ -4,6 +4,7 @@ using EntKube.Web.Services.Mail;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
 using EntKube.Web.Services.Time;
+using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -64,7 +65,7 @@ public class TicketWorkTests : IDisposable
         db.Apps.Add(new App { Id = theirApp, CustomerId = theirCustomer, Name = "Remissen" });
 
         Guid role = Guid.NewGuid();
-        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin" });
+        db.TenantRoles.Add(new TenantRole { Id = role, TenantId = ours, Name = "Admin", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         db.Users.Add(new ApplicationUser { Id = Colleague, UserName = "anna", Email = "anna@entit.example" });
         db.TenantMemberships.Add(new TenantMembership { UserId = Colleague, TenantId = ours, RoleId = role });
 

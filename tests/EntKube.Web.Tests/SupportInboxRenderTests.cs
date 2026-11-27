@@ -40,8 +40,14 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public SupportInboxRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 
@@ -75,6 +81,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         // message with another tenant's customer, the detail can move a ticket there — and
         // both ask this who the person is allowed to reach before offering anything.
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
     }
 
     public new void Dispose()
@@ -83,6 +90,39 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         connection.Dispose();
         base.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>One signed-in person with an account id, which is what tenant reach is keyed by.</summary>
+    private sealed class SignedInWithId(string name, string userId) : AuthenticationStateProvider
+    {
+        public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.Name, name), new Claim(ClaimTypes.NameIdentifier, userId)], "test"))));
+    }
+
+    /// <summary>
+    /// A second tenant, with a customer, where the signed-in person is a member whose role grants
+    /// <paramref name="tickets"/> on tickets.
+    /// </summary>
+    private void MemberOfAPartnerTenant(AccessLevel tickets)
+    {
+        Guid partner = Guid.NewGuid();
+        Guid role = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = partner, Name = "Partner", Slug = "partner" });
+        db.Customers.Add(new Customer { Id = Guid.NewGuid(), TenantId = partner, Name = "Partnerbolaget AB" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantRoles.Add(new TenantRole
+        {
+            Id = role, TenantId = partner, Name = "Partner role",
+            PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel>
+            {
+                [TenantFeature.SupportTickets] = tickets,
+                [TenantFeature.Clusters] = AccessLevel.Manage,
+            }),
+        });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = partner, RoleId = role });
+        db.SaveChanges();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInWithId("nils", "user-nils"));
     }
 
     /// <summary>A provider that reports one signed-in person, as the circuit would.</summary>
@@ -187,6 +227,107 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
 
         decided.DecidedBy.Should().Be("nils");
         decided.DecidedBy.Should().NotBe(CurrentActor.Unattributed);
+    }
+
+    /// <summary>
+    /// Accepting a suggestion opens a ticket, or writes to a customer — working the queue. A role
+    /// that may only look at tickets may look at the inbox, and decide nothing in it.
+    /// </summary>
+    [Fact]
+    public async Task Somebody_who_may_only_view_tickets_cannot_accept_a_suggestion()
+    {
+        db.ContractContacts.Add(new ContractContact
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.TechnicalContact,
+            Name = "Karin",
+            Email = "karin@entit.example",
+        });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await Receive(
+            "Journalportalen svarar inte", "Ingen kommer in.", "karin@entit.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.View,
+        });
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        IElement accept = inbox.FindAll("button")
+            .First(b => b.TextContent.Trim().StartsWith("Accept", StringComparison.Ordinal));
+
+        await inbox.InvokeAsync(() => accept.Click());
+
+        db.ChangeTracker.Clear();
+        db.Set<MailSuggestion>().Where(s => s.MessageId == message!.Id).Should().OnlyContain(s => s.DecidedBy == null);
+        db.Tickets.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Remembering a sender's domain writes it into the customer's register, so all of that
+    /// domain's future mail is placed with them. That is a customer detail — Customers: Edit, as on
+    /// the customer's Agreement tab — and working tickets is not enough for it.
+    /// </summary>
+    [Fact]
+    public async Task Remembering_a_senders_domain_is_offered_only_to_those_who_may_change_customers()
+    {
+        InboundMailMessage? message = await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+        });
+
+        IRenderedComponent<SupportInbox> agent = RenderInbox();
+
+        agent.WaitForAssertion(() => agent.Markup.Should().Contain("Fakturan"));
+        agent.FindAll($"#remember-{message!.Id}").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Somebody_who_may_change_customers_is_offered_to_remember_the_domain()
+    {
+        InboundMailMessage? message = await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+            [TenantFeature.Customers] = AccessLevel.Edit,
+        });
+
+        IRenderedComponent<SupportInbox> lead = RenderInbox();
+
+        lead.WaitForAssertion(() => lead.FindAll($"#remember-{message!.Id}").Should().ContainSingle());
+    }
+
+    /// <summary>
+    /// Placing a message with another tenant's customer opens the ticket in that tenant's queue,
+    /// so that tenant's customers are offered only where the person may work tickets — the same
+    /// rule as moving a ticket there. Being a member, as a developer say, is not that.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_customers_are_offered_only_where_the_person_works_tickets()
+    {
+        await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        MemberOfAPartnerTenant(AccessLevel.View);
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        inbox.WaitForAssertion(() => inbox.Markup.Should().Contain("Fakturan"));
+        inbox.Markup.Should().NotContain("Partnerbolaget AB");
+    }
+
+    [Fact]
+    public async Task Another_tenants_customers_are_offered_where_the_person_works_tickets()
+    {
+        await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        MemberOfAPartnerTenant(AccessLevel.Edit);
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        inbox.WaitForAssertion(() => inbox.Markup.Should().Contain("Partnerbolaget AB"));
     }
 
     // ---- The way out of a dead end ------------------------------------------------------------

@@ -27,8 +27,14 @@ public class SubconsultantRegisterRenderTests : BunitContext, IDisposable
     private readonly ApplicationDbContext db;
     private readonly Guid tenantId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public SubconsultantRegisterRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 
@@ -219,5 +225,28 @@ public class SubconsultantRegisterRenderTests : BunitContext, IDisposable
         OnCallService.ApprovalStatus(saved, DateTime.UtcNow)
             .Should().Be(SubconsultantApproval.AwaitingResponse);
         OnCallService.ObjectionDeadline(saved).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// Who may work on a customer's systems is the register's whole subject, so changing it asks
+    /// for the most the incidents permission grants. Somebody who can work incidents can read it.
+    /// </summary>
+    [Fact]
+    public async Task Changing_the_register_needs_Manage_on_incidents()
+    {
+        Subconsultant person = Add("Anna Berg");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.Incidents] = AccessLevel.Edit,
+        });
+
+        IRenderedComponent<SubconsultantRegister> register = RenderRegister();
+
+        await register.InvokeAsync(() => register.FindAll("button")
+            .First(b => b.TextContent.Contains("Notified the customer", StringComparison.Ordinal))
+            .Click());
+
+        db.ChangeTracker.Clear();
+        db.Subconsultants.Single(s => s.Id == person.Id).NotifiedAt.Should().BeNull();
     }
 }

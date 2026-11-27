@@ -112,6 +112,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
@@ -136,6 +140,9 @@
     private List<AttachmentView> stored = [];
     private string? kbQuery;
     private List<KbAnswer> answers = [];
+
+    private bool MayReadAgentsOnlyAnswers =>
+        (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.KnowledgeBase, AccessLevel.View);
     private HashSet<Guid> attach = [];
 
     protected override async Task OnInitializedAsync()
@@ -192,16 +199,35 @@
 
         // Only published answers, and never one written for another customer (KnowledgeBaseService).
         answers = query is null ? [] : await KnowledgeBase.ForAgentAsync(TenantId, Ticket.CustomerId, query, DateTime.UtcNow);
+
+        // Agents-only answers are the knowledge base's to show ("Knowledge base: View"). Without
+        // that, only public answers — ones customers can read anyway — are offered.
+        if (!MayReadAgentsOnlyAnswers)
+        {
+            answers = [.. answers.Where(a => a.Visibility == KbVisibility.Public)];
+        }
         await InvokeAsync(StateHasChanged);
     }
 
     private async Task InsertAnswerAsync(KbAnswer a)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         kbQuery = null;
 
         // Asked for again under the same rules (phase 11): the offered list may be minutes old,
         // and an answer since made Operations or narrowed to another customer must not go out.
         KbAnswer? current = await KnowledgeBase.ForInsertAsync(TenantId, Ticket.Id, a.Id, DateTime.UtcNow);
+
+        // Checked again, whatever the list offered: the answer id arrives from the browser.
+        if (current is not null && current.Visibility != KbVisibility.Public && !MayReadAgentsOnlyAnswers)
+        {
+            Toasts.Warning("Agents-only answers need Knowledge base: View on your role.");
+            return;
+        }
 
         if (current is null)
         {
@@ -257,6 +283,11 @@
 
     private async Task SendAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         string html = module is null ? "" : await module.InvokeAsync<string>("html", editor);
 
         List<OutboundAttachment> files = [];

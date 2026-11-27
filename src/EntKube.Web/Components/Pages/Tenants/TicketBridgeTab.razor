@@ -255,6 +255,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -357,6 +361,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (editing is null)
         {
             return;
@@ -396,6 +405,11 @@
 
     private async Task IssueAsync(BridgeConnectionSummary row)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         issued = await Bridge.IssueSecretAsync(TenantId, row.Connection.Id);
         issuedFor = row.CustomerName;
 
@@ -409,6 +423,11 @@
 
     private async Task DeleteAsync(TicketBridgeConnection connection)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         string? refused = await Bridge.DeleteAsync(TenantId, connection.Id);
 
         if (refused is not null)

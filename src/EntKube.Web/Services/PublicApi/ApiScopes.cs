@@ -164,6 +164,23 @@ public static class ApiScopes
 
     public const string TicketsWrite = "tickets:write";
 
+    /// <summary>
+    /// The role permission somebody needs to hand a token this scope, or null where none is
+    /// enforced yet. A token acts for whoever minted it, so it can carry no more than they hold:
+    /// <c>tickets:read</c> reads what "Tickets: View" reads, and <c>tickets:write</c> can merge
+    /// tickets, which the support desk keeps at "Tickets: Manage".
+    /// </summary>
+    public static (EntKube.Web.Data.TenantFeature Feature, EntKube.Web.Data.AccessLevel Level)? RoleNeededFor(string scope) => scope switch
+    {
+        TicketsRead => (EntKube.Web.Data.TenantFeature.SupportTickets, EntKube.Web.Data.AccessLevel.View),
+        TicketsWrite => (EntKube.Web.Data.TenantFeature.SupportTickets, EntKube.Web.Data.AccessLevel.Manage),
+        _ => null,
+    };
+
+    /// <summary>The scopes, of those asked for, that this person's role does not let them hand out.</summary>
+    public static IReadOnlyList<string> NotGrantableBy(EffectivePermissions permissions, IEnumerable<string> scopes) =>
+        [.. scopes.Where(s => RoleNeededFor(s) is { } needed && !permissions.Allows(needed.Feature, needed.Level))];
+
     /// <summary>Every scope, in the order they should be presented.</summary>
     // Declared before All: static field initializers run in declaration order, so
     // assigning All from a field declared below it would leave All null at runtime.

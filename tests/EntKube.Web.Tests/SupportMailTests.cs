@@ -153,7 +153,7 @@ public class SupportMailTests : IDisposable
     {
         Guid roleId = Guid.NewGuid();
 
-        db.TenantRoles.Add(new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support" });
+        db.TenantRoles.Add(new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support", PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = AccessLevel.Edit }) });
         db.Users.Add(new ApplicationUser
         {
             Id = "user-nils", UserName = "nils", Email = Technician,

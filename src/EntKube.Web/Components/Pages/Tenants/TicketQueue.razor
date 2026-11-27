@@ -413,6 +413,10 @@ else
 }
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     /// <summary>One customer's queue. Leave unset and <see cref="TenantId"/> is used instead.</summary>
     [Parameter] public Guid? CustomerId { get; set; }
 
@@ -511,10 +515,12 @@ else
     }
 
     /// <summary>A help answer, opened in the knowledge base.</summary>
-    private string AnswerHref(KbAnswer a) => Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
-    {
-        ["section"] = "knowledge-base", ["answer"] = a.Id, ["q"] = null, ["ticket"] = null,
-    });
+    private string AnswerHref(KbAnswer a) => TenantSlug is not null
+        ? SupportLinks.Answer(TenantSlug, a.Id)
+        : Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["section"] = "knowledge-base", ["answer"] = a.Id, ["q"] = null, ["ticket"] = null,
+        });
 
     /// <summary>
     /// The tenant the detail view acts as. Every ticket operation is scoped to it now, so the
@@ -793,6 +799,11 @@ else
 
     private async Task ApplyBulkAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         BulkChange? change = bulkAction switch
         {
             "assign" => roster?.Cast<SupportTechnician?>().FirstOrDefault(t => t!.Value.UserId == bulkAssignee) is { } to

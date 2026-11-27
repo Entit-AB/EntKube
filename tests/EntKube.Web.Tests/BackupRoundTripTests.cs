@@ -293,7 +293,7 @@ public class BackupRoundTripTests : IDisposable
 
     /// <summary>
     /// A role restored from a bundle written before role permissions were enforced is carried
-    /// across at the next start, like a role that never left. Left alone it would read as
+    /// across as part of the restore, like a role that never left. Left alone it would read as
     /// already carried across — its members would lose the support access they had when the
     /// bundle was written.
     /// </summary>
@@ -321,8 +321,12 @@ public class BackupRoundTripTests : IDisposable
         using MemoryStream older = new(System.Text.Encoding.UTF8.GetBytes(json));
         await importer.ImportAsync(older, wipeExisting: false);
 
+        // Carried across by the restore itself, not left for the next start: until then, with
+        // permissions enforced, the restored members would have no support or customers at all.
         using ApplicationDbContext restored = Destination();
-        restored.TenantRoles.Single(r => r.Id == member).PermissionSchema.Should().Be(0);
+        TenantRole role = restored.TenantRoles.Single(r => r.Id == member);
+        role.PermissionSchema.Should().Be(TenantRole.CurrentPermissionSchema);
+        TenantRoleService.DecodePermissions(role.PermissionsJson).Should().Contain(TenantFeature.SupportTickets, AccessLevel.Manage);
     }
 
     [Fact]
