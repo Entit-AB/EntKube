@@ -56,6 +56,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
@@ -85,6 +89,11 @@
 
     private async Task OnFilesChosen(InputFileChangeEventArgs e)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         IReadOnlyList<IBrowserFile> chosen = e.GetMultipleFiles(10);
 
         if (chosen.FirstOrDefault(f => f.Size > TicketAttachmentService.MaxFileBytes) is { } tooBig)

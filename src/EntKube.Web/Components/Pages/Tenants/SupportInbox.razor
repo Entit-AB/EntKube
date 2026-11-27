@@ -345,6 +345,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
     [Parameter] public string? ActorName { get; set; }
 
@@ -395,9 +399,23 @@
 
     private async Task AssignAsync(Guid messageId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (!assigning.TryGetValue(messageId, out Guid customerId) || customerId == Guid.Empty)
         {
             Toasts.Error("Choose which customer it is from.");
+            return;
+        }
+
+        // Only a customer this screen offered. The choice arrives from the browser as an id, and
+        // the mail service deliberately leaves "whose customer may this be" to the screen — so an
+        // id sent by hand would otherwise place the message with any customer of any tenant.
+        if (customers.All(c => c.Id != customerId))
+        {
+            Toasts.Error("That customer is not one you can place mail with.");
             return;
         }
 
@@ -521,6 +539,11 @@
 
     private async Task AcceptAsync(MailSuggestion suggestion)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         // Only the kind that opens a ticket carries an application, and only then is the
         // picker rendered — so anything else accepts with no choice attached.
         AppChoice? chosen = suggestion.Kind == MailSuggestionKind.OpenTicket
@@ -547,12 +570,22 @@
 
     private async Task RejectAsync(Guid suggestionId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Mail.RejectAsync(TenantId, suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 
     private async Task DismissAsync(Guid messageId)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Mail.DismissAsync(TenantId, messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }

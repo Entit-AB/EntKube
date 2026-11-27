@@ -66,8 +66,14 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
 
     private const string Unreachable = "Hemliga Vårdbolaget AB";
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public TicketMoveFromTheDetailViewTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 

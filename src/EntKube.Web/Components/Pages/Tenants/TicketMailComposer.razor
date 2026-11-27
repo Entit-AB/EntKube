@@ -112,6 +112,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
@@ -197,6 +201,11 @@
 
     private async Task InsertAnswerAsync(KbAnswer a)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         kbQuery = null;
 
         // Asked for again under the same rules (phase 11): the offered list may be minutes old,
@@ -257,6 +266,11 @@
 
     private async Task SendAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         string html = module is null ? "" : await module.InvokeAsync<string>("html", editor);
 
         List<OutboundAttachment> files = [];

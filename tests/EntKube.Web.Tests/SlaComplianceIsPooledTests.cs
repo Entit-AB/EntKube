@@ -36,8 +36,14 @@ public class SlaComplianceIsPooledTests : BunitContext, IDisposable
 
     private readonly Guid tenantId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public SlaComplianceIsPooledTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
         db = new ApplicationDbContext(

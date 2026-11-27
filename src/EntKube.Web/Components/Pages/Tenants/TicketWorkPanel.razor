@@ -164,6 +164,10 @@
 </div>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
@@ -236,7 +240,7 @@
     }
 
     private string TicketHref(int number) =>
-        TenantSlug is null ? $"#ticket-{number}" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+        TenantSlug is null ? $"#ticket-{number}" : SupportLinks.Ticket(TenantSlug, number);
 
     private static string RoleLabel(TicketLinkRole role) => role switch
     {
@@ -245,8 +249,16 @@
         _ => "related",
     };
 
-    private async Task Act(Func<Task> action, string? done = null)
+    // Every change on this panel runs through here, so this is where it is checked. Working a
+    // ticket needs Tickets: Edit; following one changes only the person's own notifications, and
+    // asks for no more than seeing it.
+    private async Task Act(Func<Task> action, string? done = null, AccessLevel needs = AccessLevel.Edit)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
+        {
+            return;
+        }
+
         try
         {
             await action();
@@ -314,8 +326,8 @@
 
     private Task FollowAsync() => Act(() => Work.SubscribeAsync(
         TenantId, Ticket.Id, me!.Value.UserId, me.Value.Name, me.Value.Email ?? "",
-        TicketSubscriptionReason.Subscribed, Actor, DateTime.UtcNow), "You follow this ticket.");
+        TicketSubscriptionReason.Subscribed, Actor, DateTime.UtcNow), "You follow this ticket.", AccessLevel.View);
 
     private Task UnfollowAsync() =>
-        Act(() => Work.UnsubscribeAsync(TenantId, Ticket.Id, me!.Value.UserId), "You no longer follow this ticket.");
+        Act(() => Work.UnsubscribeAsync(TenantId, Ticket.Id, me!.Value.UserId), "You no longer follow this ticket.", AccessLevel.View);
 }

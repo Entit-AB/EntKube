@@ -37,8 +37,14 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public TicketWorkRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 
@@ -151,7 +157,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         await detail.InvokeAsync(() => detail.Find("[data-test=merge-form] .text-end button").Click());
 
         detail.WaitForAssertion(() =>
-            detail.Markup.Should().Contain($"Merged into <a href=\"/tenants/entit?section=tickets&amp;ticket={original.Number}\">#{original.Number}</a>"));
+            detail.Markup.Should().Contain($"Merged into <a href=\"/support/entit/tickets?ticket={original.Number}\">#{original.Number}</a>"));
 
         db.ChangeTracker.Clear();
         Ticket after = db.Tickets.Single(t => t.Id == duplicate.Id);
@@ -790,7 +796,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
         IRenderedComponent<TicketQueue> byAnswer = Render<TicketQueue>(p => p
             .Add(c => c.TenantId, tenantId).Add(c => c.TenantSlug, "entit").Add(c => c.Search, "spooler"));
         byAnswer.WaitForAssertion(() => byAnswer.Find("[data-test=quick-results] a").GetAttribute("href")
-            .Should().Contain("section=knowledge-base").And.Contain($"answer={answer.Id}"));
+            .Should().Be($"/support/entit/knowledge-base?answer={answer.Id}"));
         byAnswer.Find("[data-test=quick-results]").TextContent.Should().Contain("Printer queue stuck").And.Contain("(internal)");
     }
 

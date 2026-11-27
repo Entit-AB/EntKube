@@ -318,7 +318,7 @@
                 </div>
                 <div class="modal-footer justify-content-between">
                     <a class="btn btn-outline-secondary btn-sm"
-                       href="@($"tenants/{irow.Tenant.Slug}?section=incidents&incident={f.IncidentId}")">
+                       href="@SupportLinks.Incident(irow.Tenant.Slug, f.IncidentId)">
                         Full incident &amp; timeline <i class="bi bi-arrow-right ms-1"></i>
                     </a>
                     @if (incident is not null)

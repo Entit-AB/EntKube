@@ -51,6 +51,42 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
         return EffectivePermissions.Granting(DecodePermissions(membership.PermissionsJson));
     }
 
+    /// <summary>
+    /// The tenants where <paramref name="userId"/> holds something in <paramref name="area"/>:
+    /// every tenant for a global administrator, otherwise those whose role grants at least View on
+    /// one of the area's permissions. What the Support menu offers, for instance.
+    /// </summary>
+    public async Task<List<TenantPermissions>> TenantsHoldingAsync(string userId, PermissionArea area, CancellationToken ct = default)
+    {
+        using IdentityDbContext db = dbFactory.CreateDbContext();
+
+        bool globalAdmin = await (
+            from ur in db.UserRoles
+            join r in db.Roles on ur.RoleId equals r.Id
+            where ur.UserId == userId && r.Name == "Admin"
+            select ur).AnyAsync(ct);
+
+        if (globalAdmin)
+        {
+            return [.. (await db.Tenants.AsNoTracking().OrderBy(t => t.Name).ToListAsync(ct))
+                .Select(t => new TenantPermissions(t, EffectivePermissions.Everything))];
+        }
+
+        // One read for every membership, then the grants are judged here: they are stored as
+        // JSON, which the database cannot be asked about portably.
+        List<TenantGrants> memberships = await db.TenantMemberships.AsNoTracking()
+            .Where(m => m.UserId == userId)
+            .Select(m => new TenantGrants(m.Tenant, m.Role.PermissionsJson))
+            .ToListAsync(ct);
+
+        return [.. memberships
+            .Select(m => new TenantPermissions(m.Tenant, EffectivePermissions.Granting(DecodePermissions(m.PermissionsJson))))
+            .Where(m => m.Permissions.HoldsAnyIn(area))
+            .OrderBy(m => m.Tenant.Name)];
+    }
+
+    private sealed record TenantGrants(Tenant Tenant, string? PermissionsJson);
+
     // A membership's role grants, as stored. A record rather than the bare string, so that a member
     // whose role grants nothing (null) can be told apart from somebody who is not a member at all.
     private sealed record MembershipGrants(string? PermissionsJson);

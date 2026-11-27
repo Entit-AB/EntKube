@@ -43,7 +43,7 @@
                 {
                     <div class="mb-1">
                         <span class="text-muted">@at.ToLocalTime().ToString("MMM d HH:mm")</span>
-                        <strong>@actor</strong> — @what on <a href="@($"/tenants/{TenantSlug}?section=tickets&ticket={number}")">#@number</a> @title
+                        <strong>@actor</strong> — @what on <a href="@SupportLinks.Ticket(TenantSlug ?? "", number)">#@number</a> @title
                     </div>
                 }
                 @if (d.Activity.Count == 0) { <div class="text-muted">nothing yet</div> }

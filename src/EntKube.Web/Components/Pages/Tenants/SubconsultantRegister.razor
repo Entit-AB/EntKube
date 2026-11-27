@@ -224,6 +224,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter] public required Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -285,6 +289,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (editing is null || string.IsNullOrWhiteSpace(editing.Name))
         {
             Toasts.Error("A name is required.");
@@ -317,6 +326,11 @@
 
     private async Task NotifyAsync(Subconsultant person)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         person.NotifiedAt = DateTime.UtcNow;
         await OnCall.SaveSubconsultantAsync(TenantId, person);
 
@@ -329,6 +343,11 @@
 
     private async Task ApproveAsync(Subconsultant person)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         person.ApprovedAt = DateTime.UtcNow;
         person.ObjectedAt = null;
         person.ObjectionReason = null;
@@ -338,6 +357,11 @@
 
     private async Task RecordObjectionAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (pendingObjection is null)
         {
             return;

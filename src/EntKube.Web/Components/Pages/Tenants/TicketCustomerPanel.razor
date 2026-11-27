@@ -66,9 +66,9 @@
         }
     }
 
-    private string TicketHref(int number) => TenantSlug is null ? "" : $"/tenants/{TenantSlug}?section=tickets&ticket={number}";
+    private string TicketHref(int number) => TenantSlug is null ? "" : SupportLinks.Ticket(TenantSlug, number);
 
-    private string SearchHref(string query) => $"/tenants/{TenantSlug}?section=tickets&q={Uri.EscapeDataString(query)}";
+    private string SearchHref(string query) => TenantSlug is null ? "" : SupportLinks.Search(TenantSlug, query);
 
     private static string Age(TimeSpan age) => age.TotalDays >= 1 ? $"{(int)age.TotalDays} d" : $"{(int)age.TotalHours} h";
 }

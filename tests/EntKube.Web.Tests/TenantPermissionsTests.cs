@@ -107,6 +107,44 @@ public class TenantPermissionsTests : IDisposable
         root.Allows(TenantFeature.CustomerPortalAccess, AccessLevel.Manage).Should().BeTrue();
     }
 
+    [Fact]
+    public async Task The_support_menu_lists_only_the_tenants_where_the_person_works_support()
+    {
+        // A member of both tenants, but an agent only over here: the menu offers only this one.
+        Member("user-anna", ours, Role(ours, "Agent", Grants((TenantFeature.KnowledgeBase, AccessLevel.View))));
+        Member("user-anna", theirs, Role(theirs, "Operator", Grants((TenantFeature.Clusters, AccessLevel.Manage))));
+
+        List<TenantPermissions> tenants = await roles.TenantsHoldingAsync("user-anna", PermissionArea.Support);
+
+        tenants.Select(t => t.Tenant.Id).Should().Equal(ours);
+        tenants.Single().Permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.View).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_global_admin_works_support_in_every_tenant()
+    {
+        db.Users.Add(new ApplicationUser { Id = "user-root", UserName = "root" });
+        db.Roles.Add(new IdentityRole("Admin") { Id = "role-admin", NormalizedName = "ADMIN" });
+        db.UserRoles.Add(new IdentityUserRole<string> { UserId = "user-root", RoleId = "role-admin" });
+        db.SaveChanges();
+
+        (await roles.TenantsHoldingAsync("user-root", PermissionArea.Support)).Select(t => t.Tenant.Id)
+            .Should().BeEquivalentTo([ours, theirs]);
+    }
+
+    [Fact]
+    public void Holding_something_in_an_area_means_at_least_View_on_one_of_its_permissions()
+    {
+        EffectivePermissions toolsOnly = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTools] = AccessLevel.Edit,
+        });
+
+        toolsOnly.HoldsAnyIn(PermissionArea.Support).Should().BeTrue();
+        toolsOnly.HoldsAnyIn(PermissionArea.Customers).Should().BeFalse();
+        EffectivePermissions.Nothing.HoldsAnyIn(PermissionArea.Support).Should().BeFalse();
+    }
+
     // ───────────────────────────── Carrying existing roles across ─────────────────────────────
 
     [Fact]

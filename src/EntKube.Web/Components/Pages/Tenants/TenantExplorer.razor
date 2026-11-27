@@ -296,31 +296,8 @@ else
                     }
                 }
 
-                @* ── Support: somebody is waiting for an answer ── *@
-                <div class="tree-section-head"><span class="tree-section-label">Support</span></div>
-                @foreach (TreeGroup g in SupportGroups)
-                {
-                    List<SectionItem> gi = VisibleGroupItems(g);
-                    if (HasFilter && gi.Count == 0) { continue; }
-                    bool gopen = GroupOpen(g.Name);
-                    <button type="button" class="node group indent-1" @onclick="() => ToggleGroup(g.Name)" aria-expanded="@gopen">
-                        <span class="caret">@(gopen ? "▾" : "▸")</span>
-                        <i class="ico bi @g.Icon" aria-hidden="true"></i>
-                        <span class="label">@g.Name</span>
-                        <span class="badge-count">@g.Items.Length</span>
-                    </button>
-                    @if (gopen)
-                    {
-                        @foreach (SectionItem item in gi)
-                        {
-                            <button type="button" class="node leaf indent-2 @(selectedSection == item.Key ? "selected" : "")" @onclick="() => SelectSection(item.Key)">
-                                <span class="caret"></span>
-                                <i class="ico bi @item.Icon" aria-hidden="true"></i>
-                                <span class="label">@item.Label</span>
-                            </button>
-                        }
-                    }
-                }
+                @* Support (tickets, tools, incidents, mail, service levels) has a menu of its own,
+                   /support/{tenant}, where each section asks for its own permission. *@
 
                 @* ── Operations: what an operator does to the platform ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
@@ -430,14 +407,11 @@ else
     [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
     [SupplyParameterFromQuery(Name = "tab")] private string? TabParam { get; set; }
 
-    // A ticket's address: ?section=tickets&ticket=1042. Read by the queue, which checks the
-    // number belongs to this tenant before opening anything.
+    // What an old support address asked to open: ?section=tickets&ticket=1042, &q=tag:vpn,
+    // ?section=knowledge-base&answer=…, ?section=incidents&incident=…. Support has its own menu
+    // now; these are read only to send such an address on to the same place there.
     [SupplyParameterFromQuery(Name = "ticket")] private int? TicketParam { get; set; }
-
-    // A ticket search, so it can be linked to and survives a reload: ?section=tickets&q=tag:vpn
     [SupplyParameterFromQuery(Name = "q")] private string? SearchParam { get; set; }
-
-    // A help answer to open in the knowledge base, as quick search links to it: ?section=knowledge-base&answer=…
     [SupplyParameterFromQuery(Name = "answer")] private Guid? AnswerParam { get; set; }
 
     private sealed record SectionItem(string Key, string Label, string Icon);
@@ -493,69 +467,6 @@ else
         [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
 
-    /// <summary>
-    /// What an operator <em>does</em>, as opposed to what they watch.
-    ///
-    /// <para>The first four groups are in the order a problem actually travels: something
-    /// is noticed, it becomes an alert, the alert becomes an incident somebody is on call
-    /// for, and a customer writes in about it. Keeping that sequence adjacent is the point
-    /// of the ordering — the alternative files the alert rules with the dashboards they
-    /// were written against, which is true of how they are authored and useless for how
-    /// they are used.</para>
-    /// </summary>
-    /// <summary>
-    /// Somebody is waiting for an answer.
-    ///
-    /// <para>In the order a problem travels: something fires, it becomes an incident
-    /// somebody is on call for, and a customer writes in about it. This used to be the
-    /// first three groups of Operations, which put a queue of waiting people beside the
-    /// disaster-recovery settings and the cost report — related only in that an operator
-    /// does all of them.</para>
-    /// </summary>
-    private static readonly TreeGroup[] SupportGroups =
-    [
-        // First, because it is the section's own subject: a queue of people waiting for an answer.
-        // It used to be reachable only by opening Manage, picking a customer and finding a button
-        // among five others — which crowded a page about applications and gave no way to ask the
-        // question an operator actually has, which is whose ticket runs out first across all of them.
-        new("Tickets", "bi-life-preserver",
-        [ new("tickets", "Ticket queue", "bi-life-preserver"),
-          new("support-dashboard", "Dashboard", "bi-speedometer2"),
-          new("support-report", "Reporting", "bi-bar-chart"),
-          new("support-personal", "My notifications & absence", "bi-bell"),
-          // Beside the queue because it is the question the queue raises: whose is this
-          // one. A rota nobody can find is a rota nobody is on, and an empty rota means
-          // every ticket opens unassigned.
-          new("support-roster", "Support roster", "bi-person-check"),
-          // Beside the queue because it is what feeds it: what people said through the widget,
-          // waiting for somebody to decide which of it is a ticket.
-          new("feedback", "Customer feedback", "bi-chat-square-text") ]),
-        // What agents reach for while working the queue: the text they reuse, the changes they
-        // make in one click, and the shapes of work they start from (docs/helpdesk.md, phase 2a).
-        new("Ticket tools", "bi-tools",
-        [ new("text-modules", "Text modules", "bi-card-text"),
-          new("macros", "Macros", "bi-lightning"),
-          new("ticket-templates", "Templates", "bi-files"),
-          new("knowledge-base", "Knowledge base", "bi-book"),
-          // Where the developers' issues are, so a ticket can show the one being fixed for it (phase 6).
-          new("issue-trackers", "Issue trackers", "bi-github") ]),
-        new("Alerting", "bi-bell",
-        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
-        new("Incidents", "bi-exclamation-octagon",
-        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("subconsultants", "Subconsultants", "bi-people") ]),
-        // Named for what it is rather than for the section it sits in: a mailbox, its
-        // connection and the phrases that triage it.
-        new("Mail", "bi-envelope",
-        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel"), new("support-attachments", "Attachments", "bi-paperclip") ]),
-        // A customer's own service desk reaching us directly. A channel, like the mailbox,
-        // which is why it sits beside it rather than under Manage.
-        new("Ticket bridge", "bi-arrow-left-right",
-        [ new("ticket-bridge", "Customer systems", "bi-plug") ]),
-        // The agreement's own promises about how all of the above went.
-        new("Service levels", "bi-check2-square",
-        [ new("sla", "SLA", "bi-check2-square") ]),
-    ];
-
     private static readonly TreeGroup[] OperationsGroups =
     [
         // Spans everything rather than belonging to any of it: certificates expiring,
@@ -563,6 +474,10 @@ else
         // platform, not a queue of people waiting.
         new("Priorities", "bi-lightbulb",
         [ new("advisor", "Priorities", "bi-lightbulb") ]),
+        // Stays with the tenant when the helpdesk moved to its own menu: alerts are about the
+        // platform. What becomes of one — an incident somebody is on call for — is in Support.
+        new("Alerting", "bi-bell",
+        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Maintenance", "bi-tools",
         [ new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Networking", "bi-hdd-network",
@@ -629,6 +544,15 @@ else
 
     protected override async Task OnParametersSetAsync()
     {
+        // An address for a support section is sent on to the support desk, which is where those
+        // sections live now and where each asks for its own permission. Done before anything is
+        // loaded: the desk looks the tenant up for itself.
+        if (SupportLinks.FromTenantPage(Slug, SectionParam, TicketParam, SearchParam, AnswerParam, IncidentParam) is string moved)
+        {
+            Nav.NavigateTo(moved, replace: true);
+            return;
+        }
+
         // Load a tenant's data once per slug — in OnParametersSetAsync (not OnInitializedAsync)
         // so switching tenants via the top-nav mega menu, which changes the {Slug} route param
         // on the same component instance, reloads instead of showing the previous tenant.
@@ -995,7 +919,18 @@ else
         ClearSelection();
     }
 
-    private void NavigateToSection(string key) => SelectSection(key);
+    // A tab inside a section asking for another one — the monitoring overview opening incidents,
+    // say. A support section is opened in the support desk, not here.
+    private void NavigateToSection(string key)
+    {
+        if (tenant is not null && SupportSections.Find(key) is not null)
+        {
+            Nav.NavigateTo(SupportLinks.Section(tenant.Slug, key));
+            return;
+        }
+
+        SelectSection(key);
+    }
 
     // Opens an environment-scoped service tab (TenantId + EnvironmentId), re-init per env via key.
     private void OpenEnvScoped<T>(RenderTreeBuilder builder, Guid tid) where T : IComponent
@@ -1065,47 +1000,6 @@ else
             case "alert-routing": builder.OpenComponent<AlertRoutingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notification-providers": builder.OpenComponent<NotificationProviders>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "subconsultants": builder.OpenComponent<SubconsultantRegister>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "support-roster": builder.OpenComponent<SupportRosterTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "feedback": builder.OpenComponent<FeedbackInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "tickets":
-                builder.OpenComponent<TicketQueue>(0);
-                builder.AddComponentParameter(1, "TenantId", (Guid?)tid);
-                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
-                builder.AddComponentParameter(3, "FocusTicketNumber", TicketParam);
-                builder.AddComponentParameter(4, "Search", SearchParam);
-                builder.CloseComponent();
-                break;
-            case "support-dashboard":
-                builder.OpenComponent<SupportDashboardTab>(0);
-                builder.AddComponentParameter(1, "TenantId", tid);
-                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
-                builder.CloseComponent();
-                break;
-            case "support-report":
-                builder.OpenComponent<SupportReportTab>(0);
-                builder.AddComponentParameter(1, "TenantId", tid);
-                builder.AddComponentParameter(2, "TenantSlug", tenant!.Slug);
-                builder.CloseComponent();
-                break;
-            case "support-personal": builder.OpenComponent<SupportPersonalTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "support-attachments": builder.OpenComponent<SupportAttachmentsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "issue-trackers": builder.OpenComponent<IssueTrackersTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "knowledge-base": builder.OpenComponent<KnowledgeBaseTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.AddComponentParameter(2, "OpenAnswerId", AnswerParam); builder.CloseComponent(); break;
-            case "text-modules": builder.OpenComponent<TextModulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "macros": builder.OpenComponent<MacrosTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "ticket-templates": builder.OpenComponent<TicketTemplatesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "incidents":
-                builder.OpenComponent<IncidentManagement>(0);
-                builder.AddComponentParameter(1, "TenantId", tid);
-                builder.AddComponentParameter(2, "FocusIncidentId", IncidentParam);
-                builder.CloseComponent();
-                break;
             case "errors": builder.OpenComponent<ErrorTracking>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "log-analytics": builder.OpenComponent<LogAnalytics>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "slos": builder.OpenComponent<ServiceLevelObjectives>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
@@ -1124,7 +1018,6 @@ else
             case "telemetry-alerts": builder.OpenComponent<TelemetryAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "telemetry-storage": builder.OpenComponent<TenantTelemetrySettings>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "analytics": builder.OpenComponent<TenantOpsAnalyticsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
-            case "sla": builder.OpenComponent<SlaTargetManager>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "maintenance": builder.OpenComponent<MaintenanceWindows>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "secret-expiry":
                 builder.OpenComponent<SecretExpiryTab>(0);

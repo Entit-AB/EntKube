@@ -4,6 +4,7 @@
 @inject AuthenticationStateProvider AuthStateProvider
 @inject EntKube.Web.Services.UserAccessService UserAccessService
 @inject EntKube.Web.Services.CustomerAccessService CustomerAccessService
+@inject EntKube.Web.Services.TenantRoleService TenantRoleService
 @inject IConfiguration Configuration
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -86,6 +87,39 @@
                                     <a href="admin/tenants"><i class="bi bi-plus-lg"></i> New tenant</a>
                                 }
                                 <a class="ms-auto" href="tenants">All tenants <i class="bi bi-arrow-right"></i></a>
+                            </div>
+                        </div>
+                    </li>
+                }
+
+                @* Support: one column per tenant where this person works support, listing only the
+                   sections their role there opens. The desk checks again; this only saves a click. *@
+                @if (supportDesks.Count > 0)
+                {
+                    <li class="nav-item dropdown position-static">
+                        <a class="nav-link dropdown-toggle @(IsActive("support"))" href="#" role="button"
+                           data-bs-toggle="dropdown" aria-expanded="false">Support</a>
+                        <div class="dropdown-menu entit-mega">
+                            <div class="mega-grid">
+                                @foreach (EntKube.Web.Services.TenantPermissions desk in supportDesks)
+                                {
+                                    <div class="mega-col">
+                                        <a class="mega-title" href="@SupportLinks.Desk(desk.Tenant.Slug)">
+                                            <i class="bi bi-life-preserver"></i> @desk.Tenant.Name
+                                        </a>
+                                        @foreach (SupportSection s in SupportMenuShortcuts
+                                            .Select(SupportSections.Find).OfType<SupportSection>()
+                                            .Where(x => x.OpensFor(desk.Permissions)))
+                                        {
+                                            <a class="mega-link" href="@SupportLinks.Section(desk.Tenant.Slug, s.Key)">
+                                                <i class="bi @s.Icon"></i> @s.Label
+                                            </a>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                            <div class="mega-foot">
+                                <a class="ms-auto" href="support">All support <i class="bi bi-arrow-right"></i></a>
                             </div>
                         </div>
                     </li>
@@ -198,6 +232,11 @@
     private bool allowRegistration = true;
     private List<Data.Tenant> tenants = [];
     private List<Data.Customer> customers = [];
+    private List<EntKube.Web.Services.TenantPermissions> supportDesks = [];
+
+    // What the Support menu offers under each tenant: the sections people go to most. Everything
+    // else is one click further, in the desk's own menu.
+    private static readonly string[] SupportMenuShortcuts = ["tickets", "support-dashboard", "knowledge-base", "incidents"];
 
     protected override async Task OnInitializedAsync()
     {
@@ -218,6 +257,7 @@
         isAdmin = await UserAccessService.IsGlobalAdminAsync(userId);
         tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
         customers = await CustomerAccessService.GetAccessibleCustomersAsync(userId);
+        supportDesks = await TenantRoleService.TenantsHoldingAsync(userId, EntKube.Web.Services.PermissionArea.Support);
     }
 
     // "active" highlight — a link is active when the current path is (or starts with) its prefix.

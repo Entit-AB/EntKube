@@ -40,8 +40,14 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public SupportInboxRenderTests()
     {
+        // What the person may do, as the support desk hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
 
@@ -187,6 +193,44 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
 
         decided.DecidedBy.Should().Be("nils");
         decided.DecidedBy.Should().NotBe(CurrentActor.Unattributed);
+    }
+
+    /// <summary>
+    /// Accepting a suggestion opens a ticket, or writes to a customer — working the queue. A role
+    /// that may only look at tickets may look at the inbox, and decide nothing in it.
+    /// </summary>
+    [Fact]
+    public async Task Somebody_who_may_only_view_tickets_cannot_accept_a_suggestion()
+    {
+        db.ContractContacts.Add(new ContractContact
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.TechnicalContact,
+            Name = "Karin",
+            Email = "karin@entit.example",
+        });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await Receive(
+            "Journalportalen svarar inte", "Ingen kommer in.", "karin@entit.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.View,
+        });
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        IElement accept = inbox.FindAll("button")
+            .First(b => b.TextContent.Trim().StartsWith("Accept", StringComparison.Ordinal));
+
+        await inbox.InvokeAsync(() => accept.Click());
+
+        db.ChangeTracker.Clear();
+        db.Set<MailSuggestion>().Where(s => s.MessageId == message!.Id).Should().OnlyContain(s => s.DecidedBy == null);
+        db.Tickets.Should().BeEmpty();
     }
 
     // ---- The way out of a dead end ------------------------------------------------------------

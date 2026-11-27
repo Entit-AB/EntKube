@@ -69,7 +69,17 @@ public sealed class EffectivePermissions
 
     /// <summary>Whether the level held on <paramref name="feature"/> is at least <paramref name="atLeast"/>.</summary>
     public bool Allows(TenantFeature feature, AccessLevel atLeast) => LevelOf(feature) >= atLeast;
+
+    /// <summary>
+    /// Whether anything in an area is held at all — at least View on one of its permissions. This
+    /// is what decides whether a whole menu, such as Support, is offered in a tenant.
+    /// </summary>
+    public bool HoldsAnyIn(PermissionArea area) =>
+        PermissionCatalog.Features.Where(f => f.Area == area).Any(f => Allows(f.Feature, AccessLevel.View));
 }
+
+/// <summary>A tenant, and what one person may do in it.</summary>
+public sealed record TenantPermissions(Tenant Tenant, EffectivePermissions Permissions);
 
 /// <summary>How many roles in one tenant were carried across, for the startup log.</summary>
 public sealed record RolePermissionUpgrade(Guid TenantId, string TenantName, int Roles, bool KnowledgeBaseEditorsKept);
@@ -122,32 +132,32 @@ public static class PermissionCatalog
             (AccessLevel.Edit, "See access requests"),
             (AccessLevel.Manage, "Approve, deny and revoke cluster access")),
 
-        Row(TenantFeature.SupportTickets, PermissionArea.Support, "Tickets", "bi-life-preserver", enforced: false,
+        Row(TenantFeature.SupportTickets, PermissionArea.Support, "Tickets", "bi-life-preserver", enforced: true,
             (AccessLevel.View, "See the queue, tickets and customer feedback"),
-            (AccessLevel.Edit, "Work tickets: reply, note, set state, priority and owner, log time, run macros"),
-            (AccessLevel.Manage, "Also merge tickets, move them between tenants, and delete them")),
-        Row(TenantFeature.SupportTools, PermissionArea.Support, "Ticket tools", "bi-tools", enforced: false,
+            (AccessLevel.Edit, "Work tickets and the support inbox: reply, note, set state, priority and owner, log time, run macros"),
+            (AccessLevel.Manage, "Also merge tickets, move them to another tenant, and remove other people's logged time")),
+        Row(TenantFeature.SupportTools, PermissionArea.Support, "Ticket tools", "bi-tools", enforced: true,
             (AccessLevel.Edit, "Write text modules, macros and templates"),
             (AccessLevel.Manage, "Also delete them")),
         Row(TenantFeature.KnowledgeBase, PermissionArea.Support, "Knowledge base", "bi-book", enforced: true,
             (AccessLevel.View, "Read agents-only answers"),
             (AccessLevel.Edit, "Write and change answers"),
             (AccessLevel.Manage, "Also run the categories and delete answers")),
-        Row(TenantFeature.SupportReporting, PermissionArea.Support, "Support reporting", "bi-bar-chart", enforced: false,
+        Row(TenantFeature.SupportReporting, PermissionArea.Support, "Support reporting", "bi-bar-chart", enforced: true,
             (AccessLevel.View, "See the dashboard and reports, and export them")),
-        Row(TenantFeature.SupportRoster, PermissionArea.Support, "Support roster", "bi-person-check", enforced: false,
+        Row(TenantFeature.SupportRoster, PermissionArea.Support, "Support roster", "bi-person-check", enforced: true,
             (AccessLevel.View, "See who is on the rota"),
-            (AccessLevel.Manage, "Change the rota and other people's absence")),
-        Row(TenantFeature.SupportChannels, PermissionArea.Support, "Support channels", "bi-envelope-at", enforced: false,
+            (AccessLevel.Manage, "Put other people on or off the rota (anybody working tickets may put themselves on it)")),
+        Row(TenantFeature.SupportChannels, PermissionArea.Support, "Support channels", "bi-envelope-at", enforced: true,
             (AccessLevel.View, "See how tickets arrive"),
             (AccessLevel.Manage, "Change the mailbox, triage phrases, attachments, ticket bridge and issue trackers")),
-        Row(TenantFeature.ServiceLevels, PermissionArea.Support, "Service levels", "bi-check2-square", enforced: false,
+        Row(TenantFeature.ServiceLevels, PermissionArea.Support, "Service levels", "bi-check2-square", enforced: true,
             (AccessLevel.View, "See the SLA targets"),
             (AccessLevel.Edit, "Change the SLA targets")),
-        Row(TenantFeature.Incidents, PermissionArea.Support, "Incidents & on-call", "bi-exclamation-octagon", enforced: false,
+        Row(TenantFeature.Incidents, PermissionArea.Support, "Incidents & on-call", "bi-exclamation-octagon", enforced: true,
             (AccessLevel.View, "See on-call and incidents"),
-            (AccessLevel.Edit, "Acknowledge and work incidents"),
-            (AccessLevel.Manage, "Also change the on-call schedule and the subconsultant register")),
+            (AccessLevel.Edit, "Acknowledge and work incidents, and write handover notes"),
+            (AccessLevel.Manage, "Also change on-call schedules and the subconsultant register")),
 
         Row(TenantFeature.Customers, PermissionArea.Customers, "Customers", "bi-building", enforced: false,
             (AccessLevel.View, "See customers and their details"),

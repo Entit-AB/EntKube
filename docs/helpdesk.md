@@ -39,6 +39,34 @@ penalty when we miss (§14.6). So:
    `BackupBundle.CurrentVersion` bump. Every query must be tenant-scoped, and anything a
    customer sees must also be customer-scoped.
 
+## Where it lives, and who may do what
+
+The helpdesk has its own menu, **Support**, at `/support/{tenant}/{section}`
+(`Components/Pages/Support/`). It used to be part of the tenant page's tree, where being a member
+of the tenant was enough to do anything. Old `/tenants/{tenant}?section=…` addresses for these
+sections are sent on to the same place, including `ticket=`, `q=`, `answer=` and `incident=`.
+Alerting stayed with the tenant, under Operations; on-call, incidents and subconsultants moved.
+
+Each section asks for a role permission (`SupportSections`), and every write in it checks again
+before writing (`SupportGuard`, with the permissions the desk hands down). The support
+permissions, and what their levels allow:
+
+| Permission | View | Edit | Manage |
+|---|---|---|---|
+| Tickets | queue, tickets, feedback, inbox | work tickets and the inbox | merge, move to another tenant, remove others' logged time |
+| Ticket tools | — | write text modules, macros, templates | delete them |
+| Knowledge base | read agents-only answers | write answers | categories, delete help answers |
+| Support reporting | dashboard, reports, export | — | — |
+| Support roster | see the rota | — | put others on or off it |
+| Support channels | see the mailbox, triage, attachments, bridge, trackers | — | change them |
+| Service levels | see SLA targets | change them | — |
+| Incidents & on-call | see them | work incidents, handover notes | schedules, subconsultant register |
+
+Anybody with any support permission gets "My notifications & absence", and may put themselves on
+or off the rota. A component rendered outside the desk is handed no permissions and refuses every
+write. An application's runbook in the knowledge base stays editable by whoever can open the
+application (phase 11).
+
 ## How Zammad's concepts map onto ours
 
 | Zammad | EntKube today | Decision |

@@ -1,0 +1,154 @@
+@page "/support/{Slug}"
+@page "/support/{Slug}/{Section}"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Data
+@attribute [Authorize]
+@* Interactive without prerendering, like the tenant page it came out of: an authenticated
+   console whose sections fill themselves in over the circuit. *@
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inject TenantService Tenants
+@inject TenantRoleService Roles
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   SupportDesk — one tenant's helpdesk: the queue, the tools agents use
+   while working it, incidents, the channels tickets arrive by, and the
+   service levels promised. Each section asks for its own permission
+   (SupportSections); the menu shows only what this person may open, and
+   a section opened by its address is refused rather than shown.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<PageTitle>Support · @(tenant?.Name ?? Slug)</PageTitle>
+
+@if (loading)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="text-muted mt-2">Loading support…</p>
+    </div>
+}
+else if (tenant is null)
+{
+    <div class="alert alert-warning" data-test="support-no-tenant">
+        <i class="bi bi-question-circle me-1"></i>There is no tenant called <strong>@Slug</strong>.
+        <a href="/support">Choose another</a>.
+    </div>
+}
+else if (!SupportSections.OpensFor(permissions))
+{
+    @* Not a member, or a member whose role grants no support permission: there is no support
+       desk for them here, and saying which sections exist would already say too much. *@
+    <div class="alert alert-warning" data-test="support-no-access">
+        <i class="bi bi-lock me-1"></i>Your role in <strong>@tenant.Name</strong> does not include support.
+        <a href="/support">Choose another tenant</a>.
+    </div>
+}
+else
+{
+    <div class="explorer">
+        <aside class="tree-side">
+            <div class="tree-head">
+                <div class="tree-tenant">
+                    <i class="bi bi-life-preserver"></i> @tenant.Name
+                    <a class="ms-auto small fw-normal" href="/support" title="Support in another tenant">Switch</a>
+                </div>
+            </div>
+
+            <nav class="tree-scroll" aria-label="Support">
+                @foreach (SupportGroup group in SupportSections.VisibleTo(permissions))
+                {
+                    <div class="tree-section-head"><span class="tree-section-label">@group.Name</span></div>
+
+                    @foreach (SupportSection s in group.Sections)
+                    {
+                        <a class="node leaf indent-1 @(s.Key == open?.Key ? "selected" : "")"
+                           href="@SupportLinks.Section(tenant.Slug, s.Key)" data-section="@s.Key"
+                           aria-current="@(s.Key == open?.Key ? "page" : null)">
+                            <span class="caret"></span>
+                            <i class="ico bi @s.Icon" aria-hidden="true"></i>
+                            <span class="label">@s.Label</span>
+                        </a>
+                    }
+                }
+            </nav>
+        </aside>
+
+        <section class="detail-pane">
+            @if (asked is not null && !asked.OpensFor(permissions))
+            {
+                @* Asked for by its address, and not this person's to open. The check is here and
+                   not only in the menu: an address can be typed, bookmarked or sent. *@
+                <div class="alert alert-warning" data-test="support-refused">
+                    <i class="bi bi-lock me-1"></i>@asked.Label needs
+                    <strong>@PermissionCatalog.Describe(asked.Feature!.Value).Label: @asked.Level</strong>,
+                    which your role in this tenant does not grant.
+                </div>
+            }
+            else if (Section is not null && asked is null)
+            {
+                <div class="alert alert-warning" data-test="support-unknown-section">
+                    <i class="bi bi-question-circle me-1"></i>The support desk has no page called <strong>@Section</strong>.
+                </div>
+            }
+            else if (open is not null)
+            {
+                @* Every write in the section asks SupportGuard against this before it writes. *@
+                @* Not IsFixed: moving to another tenant reuses this page, and the sections must then
+                   be handed that tenant's permissions, not keep the last one's. *@
+                <CascadingValue Value="permissions">
+                    @open.Render(new SupportContext(tenant.Id, tenant.Slug, TicketParam, SearchParam, AnswerParam, IncidentParam))
+                </CascadingValue>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    [Parameter] public string Slug { get; set; } = "";
+    [Parameter] public string? Section { get; set; }
+
+    // What the address asks to open inside a section: a ticket, a search of the queue, an answer,
+    // an incident. Each section checks for itself that what it is asked to open is this tenant's.
+    [SupplyParameterFromQuery(Name = "ticket")] private int? TicketParam { get; set; }
+    [SupplyParameterFromQuery(Name = "q")] private string? SearchParam { get; set; }
+    [SupplyParameterFromQuery(Name = "answer")] private Guid? AnswerParam { get; set; }
+    [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
+
+    private bool loading = true;
+    private Tenant? tenant;
+    private EffectivePermissions permissions = EffectivePermissions.Nothing;
+    private string? loadedFor;
+
+    // The section the address asked for, if it named one the desk has.
+    private SupportSection? asked;
+
+    // The section shown: the one asked for, or the first this person may open.
+    private SupportSection? open;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // The tenant and what this person may do in it are looked up once per tenant; moving
+        // between sections only changes which one is shown.
+        if (loadedFor != Slug)
+        {
+            loading = true;
+            tenant = await Tenants.GetTenantBySlugAsync(Slug);
+
+            string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+                .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            permissions = tenant is null
+                ? EffectivePermissions.Nothing
+                : await Roles.PermissionsForAsync(tenant.Id, userId);
+
+            loadedFor = Slug;
+            loading = false;
+        }
+
+        asked = SupportSections.Find(Section);
+
+        open = asked is not null
+            ? (asked.OpensFor(permissions) ? asked : null)
+            : (Section is null ? SupportSections.LandingFor(permissions) : null);
+    }
+}

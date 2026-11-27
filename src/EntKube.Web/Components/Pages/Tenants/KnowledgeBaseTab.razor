@@ -35,12 +35,15 @@
                 {
                     <li style="padding-left: @(depth)rem" class="d-flex justify-content-between">
                         <button class="btn btn-sm btn-link p-0 text-start @(c.Id == categoryId ? "fw-semibold" : "")" @onclick="() => SelectCategory(c.Id)">@c.Name</button>
-                        <button class="btn btn-sm btn-link text-muted p-0" title="Rename or move" @onclick="() => EditCategory(c)"><i class="bi bi-pencil"></i></button>
+                        @if (mayManage)
+                        {
+                            <button class="btn btn-sm btn-link text-muted p-0" title="Rename or move" @onclick="() => EditCategory(c)"><i class="bi bi-pencil"></i></button>
+                        }
                     </li>
                 }
                 @if (categories.Count == 0) { <li class="text-muted">none yet</li> }
             </ul>
-            @if (mayEdit)
+            @if (mayManage)
             {
             <div class="border rounded p-2">
                 <input class="form-control form-control-sm mb-1" placeholder="Category name" @bind="categoryName" />
@@ -264,14 +267,14 @@
                             <span class="text-muted me-1">Given on tickets:</span>
                             @foreach ((Guid _, int number, string title) in usedOn)
                             {
-                                <a class="me-2" href="@Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "tickets", ["ticket"] = number, ["answer"] = null })" title="@title">#@number</a>
+                                <a class="me-2" href="@TicketHref(number)" title="@title">#@number</a>
                             }
                         </div>
                     }
 
                     <div class="d-flex justify-content-between">
                         <span>
-                            @if (answer.Id != Guid.Empty && MayEditThis)
+                            @if (answer.Id != Guid.Empty && MayDeleteThis)
                             {
                                 <button class="btn btn-sm btn-link text-danger p-0" @onclick="DeleteAnswerAsync">Delete</button>
                             }
@@ -297,12 +300,22 @@
     /// <summary>An answer to open on arrival — quick search links here. Only this tenant's opens.</summary>
     [Parameter] public Guid? OpenAnswerId { get; set; }
 
+    /// <summary>The tenant's address, so a ticket an answer was used on opens in its support desk.</summary>
+    [Parameter] public string? TenantSlug { get; set; }
+
+    private string TicketHref(int number) => TenantSlug is not null
+        ? SupportLinks.Ticket(TenantSlug, number)
+        : Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "tickets", ["ticket"] = number, ["answer"] = null });
+
     private Guid? openedFromAddress;
     private bool loading = true;
 
     // Phase 10. mayEdit: the editor permission (TenantFeature.KnowledgeBase at Edit); checked in
     // every write handler too, since those run on the server whatever the page shows.
-    private bool mayEdit = true;
+    // Both start false: until the permissions have loaded, nobody is an editor. Starting true let
+    // a write through in the moment between the page drawing and the lookup finishing.
+    private bool mayEdit;
+    private bool mayManage;
     private List<KbAnswer> allAnswers = [];
 
     // Phase 11: applications' knowledge in the same list.
@@ -317,6 +330,10 @@
     /// an application's runbook stays editable by anyone who can open the application.
     /// </summary>
     private bool MayEditThis => mayEdit || answer?.AppId is not null;
+
+    // Deleting a help answer is the knowledge base's top level; an application's runbook answer
+    // follows the application's own rule, as editing it does.
+    private bool MayDeleteThis => answer?.AppId is not null ? MayEditThis : mayManage;
 
     private IEnumerable<KbAnswer> Shown() => appFilter switch
     {
@@ -351,7 +368,7 @@
             answers = await KnowledgeBase.AnswersAsync(TenantId, categoryId);
             allAnswers = await KnowledgeBase.AnswersAsync(TenantId, null);
             appNames = await KnowledgeBase.AppNamesAsync(TenantId);
-            mayEdit = await MayEditAsync();
+            await LoadPermissionsAsync();
 
             if (OpenAnswerId is Guid wanted && wanted != openedFromAddress)
             {
@@ -443,17 +460,32 @@
     }
 
     /// <summary>
-    /// Whether this person may change the knowledge base: their role in this tenant grants
-    /// "Knowledge base: Edit" or more, or they are a global administrator.
+    /// What this person may do to the knowledge base, from their role in this tenant: write
+    /// answers at "Knowledge base: Edit", and also run the categories and delete answers at Manage.
+    /// Looked up here rather than taken from the support desk, so the rule holds wherever the
+    /// knowledge base is shown.
     /// </summary>
-    private async Task<bool> MayEditAsync()
+    private async Task LoadPermissionsAsync()
     {
         string? userId = (await AuthState.GetAuthenticationStateAsync()).User
             .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
         EffectivePermissions permissions = await Roles.PermissionsForAsync(TenantId, userId);
 
-        return permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        mayEdit = permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        mayManage = permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.Manage);
+    }
+
+    // The check the category writes make: the knowledge base's top level, whatever answer is open.
+    private bool RefusedUnlessManager()
+    {
+        if (mayManage)
+        {
+            return false;
+        }
+
+        Toasts.Error("Categories, and deleting help answers, need Knowledge base: Manage on your role.");
+        return true;
     }
 
     private bool Refused()
@@ -478,7 +510,7 @@
 
     private async Task SaveCategoryAsync()
     {
-        if (Refused()) return;
+        if (RefusedUnlessManager()) return;
 
         Guid? parent = Guid.TryParse(categoryParent, out Guid p) && categories.Any(c => c.Id == p) ? p : null;
 
@@ -498,7 +530,7 @@
 
     private async Task DeleteCategoryAsync(Guid id)
     {
-        if (Refused()) return;
+        if (RefusedUnlessManager()) return;
 
         try
         {
@@ -610,7 +642,7 @@
 
     private async Task DeleteAnswerAsync()
     {
-        if (Refused()) return;
+        if (answer?.AppId is null ? RefusedUnlessManager() : Refused()) return;
 
         await KnowledgeBase.DeleteAnswerAsync(TenantId, answer!.Id);
         await CloseAnswer();

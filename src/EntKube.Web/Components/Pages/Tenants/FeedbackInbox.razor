@@ -140,6 +140,10 @@ else
 }
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter] public required Guid TenantId { get; set; }
 
     /// <summary>Narrows to one site. The portal passes a site it has confined to the customer.</summary>
@@ -190,6 +194,11 @@ else
 
     private async Task SetStatusAsync(FeedbackStatus status)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        {
+            return;
+        }
+
         if (selected is null || ReadOnly) return;
 
         busy = true;
@@ -200,6 +209,11 @@ else
 
     private async Task OpenTicketAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        {
+            return;
+        }
+
         if (selected is null || ReadOnly) return;
 
         busy = true;

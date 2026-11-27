@@ -84,6 +84,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -144,6 +148,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         // Empty keeps the stored token when changing a tracker; a new tracker simply has none.
         string? newToken = string.IsNullOrWhiteSpace(token) ? null : token;
 
@@ -155,6 +164,11 @@
 
     private async Task RemoveTokenAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (editing is null)
         {
             return;
@@ -168,6 +182,11 @@
 
     private async Task DeleteAsync(IssueTracker t)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         await Issues.DeleteTrackerAsync(TenantId, t.Id);
         Toasts.Success($"{t.Host} removed. Issues already linked on it stay as plain links.");
 

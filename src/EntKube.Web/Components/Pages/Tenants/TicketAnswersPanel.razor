@@ -15,7 +15,7 @@
             @foreach (KbAnswer a in answers)
             {
                 <div>
-                    <a href="@Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "knowledge-base", ["answer"] = a.Id, ["ticket"] = null, ["q"] = null })">@a.Title</a>
+                    <a href="@AnswerHref(a)">@a.Title</a>
                     @if (a.Visibility == KbVisibility.Archived) { <span class="text-muted">(archived since)</span> }
                 </div>
             }
@@ -30,6 +30,15 @@
 
     /// <summary>Bumped by the ticket view after a mail or note is added, so a just-inserted answer appears.</summary>
     [Parameter] public int Version { get; set; }
+
+    /// <summary>The tenant's address, so an answer opens in its support desk.</summary>
+    [Parameter] public string? TenantSlug { get; set; }
+
+    // In the support desk, the answer's own address there. Anywhere else, the tenant page's old
+    // address, which sends itself on to the desk.
+    private string AnswerHref(KbAnswer a) => TenantSlug is not null
+        ? SupportLinks.Answer(TenantSlug, a.Id)
+        : Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["section"] = "knowledge-base", ["answer"] = a.Id, ["ticket"] = null, ["q"] = null });
 
     private (Guid, int) loadedFor;
     private List<KbAnswer> answers = [];

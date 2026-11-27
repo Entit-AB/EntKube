@@ -96,6 +96,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -133,6 +137,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         // The choice is checked against the customers we rendered: a select posts a string the
         // browser chose, and the service checks the tenant again besides.
         editing!.CustomerId = Guid.TryParse(customerChoice, out Guid id) && customers.Any(c => c.Id == id) ? id : null;
@@ -152,6 +161,11 @@
 
     private async Task DeleteAsync(TextModule m)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTools, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         await Modules.DeleteAsync(TenantId, m.Id);
         rows = await Modules.ListAsync(TenantId);
         Toasts.Info($"“{m.Name}” deleted.");

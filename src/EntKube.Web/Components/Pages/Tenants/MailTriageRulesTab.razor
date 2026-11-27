@@ -212,6 +212,10 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     private bool loading = true;
@@ -257,6 +261,11 @@
 
     private async Task AdoptAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         int copied = await Rules.AdoptBuiltInAsync(TenantId);
         Toasts.Success($"{copied} phrases copied in. They are yours to edit now.");
         await LoadAsync();
@@ -287,6 +296,11 @@
 
     private async Task SaveAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (editing is null || string.IsNullOrWhiteSpace(editing.Phrase))
         {
             Toasts.Error("A phrase is needed.");
@@ -313,6 +327,11 @@
 
     private async Task ToggleAsync(MailTriageRule rule)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         rule.IsEnabled = !rule.IsEnabled;
         await Rules.SaveAsync(TenantId, rule);
         await LoadAsync();
@@ -320,6 +339,11 @@
 
     private async Task DeleteAsync()
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportChannels, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteId is Guid id)
         {
             await Rules.DeleteAsync(TenantId, id);

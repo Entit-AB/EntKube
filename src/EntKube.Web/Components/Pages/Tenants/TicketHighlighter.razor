@@ -42,6 +42,10 @@
 }
 
 @code {
+    // What the person may do here, handed down by the support desk. Every write below asks
+    // SupportGuard first; nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
     /// <summary>The entries on screen, each rendered with <c>data-entry="@@id"</c>.</summary>
@@ -93,6 +97,11 @@
 
     private async Task MarkAsync(HighlightColor color)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         Selected? chosen = null;
 
         try
@@ -122,6 +131,11 @@
 
     private async Task RemoveAsync(TicketHighlight h)
     {
+        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Highlights.RemoveAsync(TenantId, h.Id);
         items.Remove(h);
     }
