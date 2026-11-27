@@ -130,37 +130,55 @@
 
                             <div class="card-body border-top pt-3 pb-3">
                                 <div class="table-responsive">
-                                    <table class="table table-sm table-borderless mb-3" style="max-width:700px">
+                                    @* One block per area. A level a feature does not have is left empty
+                                       rather than offered; hovering a choice says what it lets somebody do,
+                                       and the line under each row says what the chosen level does. *@
+                                    <table class="table table-sm table-borderless mb-3" style="max-width:860px">
                                         <thead>
                                             <tr class="text-muted small">
-                                                <th style="width:40%">Feature</th>
+                                                <th style="width:55%">Feature</th>
                                                 <th class="text-center">None</th>
                                                 <th class="text-center">View</th>
                                                 <th class="text-center">Edit</th>
                                                 <th class="text-center">Manage</th>
                                             </tr>
                                         </thead>
-                                        <tbody>
-                                            @foreach ((TenantFeature feature, string label, string icon) in TenantRoleService.Features)
-                                            {
-                                                AccessLevel current = TenantRoleService.GetPermission(draft, feature);
+                                        @foreach (IGrouping<PermissionArea, FeaturePermission> area in PermissionCatalog.Features.GroupBy(f => f.Area))
+                                        {
+                                            <tbody>
                                                 <tr>
-                                                    <td class="align-middle">
-                                                        <i class="bi @icon me-2 text-muted"></i>@label
-                                                    </td>
-                                                    @foreach (AccessLevel level in Enum.GetValues<AccessLevel>())
-                                                    {
-                                                        <td class="text-center align-middle">
-                                                            <input type="radio"
-                                                                   class="form-check-input"
-                                                                   name="@($"perm-{role.Id}-{feature}")"
-                                                                   checked="@(current == level)"
-                                                                   @onchange="() => SetDraft(role.Id, feature, level)" />
-                                                        </td>
-                                                    }
+                                                    <th colspan="5" class="small text-uppercase text-muted pt-3">@area.Key</th>
                                                 </tr>
-                                            }
-                                        </tbody>
+                                                @foreach (FeaturePermission f in area)
+                                                {
+                                                    AccessLevel current = TenantRoleService.GetPermission(draft, f.Feature);
+                                                    <tr>
+                                                        <td class="align-middle">
+                                                            <i class="bi @f.Icon me-2 text-muted"></i>@f.Label
+                                                            @if (!f.Enforced)
+                                                            {
+                                                                <span class="badge text-bg-light border ms-1" title="Stored on the role, but nothing checks it yet">not checked yet</span>
+                                                            }
+                                                            <div class="small text-muted ms-4">@f.Describe(current)</div>
+                                                        </td>
+                                                        @foreach (AccessLevel level in Enum.GetValues<AccessLevel>())
+                                                        {
+                                                            <td class="text-center align-middle">
+                                                                @if (f.Levels.Contains(level))
+                                                                {
+                                                                    <input type="radio"
+                                                                           class="form-check-input"
+                                                                           name="@($"perm-{role.Id}-{f.Feature}")"
+                                                                           title="@f.Describe(level)"
+                                                                           checked="@(current == level)"
+                                                                           @onchange="() => SetDraft(role.Id, f.Feature, level)" />
+                                                                }
+                                                            </td>
+                                                        }
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        }
                                     </table>
                                 </div>
 

@@ -8951,6 +8951,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<int>("PermissionSchema")
+                        .HasColumnType("int");
+
                     b.Property<string>("PermissionsJson")
                         .HasColumnType("nvarchar(max)");
 

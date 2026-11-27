@@ -9,7 +9,6 @@
 @inject IJSRuntime JS
 @inject ToastService Toasts
 @inject TenantRoleService Roles
-@inject UserAccessService Access
 @inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider AuthState
 @inject NavigationManager Nav
 
@@ -22,7 +21,7 @@
     @if (!mayEdit)
     {
         <div class="alert alert-light border py-2 small" data-test="kb-read-only">
-            <i class="bi bi-lock me-1"></i>Only roles granted <strong>Support knowledge base: Edit</strong> change answers in this tenant. You can read them.
+            <i class="bi bi-lock me-1"></i>Only roles granted <strong>Knowledge base: Edit</strong> change answers in this tenant. You can read them.
         </div>
     }
     <div class="row g-3" data-test="knowledge-base">
@@ -301,7 +300,7 @@
     private Guid? openedFromAddress;
     private bool loading = true;
 
-    // Phase 10. mayEdit: the opt-in editor permission (TenantFeature.KnowledgeBase); checked in
+    // Phase 10. mayEdit: the editor permission (TenantFeature.KnowledgeBase at Edit); checked in
     // every write handler too, since those run on the server whatever the page shows.
     private bool mayEdit = true;
     private List<KbAnswer> allAnswers = [];
@@ -444,17 +443,17 @@
     }
 
     /// <summary>
-    /// Whether this person may change the knowledge base: always, until some role in the tenant is
-    /// granted "Support knowledge base: Edit"; after that, members of such roles and global admins.
+    /// Whether this person may change the knowledge base: their role in this tenant grants
+    /// "Knowledge base: Edit" or more, or they are a global administrator.
     /// </summary>
     private async Task<bool> MayEditAsync()
     {
         string? userId = (await AuthState.GetAuthenticationStateAsync()).User
             .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
-        (bool anyRoleGrants, bool granted) = await Roles.FeatureGrantAsync(TenantId, userId, TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        EffectivePermissions permissions = await Roles.PermissionsForAsync(TenantId, userId);
 
-        return !anyRoleGrants || granted || (userId is not null && await Access.IsGlobalAdminAsync(userId));
+        return permissions.Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit);
     }
 
     private bool Refused()

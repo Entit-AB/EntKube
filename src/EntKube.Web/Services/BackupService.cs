@@ -433,6 +433,7 @@ public class BackupService(
 
             // Tenant structure — parents before children.
             await InsertEntities(db, db.Tenants, bundle.Tenants);
+            PrepareTenantRolesForRestore(bundle.TenantRoles, bundle.Version);
             await InsertEntities(db, db.TenantRoles, bundle.TenantRoles);
             await InsertEntities(db, db.TenantMemberships, bundle.TenantMemberships);
             await InsertEntities(db, db.Groups, bundle.Groups);
@@ -1003,5 +1004,29 @@ public class BackupService(
             .Select(t => t.GetTableName()!)
             .Distinct()
             .Order()];
+    }
+
+    /// <summary>
+    /// The first bundle version whose tenant roles say which permission rules they were written
+    /// for. Older bundles predate enforced permissions.
+    /// </summary>
+    public const int FirstVersionWithPermissionSchema = 23;
+
+    /// <summary>
+    /// Roles from a bundle written before permissions were enforced carry no schema, so they would
+    /// read as already carried across and their members would lose the support access they had.
+    /// Marking them as the old version lets the next start carry them across like any other.
+    /// </summary>
+    public static void PrepareTenantRolesForRestore(IEnumerable<TenantRole> roles, int bundleVersion)
+    {
+        if (bundleVersion >= FirstVersionWithPermissionSchema)
+        {
+            return;
+        }
+
+        foreach (TenantRole role in roles)
+        {
+            role.PermissionSchema = 0;
+        }
     }
 }

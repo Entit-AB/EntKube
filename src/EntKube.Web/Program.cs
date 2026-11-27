@@ -650,6 +650,7 @@ public class Program
             await EnsureClusterKubeconfigsMigratedAsync(db, scope.ServiceProvider, app.Logger);
             await EnsureImportedTlsSecretsAsCertificatesAsync(scope.ServiceProvider, app.Logger);
             await MoveKnowledgeIntoTheKnowledgeBaseAsync(scope.ServiceProvider, app.Logger);
+            await CarryTenantRolesAcrossAsync(scope.ServiceProvider, app.Logger);
 
             RoleManager<IdentityRole> roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
             if (!await roleManager.RoleExistsAsync("Admin"))
@@ -1561,6 +1562,36 @@ public class Program
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "The knowledge merge did not complete; the sections not moved stay where they were and are retried next start.");
+        }
+    }
+
+    /// <summary>
+    /// Role permissions are enforced from this build on. Roles from before that are carried across
+    /// once, so that nobody loses what they could already do; one line per tenant says what was
+    /// granted, so an administrator knows which roles to tighten. The service is resolved outside
+    /// the catch, so a broken registration fails loudly; a failed carry-across is retried next start.
+    /// </summary>
+    private static async Task CarryTenantRolesAcrossAsync(IServiceProvider services, ILogger logger)
+    {
+        TenantRoleService roles = services.GetRequiredService<TenantRoleService>();
+
+        try
+        {
+            foreach (RolePermissionUpgrade u in await roles.CarryRolesAcrossAsync())
+            {
+                logger.LogInformation(
+                    "Role permissions, tenant {Tenant}: {Roles} role(s) carried across to enforced permissions. Each was granted "
+                    + "the most on every support and customer permission, because membership used to allow all of it; "
+                    + "{KnowledgeBase}. Tighten them under Admin → Roles.",
+                    u.TenantName, u.Roles,
+                    u.KnowledgeBaseEditorsKept
+                        ? "the knowledge-base editors chosen before keep editing and everyone else reads"
+                        : "everyone keeps editing the knowledge base, as nobody had been made its editor");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Tenant roles were not carried across to enforced permissions; it is retried next start.");
         }
     }
 

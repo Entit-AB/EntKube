@@ -922,14 +922,43 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     }
 
     [Fact]
-    public async Task Everyone_edits_the_knowledge_base_until_a_role_is_made_its_editor()
+    public async Task A_member_whose_role_edits_the_knowledge_base_writes_answers()
     {
         await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        Guid agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents",
+            PermissionsJson = $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)AccessLevel.Edit}}}" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
 
         IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
 
         tab.WaitForAssertion(() => tab.FindAll("button").Should().Contain(b => b.TextContent.Contains("New answer")));
         tab.FindAll("[data-test=kb-read-only]").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The knowledge base used to be opt-in: while no role in the tenant had been made its editor,
+    /// everybody edited. Permissions are enforced now, and a role that does not grant editing does
+    /// not edit — the roles that existed before were carried across with the grant instead.
+    /// </summary>
+    [Fact]
+    public async Task A_member_whose_role_does_not_grant_editing_only_reads_even_where_nobody_is_an_editor()
+    {
+        await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        Guid agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
+
+        tab.WaitForAssertion(() => tab.Find("[data-test=kb-read-only]").TextContent.Should().Contain("Knowledge base: Edit"));
+        tab.FindAll("button").Should().NotContain(b => b.TextContent.Contains("New answer") || b.TextContent.Contains("Add category"));
     }
 
     [Fact]
@@ -947,7 +976,7 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
 
         IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
 
-        tab.WaitForAssertion(() => tab.Find("[data-test=kb-read-only]").TextContent.Should().Contain("Support knowledge base: Edit"));
+        tab.WaitForAssertion(() => tab.Find("[data-test=kb-read-only]").TextContent.Should().Contain("Knowledge base: Edit"));
         tab.FindAll("button").Should().NotContain(b => b.TextContent.Contains("New answer") || b.TextContent.Contains("Add category"));
     }
 
