@@ -43,12 +43,9 @@ public class TenantService(
         Tenant tenant = new() { Id = tenantId, Name = name, Slug = slug };
         db.Tenants.Add(tenant);
 
-        // Seed default roles so tenant memberships can be assigned immediately.
-        db.TenantRoles.AddRange(
-            new TenantRole { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Administrator" },
-            new TenantRole { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Member" },
-            new TenantRole { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Viewer" }
-        );
+        // Seed the default roles so members can be added straight away, each granted what its
+        // name promises: Administrator everything, Member the daily work, Viewer a look at it.
+        db.TenantRoles.AddRange(PermissionCatalog.DefaultRolesFor(tenantId));
 
         await db.SaveChangesAsync(ct);
         return tenant;

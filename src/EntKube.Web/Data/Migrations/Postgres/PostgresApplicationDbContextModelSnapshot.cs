@@ -8946,6 +8946,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<int>("PermissionSchema")
+                        .HasColumnType("integer");
+
                     b.Property<string>("PermissionsJson")
                         .HasColumnType("text");
 

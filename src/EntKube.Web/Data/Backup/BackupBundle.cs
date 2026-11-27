@@ -2,6 +2,8 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 23 added each tenant role's permission schema; older roles are carried across
+    // to enforced permissions after the restore (BackupService.PrepareTenantRolesForRestore).
     // Version 13 added published virtual machine ports (VmRoutes).
     // Version 11 added the audit trail, within a retention window — see
     // BackupService.AuditRetention for why a window rather than all of it.
@@ -30,7 +32,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 22;
+    public const int CurrentVersion = 23;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

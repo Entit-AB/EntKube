@@ -180,35 +180,36 @@ public class KnowledgeBaseLinkTests : IDisposable
         $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)level}}}";
 
     [Fact]
-    public async Task Until_a_role_is_granted_editing_nobody_is_singled_out()
+    public async Task A_role_that_does_not_grant_editing_does_not_edit_even_where_nobody_is_an_editor()
     {
+        // The old opt-in let everybody edit until some role was made the editor. Not any more.
         Member("user-nils", ours, Role(ours, "Agent", null));
 
-        (await roles.FeatureGrantAsync(ours, "user-nils", TenantFeature.KnowledgeBase, AccessLevel.Edit))
-            .Should().Be((false, false));
+        (await roles.PermissionsForAsync(ours, "user-nils")).Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit).Should().BeFalse();
     }
 
     [Fact]
-    public async Task Once_a_role_is_granted_editing_only_its_members_are()
+    public async Task Only_members_of_a_role_granted_editing_edit()
     {
         Guid editors = Role(ours, "KB editors", Grant(AccessLevel.Edit));
         Guid agents = Role(ours, "Agents", Grant(AccessLevel.View));
         Member("user-anna", ours, editors);
         Member("user-nils", ours, agents);
 
-        (await roles.FeatureGrantAsync(ours, "user-anna", TenantFeature.KnowledgeBase, AccessLevel.Edit)).Should().Be((true, true));
-        (await roles.FeatureGrantAsync(ours, "user-nils", TenantFeature.KnowledgeBase, AccessLevel.Edit)).Should().Be((true, false));
-        (await roles.FeatureGrantAsync(ours, null, TenantFeature.KnowledgeBase, AccessLevel.Edit)).Should().Be((true, false));
+        (await roles.PermissionsForAsync(ours, "user-anna")).Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit).Should().BeTrue();
+        (await roles.PermissionsForAsync(ours, "user-nils")).Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit).Should().BeFalse();
+        (await roles.PermissionsForAsync(ours, "user-nils")).Allows(TenantFeature.KnowledgeBase, AccessLevel.View).Should().BeTrue();
+        (await roles.PermissionsForAsync(ours, null)).Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit).Should().BeFalse();
     }
 
     [Fact]
-    public async Task Another_tenants_grant_neither_binds_nor_admits_here()
+    public async Task Another_tenants_grant_does_not_admit_here()
     {
         Guid theirEditors = Role(theirs, "KB editors", Grant(AccessLevel.Manage));
         Member("user-anna", theirs, theirEditors);
         Member("user-anna", ours, Role(ours, "Agents", null));
 
-        (await roles.FeatureGrantAsync(ours, "user-anna", TenantFeature.KnowledgeBase, AccessLevel.Edit)).Should().Be((false, false));
+        (await roles.PermissionsForAsync(ours, "user-anna")).Allows(TenantFeature.KnowledgeBase, AccessLevel.Edit).Should().BeFalse();
     }
 
     /// <summary>The feature is appended last: its stored number must never move.</summary>

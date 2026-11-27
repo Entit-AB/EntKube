@@ -9,55 +9,114 @@ public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
-    // Feature display metadata — order determines row order in the permission matrix.
-    public static readonly IReadOnlyList<(TenantFeature Feature, string Label, string Icon)> Features =
-    [
-        (TenantFeature.Clusters,           "Clusters",           "bi-hdd-network"),
-        (TenantFeature.Environments,       "Environments",       "bi-layers"),
-        (TenantFeature.Customers,          "Customers",          "bi-building"),
-        (TenantFeature.Apps,               "Apps",               "bi-box-seam"),
-        (TenantFeature.Deployments,        "Deployments",        "bi-rocket"),
-        (TenantFeature.Groups,             "Groups",             "bi-diagram-3"),
-        (TenantFeature.Databases,          "Databases",          "bi-database"),
-        (TenantFeature.Storage,            "Storage",            "bi-cloud-arrow-up"),
-        (TenantFeature.GitRepositories,    "Git Repositories",   "bi-git"),
-        (TenantFeature.Keycloak,           "Keycloak / Identity","bi-shield-lock"),
-        (TenantFeature.ContainerRegistry,  "Container Registry", "bi-box2-heart"),
-        (TenantFeature.Messaging,          "Messaging",          "bi-send"),
-        (TenantFeature.Cache,              "Cache",              "bi-lightning"),
-        (TenantFeature.VPN,                "VPN",                "bi-shield-shaded"),
-        (TenantFeature.Monitoring,         "Monitoring",         "bi-activity"),
-        (TenantFeature.Audit,              "Audit Log",          "bi-journal-text"),
-        (TenantFeature.JitAccess,          "JIT cluster access", "bi-terminal"),
-        (TenantFeature.KnowledgeBase,      "Support knowledge base", "bi-book"),
-    ];
+    /// <summary>
+    /// What <paramref name="userId"/> may do in the tenant: everything for a global administrator,
+    /// what their role grants for a member, and nothing for anybody else — including a member of
+    /// some other tenant, whose role there says nothing about here.
+    /// </summary>
+    public async Task<EffectivePermissions> PermissionsForAsync(Guid tenantId, string? userId, CancellationToken ct = default)
+    {
+        // Nobody signed in holds nothing.
+        if (userId is null)
+        {
+            return EffectivePermissions.Nothing;
+        }
+
+        using IdentityDbContext db = dbFactory.CreateDbContext();
+
+        // A global administrator runs the installation, and every tenant in it, member or not.
+        bool globalAdmin = await (
+            from ur in db.UserRoles
+            join r in db.Roles on ur.RoleId equals r.Id
+            where ur.UserId == userId && r.Name == "Admin"
+            select ur).AnyAsync(ct);
+
+        if (globalAdmin)
+        {
+            return EffectivePermissions.Everything;
+        }
+
+        // Anybody else holds what the role they hold in this tenant grants. A role is chosen per
+        // tenant, so the lookup is by both.
+        MembershipGrants? membership = await db.TenantMemberships.AsNoTracking()
+            .Where(m => m.TenantId == tenantId && m.UserId == userId)
+            .Select(m => new MembershipGrants(m.Role.PermissionsJson))
+            .FirstOrDefaultAsync(ct);
+
+        if (membership is null)
+        {
+            return EffectivePermissions.Nothing;
+        }
+
+        return EffectivePermissions.Granting(DecodePermissions(membership.PermissionsJson));
+    }
+
+    // A membership's role grants, as stored. A record rather than the bare string, so that a member
+    // whose role grants nothing (null) can be told apart from somebody who is not a member at all.
+    private sealed record MembershipGrants(string? PermissionsJson);
 
     /// <summary>
-    /// Whether <paramref name="userId"/>'s role in the tenant grants <paramref name="feature"/> at
-    /// <paramref name="atLeast"/> — and whether any role there does at all, for a permission that
-    /// only binds once somebody has set it (see <see cref="TenantFeature.KnowledgeBase"/>).
+    /// Carries the roles that existed before permissions were enforced across to the rules this
+    /// build enforces, so that nobody loses what they could already do (see
+    /// <see cref="PermissionCatalog.CarryAcross"/>). Each role is carried across once; a role
+    /// made since never is.
+    ///
+    /// <para>Safe on several instances starting together: a tenant is done in one transaction,
+    /// and each role is only written while it is still at the old version, so two instances
+    /// cannot both write it — and would write the same thing if they did.</para>
     /// </summary>
-    public async Task<(bool AnyRoleGrants, bool UserGranted)> FeatureGrantAsync(
-        Guid tenantId, string? userId, TenantFeature feature, AccessLevel atLeast, CancellationToken ct = default)
+    public async Task<IReadOnlyList<RolePermissionUpgrade>> CarryRolesAcrossAsync(CancellationToken ct = default)
     {
         using IdentityDbContext db = dbFactory.CreateDbContext();
 
-        List<(Guid Id, string? Json)> roles = [.. (await db.TenantRoles.AsNoTracking()
-            .Where(r => r.TenantId == tenantId)
-            .Select(r => new { r.Id, r.PermissionsJson })
-            .ToListAsync(ct)).Select(r => (r.Id, r.PermissionsJson))];
+        // The tenants with at least one role still waiting.
+        List<Guid> tenantIds = await db.TenantRoles.AsNoTracking()
+            .Where(r => r.PermissionSchema < TenantRole.CurrentPermissionSchema)
+            .Select(r => r.TenantId)
+            .Distinct()
+            .ToListAsync(ct);
 
-        HashSet<Guid> granting = [.. roles.Where(r => GetPermission(DecodePermissions(r.Json), feature) >= atLeast).Select(r => r.Id)];
+        List<RolePermissionUpgrade> upgrades = [];
 
-        if (granting.Count == 0 || userId is null)
+        foreach (Guid tenantId in tenantIds)
         {
-            return (granting.Count > 0, false);
+            await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx = await db.Database.BeginTransactionAsync(ct);
+
+            List<TenantRole> waiting = await db.TenantRoles.AsNoTracking()
+                .Where(r => r.TenantId == tenantId && r.PermissionSchema < TenantRole.CurrentPermissionSchema)
+                .ToListAsync(ct);
+
+            // The knowledge base's opt-in was judged per tenant, from the roles as they stood
+            // before enforcement — which are exactly the ones still waiting.
+            bool editorsChosen = waiting.Any(r =>
+                GetPermission(DecodePermissions(r.PermissionsJson), TenantFeature.KnowledgeBase) >= AccessLevel.Edit);
+
+            int carried = 0;
+
+            foreach (TenantRole role in waiting)
+            {
+                string json = EncodePermissions(PermissionCatalog.CarryAcross(DecodePermissions(role.PermissionsJson), editorsChosen));
+
+                // Only while it is still waiting: another instance may have got here first.
+                carried += await db.TenantRoles
+                    .Where(r => r.Id == role.Id && r.PermissionSchema < TenantRole.CurrentPermissionSchema)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(r => r.PermissionsJson, json)
+                        .SetProperty(r => r.PermissionSchema, TenantRole.CurrentPermissionSchema), ct);
+            }
+
+            await tx.CommitAsync(ct);
+
+            if (carried > 0)
+            {
+                string name = await db.Tenants.AsNoTracking()
+                    .Where(t => t.Id == tenantId).Select(t => t.Name).FirstOrDefaultAsync(ct) ?? tenantId.ToString();
+
+                upgrades.Add(new RolePermissionUpgrade(tenantId, name, carried, editorsChosen));
+            }
         }
 
-        bool member = await db.TenantMemberships.AsNoTracking()
-            .AnyAsync(m => m.TenantId == tenantId && m.UserId == userId && granting.Contains(m.RoleId), ct);
-
-        return (true, member);
+        return upgrades;
     }
 
     // ── Role CRUD ──────────────────────────────────────────────────────────────

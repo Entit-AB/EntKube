@@ -309,8 +309,8 @@ Phase 2 is complete apart from those. Next: **Phase 3** (search, customer and or
   each one opened by id.
 - **Kept apart from `KnowledgeSection`** (the per-application runbook), which stays internal.
 - **Not done:** attachments and video embeds in answers, links between answers, related tickets,
-  RSS feeds, and per-role category permissions. Any tenant member may edit; Zammad by default
-  restricts editing to KB editors, and this installation has no such role yet.
+  RSS feeds, and per-role category permissions. Editing needs **Knowledge base: Edit** on the
+  member's role (phase 10, and enforced permissions since).
 
 ### Phase 3: Find anything
 A query parser for Zammad's syntax that **compiles to EF**, not to a search engine.
@@ -460,12 +460,14 @@ but never built), customers downloading their files from the portal, and rich-te
   sides first. Bundle v21.
 - **Answers given on tickets** (`KbAnswerTicket`) are recorded when an agent inserts one with `??`,
   in a reply or a note. They are shown on the ticket and on the answer, to agents only.
-- **The editor permission is opt-in.** `TenantFeature.KnowledgeBase` is appended last; stored
-  permissions are numbers. Until some role in a tenant grants it at Edit or above, everyone may
-  edit, as before. Enforcing it outright would have locked every existing tenant out, because
-  roles without explicit permissions grant nothing. Once granted, only members of such roles and
-  global admins may edit. The check is made on the server in each write handler, not only by
-  hiding buttons. The knowledge base has no API, so those handlers are the only way to write.
+- **The editor permission.** `TenantFeature.KnowledgeBase` is appended last; stored permissions
+  are numbers. It began opt-in: until some role in a tenant granted it at Edit or above, everyone
+  could edit. Since role permissions are enforced (`TenantRole.PermissionSchema` 1) it is an
+  ordinary grant — only roles granting Edit, and global admins, may edit. Roles from before were
+  carried across once at startup (`TenantRoleService.CarryRolesAcrossAsync`): where nobody had
+  been made editor every role got Manage; where editors had been chosen they kept Edit and the
+  rest got View. The check is made on the server in each write handler, not only by hiding
+  buttons. The knowledge base has no API, so those handlers are the only way to write.
 - **Not supported, with reasons** (also in the manual): video embeds (they'd need iframes on the
   allow-list), RSS (the portal requires sign-in), and files on answers.
 
@@ -477,7 +479,7 @@ The user's decisions (2026-11-18):
   the knowledge base as agents-only answers tied to the application, keeping its revision history and
   review stamps. The app's Knowledge button shows only that app's part. The app's structured facts
   (classification, dependencies, end-of-life) stay on the button.
-- **Two edit rules.** Help answers follow the opt-in editor permission. An application's runbook stays
+- **Two edit rules.** Help answers follow the editor permission. An application's runbook stays
   editable by anyone who can open the application.
 - **Contracts on the customer alone.** The application's Contract button goes. Annex A moves to the
   customer's Contract page (PR #479).

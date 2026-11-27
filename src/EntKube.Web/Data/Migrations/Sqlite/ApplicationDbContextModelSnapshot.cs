@@ -8939,6 +8939,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(100)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("PermissionSchema")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("PermissionsJson")
                         .HasColumnType("TEXT");
 

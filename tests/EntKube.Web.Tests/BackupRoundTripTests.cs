@@ -292,6 +292,57 @@ public class BackupRoundTripTests : IDisposable
     }
 
     /// <summary>
+    /// A role restored from a bundle written before role permissions were enforced is carried
+    /// across at the next start, like a role that never left. Left alone it would read as
+    /// already carried across — its members would lose the support access they had when the
+    /// bundle was written.
+    /// </summary>
+    [Fact]
+    public async Task A_role_from_a_bundle_older_than_enforced_permissions_is_carried_across_after_the_restore()
+    {
+        Seed();
+        Guid member = Guid.NewGuid();
+        using (ApplicationDbContext db = Source())
+        {
+            db.TenantRoles.Add(new TenantRole { Id = member, TenantId = tenantId, Name = "Member" });
+            db.SaveChanges();
+        }
+
+        byte[] exported = await exporter.ExportAsync("nils");
+
+        // An older bundle: stamped before the schema existed, and so without it on its roles.
+        using MemoryStream raw = new(exported);
+        using System.IO.Compression.GZipStream unzip = new(raw, System.IO.Compression.CompressionMode.Decompress);
+        using StreamReader reader = new(unzip);
+        string json = (await reader.ReadToEndAsync())
+            .Replace($"\"Version\":{BackupBundle.CurrentVersion}", $"\"Version\":{BackupService.FirstVersionWithPermissionSchema - 1}")
+            .Replace($"\"PermissionSchema\":{TenantRole.CurrentPermissionSchema},", "");
+
+        using MemoryStream older = new(System.Text.Encoding.UTF8.GetBytes(json));
+        await importer.ImportAsync(older, wipeExisting: false);
+
+        using ApplicationDbContext restored = Destination();
+        restored.TenantRoles.Single(r => r.Id == member).PermissionSchema.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_role_from_a_current_bundle_keeps_its_permission_schema()
+    {
+        Seed();
+        Guid member = Guid.NewGuid();
+        using (ApplicationDbContext db = Source())
+        {
+            db.TenantRoles.Add(new TenantRole { Id = member, TenantId = tenantId, Name = "Member" });
+            db.SaveChanges();
+        }
+
+        await RoundTripAsync();
+
+        using ApplicationDbContext restored = Destination();
+        restored.TenantRoles.Single(r => r.Id == member).PermissionSchema.Should().Be(TenantRole.CurrentPermissionSchema);
+    }
+
+    /// <summary>
     /// A bundle from a newer EntKube is refused rather than half-restored: it may carry
     /// tables this build cannot place, and stopping at the first of them would leave the
     /// database neither the old state nor the new one.
