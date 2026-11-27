@@ -4204,7 +4204,7 @@ public static class ComponentCatalog
         {
             Key = "rabbitmq-cluster-operator",
             DisplayName = "RabbitMQ Cluster Operator",
-            Description = "Kubernetes operator that manages RabbitMQ broker clusters. Provisions RabbitmqCluster CRDs as StatefulSets with automatic secret generation, persistent storage, and cluster health conditions. Installed via the official GitHub release manifest.",
+            Description = "Kubernetes operator that manages RabbitMQ broker clusters. Provisions RabbitmqCluster CRDs as StatefulSets with automatic secret generation, persistent storage, and cluster health conditions. Installed via the official GitHub release manifest. Requires cert-manager for webhook TLS certificate management.",
             Icon = "bi-collection",
             Category = "Messaging",
             ComponentType = "ManifestUrl",
@@ -4213,6 +4213,10 @@ public static class ComponentCatalog
             DefaultNamespace = "rabbitmq-system",
             DefaultReleaseName = "rabbitmq-cluster-operator",
             DetectionCrds = ["rabbitmqclusters.rabbitmq.com"],
+            // The release manifest (v2.23.x) ships a cert-manager Issuer and Certificate for the
+            // operator's webhooks: without cert-manager the apply fails on those kinds, and the
+            // webhooks never get a CA to serve with.
+            Dependencies = ["cert-manager"],
             FormFields = [],
             DefaultValues = ""
         },
