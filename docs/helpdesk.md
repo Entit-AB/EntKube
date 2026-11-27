@@ -465,7 +465,8 @@ but never built), customers downloading their files from the portal, and rich-te
   could edit. Since role permissions are enforced (`TenantRole.PermissionSchema` 1) it is an
   ordinary grant — only roles granting Edit, and global admins, may edit. Roles from before were
   carried across once at startup (`TenantRoleService.CarryRolesAcrossAsync`): where nobody had
-  been made editor every role got Manage; where editors had been chosen they kept Edit and the
+  been made editor every role got Manage; where editors had been chosen they got Manage (all an
+  editor could do: answers, categories, deleting) and the
   rest got View. The check is made on the server in each write handler, not only by hiding
   buttons. The knowledge base has no API, so those handlers are the only way to write.
 - **Not supported, with reasons** (also in the manual): video embeds (they'd need iframes on the

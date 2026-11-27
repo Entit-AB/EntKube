@@ -151,12 +151,13 @@ public class TenantPermissionsTests : IDisposable
     public void Where_knowledge_base_editors_were_chosen_everyone_else_keeps_reading_but_not_editing()
     {
         // The old opt-in: once some role was made the knowledge base's editor, everybody else
-        // could only read it. Both halves of that survive.
+        // could only read it. Both halves of that survive. An editor then could also run the
+        // categories and delete answers, which is Manage now — so that is what they keep.
         Dictionary<TenantFeature, AccessLevel> editor = PermissionCatalog.CarryAcross(
             new() { [TenantFeature.KnowledgeBase] = AccessLevel.Edit }, knowledgeBaseEditorsChosen: true);
         Dictionary<TenantFeature, AccessLevel> agent = PermissionCatalog.CarryAcross([], knowledgeBaseEditorsChosen: true);
 
-        editor.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        editor.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         agent.Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
     }
 
@@ -174,7 +175,7 @@ public class TenantPermissionsTests : IDisposable
         second.Should().BeEmpty();
 
         // The opt-in is judged per tenant: choosing editors over here says nothing about over there.
-        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Edit);
+        Stored(editors).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         Stored(agents).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.View);
         Stored(elsewhere).Should().Contain(TenantFeature.KnowledgeBase, AccessLevel.Manage);
         Stored(agents).Should().Contain(TenantFeature.SupportTickets, AccessLevel.Manage);

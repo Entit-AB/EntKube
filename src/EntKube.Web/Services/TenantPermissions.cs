@@ -206,12 +206,13 @@ public static class PermissionCatalog
         }
 
         // The knowledge base was opt-in. Where nobody had opted in, everybody could edit it, and
-        // so everybody may. Where editors had been chosen, they keep editing, and everybody else
-        // keeps reading — the agents-only answers were never hidden from them.
+        // so everybody may. Where editors had been chosen, they keep all an editor could do —
+        // write answers, run the categories, delete answers, which is Manage now — and everybody
+        // else keeps reading: the agents-only answers were never hidden from them.
         AccessLevel knowledgeBase = existing.GetValueOrDefault(TenantFeature.KnowledgeBase, AccessLevel.None);
 
         carried[TenantFeature.KnowledgeBase] = knowledgeBaseEditorsChosen
-            ? (knowledgeBase > AccessLevel.View ? knowledgeBase : AccessLevel.View)
+            ? (knowledgeBase >= AccessLevel.Edit ? Describe(TenantFeature.KnowledgeBase).Highest : AccessLevel.View)
             : Describe(TenantFeature.KnowledgeBase).Highest;
 
         return carried;
