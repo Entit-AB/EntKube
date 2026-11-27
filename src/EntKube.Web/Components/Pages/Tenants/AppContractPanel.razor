@@ -299,6 +299,10 @@
 </LoadingPanel>
 
 @code {
+    // Handed down by the customer page, through the agreement panel. An application's Annex A is
+    // the commercial side (Agreements: Edit). Nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
 
@@ -396,6 +400,11 @@
 
     private async Task SaveContractAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (contract is null)
         {
             return;
@@ -423,6 +432,11 @@
 
     private async Task RecordLevelAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (contract is null || newEffectiveFrom is null)
         {
             Toasts.Error("An effective date is required.");
@@ -456,6 +470,11 @@
 
     private async Task DeleteLevelAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteLevelId is null)
         {
             return;

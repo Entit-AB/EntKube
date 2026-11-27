@@ -310,7 +310,7 @@ else
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter] public required Guid TenantId { get; set; }
@@ -354,7 +354,7 @@ else
 
     private async Task SaveHandoverAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -452,7 +452,7 @@ else
 
     private async Task CreateSchedule()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
         {
             return;
         }
@@ -479,7 +479,7 @@ else
 
     private async Task DeleteSchedule(OnCallSchedule schedule)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
         {
             return;
         }
@@ -513,7 +513,7 @@ else
 
     private async Task AddShift(Guid scheduleId)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
         {
             return;
         }
@@ -547,7 +547,7 @@ else
 
     private async Task DeleteShift(OnCallShift shift)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Manage, Toasts))
         {
             return;
         }

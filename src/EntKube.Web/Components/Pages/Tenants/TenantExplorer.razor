@@ -15,6 +15,8 @@
 @rendermode @(new InteractiveServerRenderMode(prerender: false))
 @inject TenantService TenantService
 @inject UserAccessService UserAccessService
+@inject TenantRoleService Roles
+@inject ToastService Toasts
 @inject AuthenticationStateProvider AuthStateProvider
 @inject NavigationManager Nav
 
@@ -85,13 +87,18 @@ else
                         @* Customers under this environment *@
                         <div class="tree-subhead indent-2">
                             <span class="tree-sub">Customers</span>
-                            @if (CustomersNotInEnv(env).Count > 0)
+                            @* Which environments a customer is in is a customer detail; creating one is
+                               the customer permission's top level. Offered only to those who may. *@
+                            @if (CustomersNotInEnv(env).Count > 0 && permissions.Allows(TenantFeature.Customers, AccessLevel.Edit))
                             {
                                 <button type="button" class="tree-add" title="Add an existing customer to @env.Name" aria-label="Add existing customer"
                                         @onclick="() => StartLinkCustomer(env.Id)"><i class="bi bi-person-plus"></i></button>
                             }
-                            <button type="button" class="tree-add" title="New customer in @env.Name" aria-label="Add customer"
-                                    @onclick="() => StartAddCustomer(env.Id)"><i class="bi bi-plus-lg"></i></button>
+                            @if (permissions.Allows(TenantFeature.Customers, AccessLevel.Manage))
+                            {
+                                <button type="button" class="tree-add" title="New customer in @env.Name" aria-label="Add customer"
+                                        @onclick="() => StartAddCustomer(env.Id)"><i class="bi bi-plus-lg"></i></button>
+                            }
                         </div>
                         @if (addingCustomerEnv == env.Id)
                         {
@@ -164,39 +171,18 @@ else
                 }
 
                 @* ── Customers ──
-                   The tenant's customers, flat and tenant-wide, as opposed to the
-                   environment-scoped copies under Environments above. They had been one
-                   leaf inside Manage, beside the API tokens, which is a filing cabinet for
-                   a thing most of the product is about: apps, tickets, contracts and
-                   chargeback all hang off a customer. Selecting one opens its apps
-                   directly; ?section=customers still opens the full list, which is what the
-                   top-nav mega menu links to. *@
-                <div class="tree-section-head">
-                    <span class="tree-section-label">Customers</span>
-                    <button type="button" class="tree-add" title="New customer" aria-label="New customer"
-                            @onclick="StartAddTenantCustomer"><i class="bi bi-plus-lg"></i></button>
-                </div>
-                @if (addingTenantCustomer)
+                   A customer's own page — details, agreement, portal access — is in the
+                   Customers menu now, where each tab asks for its own permission. Here they are
+                   only the way apps are grouped, under each environment above. *@
+                @if (CustomerSections.OpensFor(permissions))
                 {
-                    <div class="tree-add-row indent-1">
-                        <input placeholder="New customer name" @bind="newCustomerName" @bind:event="oninput"
-                               @onkeydown="e => OnAddKey(e, AddTenantCustomer)" />
-                        <button type="button" class="tree-add-ok" @onclick="AddTenantCustomer" aria-label="Create"><i class="bi bi-check-lg"></i></button>
-                    </div>
-                }
-                @if (VisibleCustomers().Count == 0 && !addingTenantCustomer)
-                {
-                    <div class="tree-empty">@(HasFilter ? "No matches" : "No customers yet")</div>
-                }
-                @foreach (Customer c in VisibleCustomers())
-                {
-                    <button type="button" class="node leaf indent-1 @(selectedCustomer?.Id == c.Id ? "selected" : "")"
-                            @onclick="() => SelectCustomer(c)">
+                    <div class="tree-section-head"><span class="tree-section-label">Customers</span></div>
+                    <a class="node leaf indent-1" href="@CustomerLinks.List(tenant.Slug)">
                         <span class="caret"></span>
-                        <i class="ico bi bi-person-badge" aria-hidden="true"></i>
-                        <span class="label">@c.Name</span>
-                        <span class="badge-count">@AppsOf(c).Count</span>
-                    </button>
+                        <i class="ico bi bi-people" aria-hidden="true"></i>
+                        <span class="label">All customers</span>
+                        <span class="badge-count">@customers.Count</span>
+                    </a>
                 }
 
                 @* ── Platform (tenant-wide) ── *@
@@ -371,10 +357,6 @@ else
                            InitialEnvironmentId="selectedAppEnvId" ShowBackLink="false"
                            OnBack="ClearSelection" OnDeleted="OnAppDeleted" @key="(selectedApp.Id, selectedAppEnvId)" />
             }
-            else if (selectedCustomer is not null)
-            {
-                <CustomerTab TenantId="tenant.Id" InitialCustomerId="selectedCustomer.Id" @key="selectedCustomer.Id" />
-            }
             else if (selectedCluster is not null)
             {
                 <ClusterDetail Cluster="selectedCluster" TenantId="tenant.Id" ShowBackLink="false"
@@ -524,13 +506,12 @@ else
     private string newCustomerName = "";
     private Guid? linkingCustomerEnv;      // env whose "add existing customer" picker is open
     private Guid? linkCustomerId;
-    private bool addingTenantCustomer;     // the Customers heading's own "+" (no environment)
     private (Guid Env, Guid Cust)? addingApp;
     private string newAppName = "";
 
     private Data.App? selectedApp;
     private Customer? selectedAppCustomer;
-    private Customer? selectedCustomer;    // a customer opened from the Customers heading
+    private EffectivePermissions permissions = EffectivePermissions.Nothing;
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
     private Guid? selectedServiceEnvId;   // environment a per-env service was opened under
@@ -550,6 +531,13 @@ else
         if (SupportLinks.FromTenantPage(Slug, SectionParam, TicketParam, SearchParam, AnswerParam, IncidentParam) is string moved)
         {
             Nav.NavigateTo(moved, replace: true);
+            return;
+        }
+
+        // And customers, for the same reason: ?section=customers is the list, ?customer=… one customer.
+        if (CustomerLinks.FromTenantPage(Slug, SectionParam, CustomerParam) is string customerPage)
+        {
+            Nav.NavigateTo(customerPage, replace: true);
             return;
         }
 
@@ -589,6 +577,10 @@ else
         if (t is null) { Nav.NavigateTo("/tenants"); return false; }
         if (!await UserAccessService.HasTenantAccessAsync(userId, t.Id)) { Nav.NavigateTo("/tenants"); return false; }
 
+        // What this person may do here — for now, only whether they may create customers or move
+        // them between environments from the tree. The rest of this page is not checked yet.
+        permissions = await Roles.PermissionsForAsync(t.Id, userId);
+
         // Clear any previous tenant's tree/selection state before loading the new one.
         expandedEnvs.Clear();
         expandedEnvCustomers.Clear();
@@ -596,9 +588,8 @@ else
         appsByCustomer.Clear();
         customersByEnv.Clear();
         filter = "";
-        selectedApp = null; selectedAppCustomer = null; selectedCustomer = null; selectedCluster = null;
+        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
         selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
-        addingTenantCustomer = false;
 
         environments = await TenantService.GetEnvironmentsAsync(t.Id);
         customers = await TenantService.GetCustomersAsync(t.Id);
@@ -633,7 +624,7 @@ else
         // first so switching (e.g. app → section via the mega menu) clears the previous pane.
         // registerEnvId is transient UI state not encoded in the URL, so it is left untouched.
         selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null;
-        selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null;
+        selectedSection = null; selectedServiceEnvId = null;
 
         if (AppParam is Guid appId)
         {
@@ -654,10 +645,6 @@ else
         else if (ClusterParam is Guid clusterId)
         {
             selectedCluster = clusters.FirstOrDefault(c => c.Id == clusterId);
-        }
-        else if (CustomerParam is Guid customerId)
-        {
-            selectedCustomer = customers.FirstOrDefault(c => c.Id == customerId);
         }
         else if (!string.IsNullOrEmpty(SectionParam))
         {
@@ -724,12 +711,6 @@ else
         HasFilter ? g.Items.Where(i => Match(i.Label) || Match(g.Name)).ToList() : g.Items.ToList();
     private List<SectionItem> VisibleManage() =>
         HasFilter ? ManageItems.Where(i => Match(i.Label)).ToList() : ManageItems.ToList();
-    // The tenant-wide customer list under its own heading: matched on its own name or on any
-    // of its apps, so filtering for an app still shows you who owns it.
-    private List<Customer> VisibleCustomers() =>
-        HasFilter
-            ? customers.Where(c => Match(c.Name) || AppsOf(c).Any(a => Match(a.Name))).ToList()
-            : customers;
     private List<SectionItem> VisibleEnvServices() =>
         HasFilter ? EnvServiceItems.Where(i => Match(i.Label)).ToList() : EnvServiceItems.ToList();
     private List<SectionItem> VisiblePlatform() =>
@@ -771,6 +752,11 @@ else
 
     private async Task AddCustomer()
     {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
         string name = newCustomerName.Trim();
         if (name.Length == 0 || tenant is null || addingCustomerEnv is not { } envId) return;
         // The customer joins the environment it was created under — and only that one.
@@ -782,33 +768,13 @@ else
         newCustomerName = ""; addingCustomerEnv = null;
     }
 
-    private void StartAddTenantCustomer()
-    {
-        addingTenantCustomer = !addingTenantCustomer;
-        addingCustomerEnv = null; linkingCustomerEnv = null;
-        newCustomerName = "";
-    }
-
-    /// <summary>
-    /// A customer created from the Customers heading, which belongs to no environment yet —
-    /// unlike <see cref="AddCustomer"/>, where the environment it was created under is the
-    /// membership. It shows up under Environments once an app is deployed or it is added to
-    /// one explicitly.
-    /// </summary>
-    private async Task AddTenantCustomer()
-    {
-        string name = newCustomerName.Trim();
-        if (name.Length == 0 || tenant is null) return;
-        Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name, null);
-        customers = await TenantService.GetCustomersAsync(tenant.Id);
-        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(tenant.Id, c.Id);
-        await LoadCustomerEnvironmentsAsync(tenant.Id);
-        RebuildAppIndex();
-        newCustomerName = ""; addingTenantCustomer = false;
-    }
-
     private async Task LinkCustomer()
     {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (tenant is null || linkingCustomerEnv is not { } envId || linkCustomerId is not { } custId) return;
         await TenantService.AddCustomerToEnvironmentAsync(tenant.Id, custId, envId);
         await LoadCustomerEnvironmentsAsync(tenant.Id);
@@ -817,6 +783,11 @@ else
 
     private async Task UnlinkCustomer(Guid envId, Guid custId)
     {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (tenant is null) return;
         // Refused server-side while apps remain, so the tree can't drop an app out of view.
         await TenantService.RemoveCustomerFromEnvironmentAsync(tenant.Id, custId, envId);
@@ -851,40 +822,35 @@ else
     private void SelectApp(Customer c, Data.App app, Data.Environment env)
     {
         selectedApp = app; selectedAppCustomer = c; selectedAppEnvId = env.Id;
-        selectedCluster = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: app.Id, cluster: null, section: null, env: env.Id);
     }
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: cl.Id, section: null, env: null);
-    }
-    private void SelectCustomer(Customer c)
-    {
-        selectedCustomer = c; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
-        UpdateUrl(app: null, cluster: null, section: null, env: null, customer: c.Id);
     }
     private void SelectSection(string key)
     {
-        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: null);
     }
     private void SelectEnvService(Guid envId, string key)
     {
         selectedSection = key; selectedServiceEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: envId);
     }
     private void RegisterClusterInEnv(Guid envId)
     {
         registerEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedServiceEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null;
         selectedSection = "new-cluster";
         UpdateUrl(app: null, cluster: null, section: "new-cluster", env: envId);
     }
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(null, null, null, null);
     }
     // customer defaults to null so every other Select* clears it by omission — a null value
@@ -955,7 +921,6 @@ else
                 builder.AddComponentParameter(2, "InitialEnvironmentId", registerEnvId);
                 builder.CloseComponent();
                 break;
-            case "customers": builder.OpenComponent<CustomerTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "clusters":
                 builder.OpenComponent<ClustersTab>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);

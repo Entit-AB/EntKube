@@ -165,7 +165,7 @@
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
@@ -254,7 +254,7 @@
     // asks for no more than seeing it.
     private async Task Act(Func<Task> action, string? done = null, AccessLevel needs = AccessLevel.Edit)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
         {
             return;
         }

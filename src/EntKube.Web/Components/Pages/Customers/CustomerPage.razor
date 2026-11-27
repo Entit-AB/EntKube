@@ -1,0 +1,137 @@
+@page "/customers/{Slug}/{CustomerId:guid}"
+@page "/customers/{Slug}/{CustomerId:guid}/{Tab}"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Data
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inject TenantService Tenants
+@inject TenantRoleService Roles
+@inject AuthenticationStateProvider AuthState
+
+@* ═══════════════════════════════════════════════════════════════════
+   CustomerPage — one customer: who they are and what runs for them, what
+   they have agreed to, and who among their own people may open the portal.
+   Each tab asks for its own permission (CustomerSections); a tab opened by
+   its address that this person may not open is refused, not shown.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<PageTitle>@(customer?.Name ?? "Customer")</PageTitle>
+
+@if (loading)
+{
+    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (tenant is null || !CustomerSections.OpensFor(permissions))
+{
+    @* Not a member, or a role without customers: nothing about the customer is shown, not even
+       whether it exists. *@
+    <div class="alert alert-warning" data-test="customer-no-access">
+        <i class="bi bi-lock me-1"></i>Your role does not include customers here.
+        <a href="@CustomerLinks.Home">Choose another tenant</a>.
+    </div>
+}
+else if (customer is null)
+{
+    <div class="alert alert-warning" data-test="customer-not-found">
+        <i class="bi bi-question-circle me-1"></i>@tenant.Name has no such customer.
+        <a href="@CustomerLinks.List(tenant.Slug)">All customers</a>.
+    </div>
+}
+else
+{
+    <nav class="mb-2">
+        <a class="small text-decoration-none" href="@CustomerLinks.List(tenant.Slug)"><i class="bi bi-arrow-left me-1"></i>All customers</a>
+    </nav>
+
+    <div class="d-flex align-items-center mb-3">
+        <i class="bi bi-person-circle fs-4 me-2 text-primary"></i>
+        <div>
+            <h4 class="mb-0">@customer.Name</h4>
+            <small class="text-muted">@tenant.Name</small>
+        </div>
+    </div>
+
+    <ul class="nav nav-tabs mb-3">
+        @foreach (CustomerTabSection t in CustomerSections.VisibleTo(permissions))
+        {
+            <li class="nav-item">
+                <a class="nav-link @(t.Key == open?.Key ? "active" : "")" data-tab="@t.Key"
+                   aria-current="@(t.Key == open?.Key ? "page" : null)"
+                   href="@CustomerLinks.Tab(tenant.Slug, customer.Id, t.Key)">
+                    <i class="bi @t.Icon me-1"></i>@t.Label
+                </a>
+            </li>
+        }
+    </ul>
+
+    @if (asked is not null && !asked.OpensFor(permissions))
+    {
+        @* Asked for by its address. The check is here and not only in the tabs: an address can be
+           typed, bookmarked or sent. *@
+        <div class="alert alert-warning" data-test="customer-refused">
+            <i class="bi bi-lock me-1"></i>@asked.Label needs
+            <strong>@PermissionCatalog.Describe(asked.Feature).Label: @asked.Level</strong>,
+            which your role in this tenant does not grant.
+        </div>
+    }
+    else if (Tab is not null && asked is null)
+    {
+        <div class="alert alert-warning" data-test="customer-unknown-tab">
+            <i class="bi bi-question-circle me-1"></i>A customer has no tab called <strong>@Tab</strong>.
+        </div>
+    }
+    else if (open is not null)
+    {
+        @* Every write in the tab asks PermissionGuard against this before it writes. Not IsFixed:
+           another customer or tenant reuses this page. *@
+        <CascadingValue Value="permissions">
+            @open.Render(new CustomerContext(tenant.Id, tenant.Slug, customer))
+        </CascadingValue>
+    }
+}
+
+@code {
+    [Parameter] public string Slug { get; set; } = "";
+    [Parameter] public Guid CustomerId { get; set; }
+    [Parameter] public string? Tab { get; set; }
+
+    private bool loading = true;
+    private Tenant? tenant;
+    private Customer? customer;
+    private EffectivePermissions permissions = EffectivePermissions.Nothing;
+    private (string, Guid)? loadedFor;
+
+    private CustomerTabSection? asked;
+    private CustomerTabSection? open;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // The tenant, what this person may do in it, and the customer are looked up once per
+        // customer; moving between tabs only changes which one is shown.
+        if (loadedFor != (Slug, CustomerId))
+        {
+            loading = true;
+            tenant = await Tenants.GetTenantBySlugAsync(Slug);
+
+            string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+                .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            permissions = tenant is null ? EffectivePermissions.Nothing : await Roles.PermissionsForAsync(tenant.Id, userId);
+
+            // The customer is looked up inside the tenant the address names, never by its id
+            // alone: an id from another tenant is simply not found here.
+            customer = tenant is not null && CustomerSections.OpensFor(permissions)
+                ? await Tenants.GetCustomerAsync(tenant.Id, CustomerId)
+                : null;
+
+            loadedFor = (Slug, CustomerId);
+            loading = false;
+        }
+
+        asked = CustomerSections.Find(Tab);
+
+        open = asked is not null
+            ? (asked.OpensFor(permissions) ? asked : null)
+            : (Tab is null ? CustomerSections.LandingFor(permissions) : null);
+    }
+}

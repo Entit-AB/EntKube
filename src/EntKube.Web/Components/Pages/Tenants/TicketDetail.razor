@@ -745,7 +745,7 @@
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
@@ -995,7 +995,7 @@
 
     private async Task MoveAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
         {
             return;
         }
@@ -1127,7 +1127,7 @@
     /// </summary>
     private async Task RecordIncidentReportAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1149,7 +1149,7 @@
     /// </summary>
     private async Task ClaimAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1172,7 +1172,7 @@
     /// <summary>Hands it to somebody else on the rota, who is told by mail.</summary>
     private async Task HandToAsync(ChangeEventArgs e)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1203,7 +1203,7 @@
 
     private async Task ReleaseAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1216,7 +1216,7 @@
 
     private async Task RespondAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1227,7 +1227,7 @@
 
     private async Task ConfirmPriorityAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1244,7 +1244,7 @@
 
     private async Task StartPauseAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1261,7 +1261,7 @@
 
     private async Task EndPauseAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1272,7 +1272,7 @@
 
     private async Task ResolveAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1294,7 +1294,7 @@
 
     private async Task RejectAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1311,7 +1311,7 @@
 
     private async Task CloseAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1327,7 +1327,7 @@
 
     private async Task AddNoteAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1408,7 +1408,7 @@
 
     private async Task NoteTypedAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
         {
             return;
         }
@@ -1436,7 +1436,7 @@
 
     private async Task ShareDraftAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1471,7 +1471,7 @@
     /// </summary>
     private async Task DeleteNoteAsync(TicketEvent entry)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1533,7 +1533,7 @@
 
     private async Task DeleteSharedDraftAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1555,7 +1555,7 @@
 
     private async Task LogPromptedTimeAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1655,7 +1655,7 @@
 
     private async Task RenameAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1728,7 +1728,7 @@
 
     private async Task MergeAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Manage, Toasts))
         {
             return;
         }
@@ -1773,7 +1773,7 @@
 
     private async Task SplitAsync(Guid entryId)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1827,7 +1827,7 @@
 
     private async Task ContinueGuardedAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -1844,7 +1844,7 @@
 
     private async Task RunMacroAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }

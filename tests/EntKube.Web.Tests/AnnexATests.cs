@@ -30,8 +30,14 @@ public class AnnexATests : BunitContext, IDisposable
     private readonly Customer boliden;
     private readonly Guid theirCustomerId = Guid.NewGuid();
 
+    private EffectivePermissions permissions = EffectivePermissions.Everything;
+
     public AnnexATests()
     {
+        // What the person may do, as the customer page hands it down: everything, unless a test
+        // says otherwise.
+        Services.AddCascadingValue(_ => permissions);
+
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
         db = new ApplicationDbContext(new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
@@ -152,6 +158,34 @@ public class AnnexATests : BunitContext, IDisposable
 
     private static void Press(IRenderedComponent<PortfolioContractPanel> view, string text) =>
         view.FindAll("button").First(b => b.TextContent.Trim().StartsWith(text, StringComparison.Ordinal)).Click();
+
+    /// <summary>
+    /// An Annex A is what the customer pays for an application, so recording one is the
+    /// agreements permission's — editing the customer's details is not enough. The check is in
+    /// the editor's handler; the editor is two components below the customer page.
+    /// </summary>
+    [Fact]
+    public async Task Recording_an_Annex_A_needs_Edit_on_agreements()
+    {
+        App app = App(acme, "Journalportalen");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.Customers] = AccessLevel.Edit,
+            [TenantFeature.CustomerAgreements] = AccessLevel.View,
+        });
+
+        IRenderedComponent<PortfolioContractPanel> page = RenderPortfolio(acme);
+        page.WaitForAssertion(() => page.Find("[data-test=annex-a-nav]"));
+
+        await page.InvokeAsync(() => page.Find("[data-test=annex-a-nav]").Click());
+        await page.InvokeAsync(() => Press(page, "Record Annex A"));
+        page.WaitForAssertion(() => page.Find("[data-test=annex-a-editor]"));
+        await page.InvokeAsync(() => Press(page, "Record Annex A"));
+        await page.InvokeAsync(() => Press(page, "Save Annex A"));
+
+        db.ChangeTracker.Clear();
+        db.ApplicationContracts.AsNoTracking().Should().NotContain(c => c.AppId == app.Id);
+    }
 
     [Fact]
     public async Task An_application_with_no_Annex_A_is_listed_and_can_be_put_under_management()

@@ -1,0 +1,136 @@
+@using EntKube.Web.Data
+@inject TenantService Tenants
+@inject CustomerAccessService Access
+@inject ToastService Toasts
+
+@* Who among the customer's own people may open the portal, and at what role. A grant here lets
+   somebody outside the organisation read the customer's deployments and, at Operator, restart
+   them — which is why changing it is Portal access: Manage and nothing less. *@
+
+<div class="card shadow-sm" data-test="portal-access">
+    <div class="card-header bg-white py-2">
+        <i class="bi bi-door-open me-2 text-primary"></i><strong>Portal access</strong>
+        <div class="small text-muted">People who may open @Customer.Name's applications in the customer portal.</div>
+    </div>
+    <div class="card-body">
+        @if (mayManage)
+        {
+            <div class="input-group mb-3" data-test="portal-grant">
+                <input type="email" class="form-control form-control-sm" placeholder="User email address"
+                       @bind="grantEmail" @bind:event="oninput" />
+                <select class="form-select form-select-sm" style="max-width: 140px;" @bind="grantRole">
+                    <option value="@CustomerAccessRole.Viewer">Viewer</option>
+                    <option value="@CustomerAccessRole.Operator">Operator</option>
+                    <option value="@CustomerAccessRole.Admin">Admin</option>
+                </select>
+                <button class="btn btn-sm btn-outline-primary" @onclick="GrantAsync" disabled="@string.IsNullOrWhiteSpace(grantEmail)">
+                    <i class="bi bi-plus me-1"></i>Grant
+                </button>
+            </div>
+        }
+
+        <LoadingPanel Loading="@(accesses is null)">
+            @if (accesses is not null && accesses.Count == 0)
+            {
+                <EmptyState Icon="bi-person-x" Message="Nobody has portal access to this customer yet." />
+            }
+            else if (accesses is not null)
+            {
+                @foreach (CustomerAccess access in accesses)
+                {
+                    <div class="d-flex align-items-center justify-content-between py-1 border-bottom">
+                        <div class="small">
+                            <i class="bi bi-person me-1"></i><span class="fw-medium">@access.User.Email</span>
+                            <span class="badge @RoleBadge(access.Role) ms-1">@access.Role</span>
+                        </div>
+                        @if (!mayManage)
+                        {
+                            <span></span>
+                        }
+                        else if (confirmRevoke == access.UserId)
+                        {
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-danger" @onclick="() => RevokeAsync(access.UserId)">Revoke</button>
+                                <button class="btn btn-sm btn-link p-0" @onclick="() => confirmRevoke = null">Cancel</button>
+                            </div>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-danger" title="Revoke access" @onclick="() => confirmRevoke = access.UserId">
+                                <i class="bi bi-x"></i>
+                            </button>
+                        }
+                    </div>
+                }
+            }
+        </LoadingPanel>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    // Handed down by the customer page. Nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
+    private bool mayManage => (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.CustomerPortalAccess, AccessLevel.Manage);
+
+    private List<CustomerAccess>? accesses;
+    private string grantEmail = "";
+    private CustomerAccessRole grantRole = CustomerAccessRole.Viewer;
+    private string? confirmRevoke;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => accesses = await Access.GetCustomerUsersAsync(TenantId, Customer.Id);
+
+    private async Task GrantAsync()
+    {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerPortalAccess, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
+        // The person is named by the address they sign in with.
+        ApplicationUser? user = await Tenants.FindUserByEmailAsync(grantEmail.Trim());
+
+        if (user is null)
+        {
+            Toasts.Error($"Nobody signs in as '{grantEmail}'.");
+            return;
+        }
+
+        try
+        {
+            await Access.GrantAccessAsync(TenantId, user.Id, Customer.Id, grantRole);
+            Toasts.Success($"{grantEmail} may open the portal now.");
+            grantEmail = "";
+            await LoadAsync();
+        }
+        catch (InvalidOperationException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+
+    private async Task RevokeAsync(string userId)
+    {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerPortalAccess, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
+        confirmRevoke = null;
+        await Access.RevokeAccessAsync(TenantId, userId, Customer.Id);
+        await LoadAsync();
+    }
+
+    private static string RoleBadge(CustomerAccessRole role) => role switch
+    {
+        CustomerAccessRole.Admin => "bg-danger",
+        CustomerAccessRole.Operator => "bg-warning text-dark",
+        CustomerAccessRole.Viewer => "bg-info",
+        _ => "bg-secondary",
+    };
+}

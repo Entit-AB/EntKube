@@ -141,7 +141,7 @@ else
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter] public required Guid TenantId { get; set; }
@@ -194,7 +194,7 @@ else
 
     private async Task SetStatusAsync(FeedbackStatus status)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
         {
             return;
         }
@@ -209,7 +209,7 @@ else
 
     private async Task OpenTicketAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit))
         {
             return;
         }

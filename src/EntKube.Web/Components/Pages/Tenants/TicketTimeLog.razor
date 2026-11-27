@@ -119,7 +119,7 @@ else
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
@@ -177,7 +177,7 @@ else
 
     private async Task LogAsync()
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -225,7 +225,7 @@ else
         TimeEntry? entry = entries.FirstOrDefault(e => e.Id == entryId);
         AccessLevel needs = entry?.PerformedBy == Actor ? AccessLevel.Edit : AccessLevel.Manage;
 
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, needs, Toasts))
         {
             return;
         }

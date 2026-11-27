@@ -1,0 +1,109 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Components.Pages.Support
+@inject TenantService Tenants
+@inject PrometheusService Prometheus
+
+@* A customer at a glance: where they run, how much of the platform their applications use right
+   now, and the ways into what else concerns them. Reads only. *@
+
+<div class="row g-3">
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted small text-uppercase mb-2">Environments</h6>
+                @if (environments.Count == 0)
+                {
+                    <span class="badge bg-warning-subtle text-warning-emphasis border">No environment</span>
+                }
+                else
+                {
+                    @foreach (string name in environments)
+                    {
+                        <span class="badge bg-body-secondary text-body-secondary border me-1">@name</span>
+                    }
+                }
+
+                <h6 class="text-muted small text-uppercase mt-3 mb-2">Elsewhere</h6>
+                <ul class="list-unstyled small mb-0">
+                    @* The queue checks for itself whether this person may open it. *@
+                    <li><a href="@SupportLinks.Search(TenantSlug, $"customer:\"{Customer.Name.Replace("\"", "")}\"")"><i class="bi bi-life-preserver me-1"></i>Their tickets</a></li>
+                    <li><a href="@($"/portal?customer={Customer.Id}")"><i class="bi bi-box-seam me-1"></i>Their portal, as they see it</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-bar-chart-line me-2 text-primary"></i><strong>Usage now</strong>
+                    <span class="text-muted small ms-1">across all their apps</span></span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="LoadMetricsAsync" disabled="@metricsLoading">
+                    <i class="bi bi-arrow-clockwise me-1"></i>@(metrics is null ? "Load" : "Refresh")
+                </button>
+            </div>
+            <div class="card-body">
+                @* Asked for, not loaded on open: it queries every cluster the customer runs on. *@
+                <LoadingPanel Loading="@metricsLoading" Error="@metricsError">
+                    @if (metrics is not null)
+                    {
+                        <div class="row g-2 small text-center">
+                            <div class="col-6"><div class="border rounded p-2"><div class="fs-5 fw-bold">@Cores(metrics.CpuCores)</div>CPU (5 m avg)</div></div>
+                            <div class="col-6"><div class="border rounded p-2"><div class="fs-5 fw-bold">@metrics.MemoryMiB.ToString("F0") MiB</div>Memory</div></div>
+                            <div class="col-6"><div class="border rounded p-2"><div class="fs-5 fw-bold">@metrics.PodCount</div>Pods running</div></div>
+                            <div class="col-6"><div class="border rounded p-2"><div class="fs-5 fw-bold">@metrics.RestartCount</div>Container restarts</div></div>
+                        </div>
+                    }
+                    else
+                    {
+                        <span class="text-muted small">Not loaded.</span>
+                    }
+                </LoadingPanel>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public string TenantSlug { get; set; } = "";
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    private List<string> environments = [];
+    private DeploymentMetricsSummary? metrics;
+    private bool metricsLoading;
+    private string? metricsError;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // The environments this customer belongs to, by name, for the badges.
+        Dictionary<Guid, string> names = (await Tenants.GetEnvironmentsAsync(TenantId)).ToDictionary(e => e.Id, e => e.Name);
+
+        environments = [.. (await Tenants.GetCustomerEnvironmentsAsync(TenantId))
+            .Where(link => link.CustomerId == Customer.Id && names.ContainsKey(link.EnvironmentId))
+            .Select(link => names[link.EnvironmentId])
+            .Order(StringComparer.OrdinalIgnoreCase)];
+    }
+
+    private async Task LoadMetricsAsync()
+    {
+        metricsLoading = true;
+        metricsError = null;
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result = await Prometheus.GetCustomerMetricsAsync(TenantId, Customer.Id);
+
+        if (result.IsSuccess)
+        {
+            metrics = result.Data;
+        }
+        else
+        {
+            metricsError = result.Error;
+        }
+
+        metricsLoading = false;
+    }
+
+    private static string Cores(double cores) =>
+        cores >= 1 ? $"{(int)Math.Round(cores)} cores" : $"{(int)Math.Round(cores * 1000)}m";
+}

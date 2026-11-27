@@ -349,7 +349,7 @@
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
@@ -408,7 +408,7 @@
 
     private async Task AssignAsync(Guid messageId)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -557,7 +557,7 @@
 
     private async Task AcceptAsync(MailSuggestion suggestion)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -588,7 +588,7 @@
 
     private async Task RejectAsync(Guid suggestionId)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -599,7 +599,7 @@
 
     private async Task DismissAsync(Guid messageId)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts))
         {
             return;
         }
