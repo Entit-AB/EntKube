@@ -12,7 +12,7 @@
 @* A tenant's customers: the end clients or accounts it serves. Opening one shows its page;
    adding one or unregistering it is the customer permission's top level. *@
 
-<PageTitle>Customers · @(tenant?.Name ?? Slug)</PageTitle>
+<PageTitle>@TitleFor(tenant, permissions)</PageTitle>
 
 @if (loading)
 {
@@ -80,7 +80,22 @@ else
                             <i class="bi bi-person-circle me-2 text-primary"></i>
                             <span>
                                 <span class="fw-semibold">@c.Name</span><br />
-                                <small class="text-muted">Created @c.CreatedAt.ToString("MMM d, yyyy")</small>
+                                <small class="text-muted">@AppCount(c.Id) · Created @c.CreatedAt.ToString("MMM d, yyyy")</small>
+                                @* A customer in no environment appears under none in the tenant tree, so
+                                   this list is the one place it is seen — and it should be noticed. *@
+                                <div class="mt-1">
+                                    @if (environmentsOf.GetValueOrDefault(c.Id) is { Count: > 0 } names)
+                                    {
+                                        @foreach (string name in names)
+                                        {
+                                            <span class="badge bg-body-secondary text-body-secondary border me-1">@name</span>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning-emphasis border">No environment</span>
+                                    }
+                                </div>
                             </span>
                         </a>
                         @if (mayManage)
@@ -110,6 +125,23 @@ else
     private string? loadedFor;
 
     private bool mayManage => permissions.Allows(TenantFeature.Customers, AccessLevel.Manage);
+
+    // Per customer: the names of the environments it belongs to, and how many apps it has.
+    private Dictionary<Guid, List<string>> environmentsOf = [];
+    private Dictionary<Guid, int> appCounts = [];
+
+    private string AppCount(Guid customerId) => appCounts.GetValueOrDefault(customerId) switch
+    {
+        1 => "1 app",
+        int n => $"{n} apps",
+    };
+
+    /// <summary>
+    /// The browser tab's title. The tenant's name only for those who may see its customers: a
+    /// name is already something to learn, and anybody signed in can type an address.
+    /// </summary>
+    public static string TitleFor(Tenant? tenant, EffectivePermissions permissions) =>
+        tenant is not null && CustomerSections.OpensFor(permissions) ? $"Customers · {tenant.Name}" : "Customers";
 
     protected override async Task OnParametersSetAsync()
     {
@@ -144,6 +176,16 @@ else
     {
         customers = await Tenants.GetCustomersAsync(tenant!.Id);
         environments = await Tenants.GetEnvironmentsAsync(tenant.Id);
+
+        // One read each for every customer's environments and apps, not one per customer.
+        Dictionary<Guid, string> names = environments.ToDictionary(e => e.Id, e => e.Name);
+
+        environmentsOf = (await Tenants.GetCustomerEnvironmentsAsync(tenant.Id))
+            .Where(link => names.ContainsKey(link.EnvironmentId))
+            .GroupBy(link => link.CustomerId)
+            .ToDictionary(g => g.Key, g => g.Select(link => names[link.EnvironmentId]).Order(StringComparer.OrdinalIgnoreCase).ToList());
+
+        appCounts = (await Tenants.GetAppsByCustomerAsync(tenant.Id)).ToDictionary(kv => kv.Key, kv => kv.Value.Count);
     }
 
     /// <summary>
