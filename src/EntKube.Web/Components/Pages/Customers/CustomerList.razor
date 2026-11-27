@@ -129,7 +129,11 @@ else
         if (tenant is not null && CustomerSections.OpensFor(permissions))
         {
             await LoadAsync();
-            newEnvironmentId ??= environments.FirstOrDefault()?.Id;
+
+            // Chosen afresh for every tenant: this page is reused when the menu moves to another
+            // tenant, and the last tenant's environment would otherwise stay selected — and a new
+            // customer would join an environment that is not even this tenant's.
+            newEnvironmentId = environments.FirstOrDefault()?.Id;
         }
 
         loadedFor = Slug;
@@ -142,10 +146,23 @@ else
         environments = await Tenants.GetEnvironmentsAsync(tenant.Id);
     }
 
+    /// <summary>
+    /// Adds a customer to this tenant, in the environment chosen beside the name. Adding (and
+    /// unregistering) a customer is the customer permission's top level: it changes who the tenant
+    /// serves, where adding an app or a contact only changes what is known about one customer.
+    /// </summary>
     private async Task CreateAsync()
     {
         if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Manage, Toasts))
         {
+            return;
+        }
+
+        // The environment arrives from the browser as an id. Only one this page offered — one of
+        // this tenant's — may be used, or a hand-sent id could tie the customer to another tenant.
+        if (newEnvironmentId is Guid chosen && environments.All(e => e.Id != chosen))
+        {
+            Toasts.Error("Choose one of this tenant's environments.");
             return;
         }
 
@@ -157,10 +174,15 @@ else
         }
         catch (DbUpdateException)
         {
+            // Customer names are unique within a tenant; the database is what says so.
             Toasts.Error("A customer with that name already exists.");
         }
     }
 
+    /// <summary>
+    /// Unregisters a customer and its apps from EntKube. Nothing in any cluster is touched; the
+    /// confirmation line above says so before this runs.
+    /// </summary>
     private async Task DeleteAsync(Guid id)
     {
         if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Manage, Toasts))

@@ -27,7 +27,6 @@
                 <ul class="list-unstyled small mb-0">
                     @* The queue checks for itself whether this person may open it. *@
                     <li><a href="@SupportLinks.Search(TenantSlug, $"customer:\"{Customer.Name.Replace("\"", "")}\"")"><i class="bi bi-life-preserver me-1"></i>Their tickets</a></li>
-                    <li><a href="@($"/portal?customer={Customer.Id}")"><i class="bi bi-box-seam me-1"></i>Their portal, as they see it</a></li>
                 </ul>
             </div>
         </div>

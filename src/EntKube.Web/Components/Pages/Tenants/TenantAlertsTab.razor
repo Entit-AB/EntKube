@@ -558,7 +558,7 @@ else
     private async Task AcknowledgeIncident(AlertIncident incident)
     {
         // Working an incident is the incidents permission's, here as in the support desk.
-        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (await PermissionGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -570,7 +570,7 @@ else
     private async Task ResolveIncident(AlertIncident incident)
     {
         // Working an incident is the incidents permission's, here as in the support desk.
-        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (await PermissionGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -598,7 +598,7 @@ else
     private async Task BulkAcknowledge()
     {
         // Working an incident is the incidents permission's, here as in the support desk.
-        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (await PermissionGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }

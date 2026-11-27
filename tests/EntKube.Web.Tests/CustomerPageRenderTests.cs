@@ -27,6 +27,8 @@ public class CustomerPageRenderTests : BunitContext, IDisposable
     private readonly Guid acme = Guid.NewGuid();
     private readonly Guid theirCustomer = Guid.NewGuid();
     private readonly string slug;
+    private readonly Guid ourEnvironment = Guid.NewGuid();
+    private readonly Guid theirEnvironment = Guid.NewGuid();
 
     public CustomerPageRenderTests()
     {
@@ -40,6 +42,9 @@ public class CustomerPageRenderTests : BunitContext, IDisposable
         db.Customers.AddRange(
             new Customer { Id = acme, TenantId = ours, Name = "Acme" },
             new Customer { Id = theirCustomer, TenantId = theirs, Name = "Not yours" });
+        db.Set<Data.Environment>().AddRange(
+            new Data.Environment { Id = ourEnvironment, TenantId = ours, Name = "ours-production" },
+            new Data.Environment { Id = theirEnvironment, TenantId = theirs, Name = "their-production" });
         db.Users.Add(new ApplicationUser { Id = "user-karin", UserName = "karin@acme.example", Email = "karin@acme.example", NormalizedEmail = "KARIN@ACME.EXAMPLE" });
         db.SaveChanges();
 
@@ -181,5 +186,44 @@ public class CustomerPageRenderTests : BunitContext, IDisposable
 
         db.ChangeTracker.Clear();
         db.Customers.AsNoTracking().Should().Contain(c => c.TenantId == ours && c.Name == "Contoso");
+    }
+
+    /// <summary>
+    /// The environment choice arrives from the browser as an id. One the page never offered —
+    /// another tenant's — is refused, or the new customer would join an environment that is not
+    /// this tenant's.
+    /// </summary>
+    [Fact]
+    public async Task A_new_customer_cannot_be_put_in_another_tenants_environment()
+    {
+        SignedInHolding((TenantFeature.Customers, AccessLevel.Manage));
+
+        IRenderedComponent<CustomerList> list = Render<CustomerList>(p => p.Add(c => c.Slug, slug));
+
+        list.WaitForAssertion(() => list.Find("[data-test=customer-create] input"));
+        list.Find("[data-test=customer-create] input").Input("Contoso");
+        list.Find("[data-test=customer-create] select").Change(theirEnvironment.ToString());
+        await list.InvokeAsync(() => list.Find("[data-test=customer-create] button").Click());
+
+        db.ChangeTracker.Clear();
+        db.Customers.AsNoTracking().Should().NotContain(c => c.Name == "Contoso");
+        db.CustomerEnvironments.AsNoTracking().Should().NotContain(ce => ce.EnvironmentId == theirEnvironment);
+    }
+
+    [Fact]
+    public async Task A_new_customer_joins_this_tenants_environment_by_default()
+    {
+        SignedInHolding((TenantFeature.Customers, AccessLevel.Manage));
+
+        IRenderedComponent<CustomerList> list = Render<CustomerList>(p => p.Add(c => c.Slug, slug));
+
+        list.WaitForAssertion(() => list.Find("[data-test=customer-create] input"));
+        list.Find("[data-test=customer-create] input").Input("Contoso");
+        await list.InvokeAsync(() => list.Find("[data-test=customer-create] button").Click());
+
+        db.ChangeTracker.Clear();
+        Customer made = db.Customers.AsNoTracking().Single(c => c.Name == "Contoso");
+        db.CustomerEnvironments.AsNoTracking().Where(ce => ce.CustomerId == made.Id).Select(ce => ce.EnvironmentId)
+            .Should().Equal(ourEnvironment);
     }
 }

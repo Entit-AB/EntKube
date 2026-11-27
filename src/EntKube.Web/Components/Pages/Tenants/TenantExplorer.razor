@@ -132,9 +132,14 @@ else
                                     <span class="label">@c.Name</span>
                                     <span class="badge-count">@AppsOfInEnv(c, env).Count</span>
                                 </button>
-                                <button type="button" class="tree-add" title="Add app to @c.Name" aria-label="Add app"
-                                        @onclick="() => StartAddApp(env.Id, c.Id)"><i class="bi bi-plus-lg"></i></button>
-                                @if (AppsOfInEnv(c, env).Count == 0)
+                                @* Adding an app to a customer, or taking the customer out of this
+                                   environment, changes the customer: Customers: Edit, as on their page. *@
+                                @if (permissions.Allows(TenantFeature.Customers, AccessLevel.Edit))
+                                {
+                                    <button type="button" class="tree-add" title="Add app to @c.Name" aria-label="Add app"
+                                            @onclick="() => StartAddApp(env.Id, c.Id)"><i class="bi bi-plus-lg"></i></button>
+                                }
+                                @if (AppsOfInEnv(c, env).Count == 0 && permissions.Allows(TenantFeature.Customers, AccessLevel.Edit))
                                 {
                                     @* Only offered with no apps here — removing the membership would otherwise hide them. *@
                                     <button type="button" class="tree-add" title="Remove @c.Name from @env.Name" aria-label="Remove customer from environment"
@@ -808,6 +813,11 @@ else
 
     private async Task AddApp(Guid envId, Guid custId)
     {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         string name = newAppName.Trim();
         if (name.Length == 0) return;
         Data.App app = await TenantService.CreateAppAsync(tenant.Id, custId, name);

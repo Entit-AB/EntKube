@@ -432,7 +432,7 @@
         // the customer's mail-domain register, so that all future mail from it is placed there —
         // the same write as on the customer's Agreement tab, and asked for the same way.
         if (remembering.Contains(messageId)
-            && SupportGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+            && PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
         {
             return;
         }

@@ -1,3 +1,4 @@
+using EntKube.Web.Components.Pages.Shared;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
@@ -156,11 +157,11 @@ public class TenantPermissionsTests : IDisposable
         Member("user-anna", ours, Role(ours, "Watcher", Grants((TenantFeature.Incidents, AccessLevel.View))));
         Member("user-anna", theirs, Role(theirs, "Responder", Grants((TenantFeature.Incidents, AccessLevel.Edit))));
 
-        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+        (await PermissionGuard.RefusesAsync(roles, ours, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
             .Should().BeTrue("over here she may only look");
-        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, theirs, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+        (await PermissionGuard.RefusesAsync(roles, theirs, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
             .Should().BeFalse("over there she responds");
-        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, null, TenantFeature.Incidents, AccessLevel.View))
+        (await PermissionGuard.RefusesAsync(roles, ours, null, TenantFeature.Incidents, AccessLevel.View))
             .Should().BeTrue("nobody signed in holds nothing");
     }
 
