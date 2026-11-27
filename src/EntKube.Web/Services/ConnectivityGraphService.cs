@@ -1043,6 +1043,16 @@ public class ConnectivityGraphService(
             comps.AddRange(await catalog.GetComponentsForClusterAsync(tenantId, targetClusterId, ct));
         }
 
+        // Where each cluster's Prometheus runs, so the default-deny lets it in. Asked the way the
+        // metrics views ask it; null where there is none, or where nobody recorded where it runs.
+        Dictionary<Guid, string?> prometheusNamespaces = [];
+        foreach (Guid targetClusterId in targetClusterIds)
+        {
+            prometheusNamespaces[targetClusterId] =
+                EntKube.Web.Services.ScrapeMonitors.PrometheusScrapeAllowance.NamespaceToAdmit(
+                    await catalog.FindPrometheusAsync(tenantId, targetClusterId, ct));
+        }
+
         // Other apps' deployments in the same clusters — used to warn that the
         // namespace-wide default-deny will also govern co-located apps.
         var coTenantDeployments = await db.AppDeployments
@@ -1092,6 +1102,20 @@ public class ConnectivityGraphService(
                 Summary = "Allow DNS egress (kube-system :53) — required or everything breaks",
                 Yaml = BuildDnsAllow($"{prefix}-allow-dns", ns)
             });
+
+            // The default-deny above closes the namespace to the cluster's Prometheus too, which
+            // the graph never names, so applying the plan took the app's metrics down with it.
+            if (prometheusNamespaces.GetValueOrDefault(cluster.Id) is { Length: > 0 } prometheusNamespace)
+            {
+                plan.Policies.Add(new GeneratedPolicy
+                {
+                    Name = $"{prefix}-allow-prometheus",
+                    Kind = "NetworkPolicy",
+                    Summary = $"Allow the cluster's Prometheus ({prometheusNamespace}) to scrape metrics",
+                    Yaml = EntKube.Web.Services.ScrapeMonitors.PrometheusScrapeAllowance.BuildNetworkPolicy(
+                        $"{prefix}-allow-prometheus", ns, prometheusNamespace)
+                });
+            }
             if (ingress.Count > 0)
             {
                 plan.Policies.Add(new GeneratedPolicy

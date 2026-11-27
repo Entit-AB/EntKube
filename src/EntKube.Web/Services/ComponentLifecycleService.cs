@@ -1013,7 +1013,8 @@ public class ComponentLifecycleService(
                 await EntKube.Web.Modules.Api.CatalogApi.FindPrometheusAsync(
                     db.ClusterComponents, tenantId, component.ClusterId, ct);
 
-            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(valuesYaml, PrometheusNamespaceToAdmit(prometheus));
+            valuesYaml = YamlFormMerger.LetPrometheusReachSeaweedFs(
+                valuesYaml, EntKube.Web.Services.ScrapeMonitors.PrometheusScrapeAllowance.NamespaceToAdmit(prometheus));
         }
 
         string releaseName = component.ReleaseName ?? component.Name;
@@ -1113,25 +1114,6 @@ public class ComponentLifecycleService(
             ? release.Trim()
             : ComponentCatalog.GetByKey(EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName)?.DefaultReleaseName
               ?? EntKube.Contracts.Catalog.PrometheusPresence.HelmChartName;
-    }
-
-    /// <summary>
-    /// The namespace a NetworkPolicy rule lets Prometheus in from: the one the monitor engine judges admission
-    /// against, <see cref="PrometheusService.GetPrometheusConfig(EntKube.Contracts.Catalog.InstalledComponent)"/>,
-    /// whose Configuration override (set for adopted stacks) wins over the column. Two answers would open the
-    /// port to prometheus-labelled pods of a namespace that is not Prometheus's and leave the real one out.
-    ///
-    /// <para>Except that a blank column is unknown, never the engine's <c>monitoring</c> default: a guessed
-    /// namespace would admit somebody else's pods to a port that serves pprof. Only an explicit override then
-    /// names it, and with none the answer is blank and nothing is opened.</para>
-    /// </summary>
-    private static string? PrometheusNamespaceToAdmit(EntKube.Contracts.Catalog.InstalledComponent? prometheus)
-    {
-        if (prometheus is null) return null;
-
-        // "" rather than null: GetPrometheusConfig fills only a null column with its default.
-        string column = string.IsNullOrWhiteSpace(prometheus.Namespace) ? "" : prometheus.Namespace;
-        return PrometheusService.GetPrometheusConfig(prometheus with { Namespace = column }).Namespace;
     }
 
     /// <summary>

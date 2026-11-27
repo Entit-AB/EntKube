@@ -263,7 +263,7 @@ public class ScrapeMonitorService(
     /// not there with its default (monitoring), and the engine looks for Prometheus there. A SeaweedFS apply
     /// does not: it opens its metrics port to Prometheus only by a namespace somebody recorded, the column
     /// or a namespace in the component's configuration, and to nothing otherwise. That is asked here the
-    /// way the apply asks it (ComponentLifecycleService.PrometheusNamespaceToAdmit), before the default is
+    /// way the apply asks it (PrometheusScrapeAllowance.NamespaceToAdmit), before the default is
     /// filled in, so a row never advises a re-apply that opens nothing.</para>
     /// </summary>
     private static PrometheusRelease ReleaseOf(InstalledComponent prometheus)
