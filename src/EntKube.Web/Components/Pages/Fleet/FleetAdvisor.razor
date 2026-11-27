@@ -11,6 +11,8 @@
 @inject OperationsAdvisorService Advisor
 @inject AdvisorStateService State
 @inject IncidentService Incidents
+@inject TenantRoleService Roles
+@inject ToastService Toasts
 
 @* Fleet Advisor: the cross-tenant fan-out of the per-tenant Operations Advisor —
    one ranked "what needs doing across the whole platform" view for ops. *@
@@ -443,6 +445,12 @@
     private async Task AcknowledgeIncident()
     {
         if (incident is null) return;
+
+        // The fleet view spans tenants; the incident's own tenant decides.
+        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
         incidentBusy = true;
         await Incidents.AcknowledgeAsync(incidentRow!.Tenant.Id, incident.Id, currentUser);
         incident = await Incidents.GetByIdAsync(incidentRow!.Tenant.Id, incident.Id);
@@ -453,6 +461,12 @@
     private async Task ResolveIncident()
     {
         if (incident is null) return;
+
+        // The fleet view spans tenants; the incident's own tenant decides.
+        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
         incidentBusy = true;
         await Incidents.ResolveAsync(incidentRow!.Tenant.Id, incident.Id, currentUser);
         incidentBusy = false;

@@ -5,7 +5,7 @@ without an error over 30 days. What the target allows to go wrong is the error b
 how much of it is spent and how fast.
 
 These are engineering targets, owned by the team that runs a service. The availability figure your
-support agreement is invoiced against is separate, under **Support › SLA targets**.
+support agreement is invoiced against is separate, under **Support › Service levels › SLA**.
 
 Open **Observability › Monitoring › SLOs** and choose **New objective**.
 

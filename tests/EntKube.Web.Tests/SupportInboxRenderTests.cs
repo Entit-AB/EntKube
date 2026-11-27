@@ -233,6 +233,41 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         db.Tickets.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// Remembering a sender's domain writes it into the customer's register, so all of that
+    /// domain's future mail is placed with them. That is a customer detail — Customers: Edit, as on
+    /// the customer's Agreement tab — and working tickets is not enough for it.
+    /// </summary>
+    [Fact]
+    public async Task Remembering_a_senders_domain_is_offered_only_to_those_who_may_change_customers()
+    {
+        InboundMailMessage? message = await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+        });
+
+        IRenderedComponent<SupportInbox> agent = RenderInbox();
+
+        agent.WaitForAssertion(() => agent.Markup.Should().Contain("Fakturan"));
+        agent.FindAll($"#remember-{message!.Id}").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Somebody_who_may_change_customers_is_offered_to_remember_the_domain()
+    {
+        InboundMailMessage? message = await Receive("Fakturan", "Var är den?", "ekonomi@contoso.example");
+        permissions = EffectivePermissions.Granting(new Dictionary<TenantFeature, AccessLevel>
+        {
+            [TenantFeature.SupportTickets] = AccessLevel.Edit,
+            [TenantFeature.Customers] = AccessLevel.Edit,
+        });
+
+        IRenderedComponent<SupportInbox> lead = RenderInbox();
+
+        lead.WaitForAssertion(() => lead.FindAll($"#remember-{message!.Id}").Should().ContainSingle());
+    }
+
     // ---- The way out of a dead end ------------------------------------------------------------
 
     // ---- What the mailbox did before anyone looked --------------------------------------------

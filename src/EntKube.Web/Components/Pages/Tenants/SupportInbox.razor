@@ -215,8 +215,11 @@
                                     </select>
                                 </div>
                                 <div class="col-md-5">
+                                    @* Remembering the domain writes it into the customer's register — a
+                                       customer detail, offered to those who may change one. *@
                                     @if (SenderDomain.Of(message.FromAddress) is string domain
-                                         && !SenderDomain.PublicProviders.Contains(domain))
+                                         && !SenderDomain.PublicProviders.Contains(domain)
+                                         && (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.Customers, AccessLevel.Edit))
                                     {
                                         <div class="form-check">
                                             <input type="checkbox" class="form-check-input"
@@ -416,6 +419,15 @@
         if (customers.All(c => c.Id != customerId))
         {
             Toasts.Error("That customer is not one you can place mail with.");
+            return;
+        }
+
+        // Placing this one message is ticket work. Also remembering its domain adds the domain to
+        // the customer's mail-domain register, so that all future mail from it is placed there —
+        // the same write as on the customer's Agreement tab, and asked for the same way.
+        if (remembering.Contains(messageId)
+            && SupportGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
             return;
         }
 

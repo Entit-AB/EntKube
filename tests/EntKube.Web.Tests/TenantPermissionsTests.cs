@@ -145,6 +145,25 @@ public class TenantPermissionsTests : IDisposable
         EffectivePermissions.Nothing.HoldsAnyIn(PermissionArea.Support).Should().BeFalse();
     }
 
+    /// <summary>
+    /// Pages outside the support desk that write incidents — the tenant page's alerts, the fleet
+    /// advisor — are handed no permissions, so they ask for them at the moment of writing, in the
+    /// tenant the incident belongs to.
+    /// </summary>
+    [Fact]
+    public async Task A_write_outside_the_desk_asks_the_incidents_tenant_at_the_moment_of_writing()
+    {
+        Member("user-anna", ours, Role(ours, "Watcher", Grants((TenantFeature.Incidents, AccessLevel.View))));
+        Member("user-anna", theirs, Role(theirs, "Responder", Grants((TenantFeature.Incidents, AccessLevel.Edit))));
+
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+            .Should().BeTrue("over here she may only look");
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, theirs, "user-anna", TenantFeature.Incidents, AccessLevel.Edit))
+            .Should().BeFalse("over there she responds");
+        (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(roles, ours, null, TenantFeature.Incidents, AccessLevel.View))
+            .Should().BeTrue("nobody signed in holds nothing");
+    }
+
     // ───────────────────────────── Carrying existing roles across ─────────────────────────────
 
     [Fact]

@@ -119,6 +119,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         // message with another tenant's customer, the detail can move a ticket there — and
         // both ask this who the person is allowed to reach before offering anything.
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
 
         // Read when the first component renders, so a test can change it before then.
         Services.AddCascadingValue(_ => permissions);

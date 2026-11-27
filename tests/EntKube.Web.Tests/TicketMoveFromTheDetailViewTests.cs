@@ -58,6 +58,11 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
     /// <summary>A tenant this person is not a member of. Never offered, never permitted.</summary>
     private readonly Guid tenantC = Guid.NewGuid();
 
+    /// <summary>A tenant where this person may look at tickets but not work them.</summary>
+    private readonly Guid tenantD = Guid.NewGuid();
+    private readonly Guid customerD = Guid.NewGuid();
+    private const string DevelopersOnly = "Utvecklingsbolaget AB";
+
     private readonly Guid customerA = Guid.NewGuid();
     private readonly Guid otherCustomerA = Guid.NewGuid();
     private readonly Guid customerB = Guid.NewGuid();
@@ -84,13 +89,15 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
         db.Tenants.AddRange(
             new Tenant { Id = tenantA, Name = "ENTIT", Slug = "entit" },
             new Tenant { Id = tenantB, Name = "Partner", Slug = "partner" },
-            new Tenant { Id = tenantC, Name = "Hemlig", Slug = "hemlig" });
+            new Tenant { Id = tenantC, Name = "Hemlig", Slug = "hemlig" },
+            new Tenant { Id = tenantD, Name = "Utveckling", Slug = "utveckling" });
 
         db.Customers.AddRange(
             new Customer { Id = customerA, TenantId = tenantA, Name = "Entit AB" },
             new Customer { Id = otherCustomerA, TenantId = tenantA, Name = "Entit Service AB" },
             new Customer { Id = customerB, TenantId = tenantB, Name = "Partnerbolaget AB" },
-            new Customer { Id = customerC, TenantId = tenantC, Name = Unreachable });
+            new Customer { Id = customerC, TenantId = tenantC, Name = Unreachable },
+            new Customer { Id = customerD, TenantId = tenantD, Name = DevelopersOnly });
 
         db.Apps.Add(new App { Id = appA, CustomerId = customerA, Name = "Journalportalen" });
 
@@ -117,10 +124,18 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
         // tenants the move panel offers — and, now, which ones it accepts.
         db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils", Email = "nils@entit.example" });
 
-        foreach (Guid tenantId in new[] { tenantA, tenantB })
+        // In A and B they run support, which is what moving a ticket takes. In D they may look at
+        // tickets and no more — a member, and even a support reader, which used to be enough to be
+        // offered the tenant.
+        foreach ((Guid tenantId, AccessLevel tickets) in new[]
+            { (tenantA, AccessLevel.Manage), (tenantB, AccessLevel.Manage), (tenantD, AccessLevel.View) })
         {
             Guid roleId = Guid.NewGuid();
-            db.TenantRoles.Add(new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support" });
+            db.TenantRoles.Add(new TenantRole
+            {
+                Id = roleId, TenantId = tenantId, Name = tickets == AccessLevel.View ? "Reader" : "Support",
+                PermissionsJson = TenantRoleService.EncodePermissions(new Dictionary<TenantFeature, AccessLevel> { [TenantFeature.SupportTickets] = tickets }),
+            });
             db.TenantMemberships.Add(new TenantMembership
             {
                 UserId = "user-nils", TenantId = tenantId, RoleId = roleId,
@@ -158,6 +173,7 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
         Services.AddScoped<CurrentActor>();
         Services.AddSingleton(new UserAccessService(factory));
+        Services.AddSingleton(new TenantRoleService(factory));
     }
 
     public new void Dispose()
@@ -333,6 +349,27 @@ public class TicketMoveFromTheDetailViewTests : BunitContext, IDisposable
     /// arrived. <c>TicketService.MoveAsync</c> deliberately does not scope its destination — a
     /// move across tenants is the point of it — so this page is the only place that can say no.
     /// </summary>
+    /// <summary>
+    /// A ticket moved into a tenant lands in its queue, so the person moving it must be able to
+    /// work tickets there. Being able to read them there is not that.
+    /// </summary>
+    [Fact]
+    public async Task A_tenant_where_the_person_does_not_work_tickets_is_not_offered_or_accepted()
+    {
+        Ticket ticket = await Raise();
+
+        IRenderedComponent<TicketDetail> detail = await OpenMovePanel(ticket.Id);
+
+        detail.FindAll("option").Select(o => o.GetAttribute("value")).Should().NotContain(tenantD.ToString());
+
+        // Sent anyway, as a browser can: still not answered with that tenant's customers.
+        await detail.InvokeAsync(() => TenantPicker(detail, tenantB).Change(tenantD.ToString()));
+        detail.Markup.Should().NotContain(DevelopersOnly);
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).TenantId.Should().Be(tenantA);
+    }
+
     [Fact]
     public async Task A_customer_that_was_never_offered_cannot_be_moved_into()
     {

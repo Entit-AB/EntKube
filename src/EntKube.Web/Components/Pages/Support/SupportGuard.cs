@@ -33,6 +33,20 @@ public static class SupportGuard
         return true;
     }
 
+    /// <summary>
+    /// The same check for a page that was handed no permissions — one outside the support desk that
+    /// still writes something the desk guards, such as the tenant page's alerts acknowledging an
+    /// incident. It asks, at the moment of writing, what this person may do in that tenant.
+    /// </summary>
+    public static async Task<bool> RefusesAsync(
+        TenantRoleService roles, Guid tenantId, string? userId, TenantFeature feature, AccessLevel level,
+        ToastService? toasts = null, CancellationToken ct = default)
+    {
+        EffectivePermissions permissions = await roles.PermissionsForAsync(tenantId, userId, ct);
+
+        return Refuses(permissions, feature, level, toasts);
+    }
+
     /// <summary>What a refused person is told: the permission, by the name the roles page uses.</summary>
     public static string RefusalFor(TenantFeature feature, AccessLevel level) =>
         $"Your role here does not allow that. It needs {PermissionCatalog.Describe(feature).Label}: {level}.";

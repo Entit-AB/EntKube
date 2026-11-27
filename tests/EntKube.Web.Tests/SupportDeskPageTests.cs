@@ -111,6 +111,26 @@ public class SupportDeskPageTests : BunitContext, IDisposable
         desk.FindAll("[data-section]").Should().BeEmpty("not even the sections' names are shown");
     }
 
+    /// <summary>
+    /// Somebody signed in but not a member must not be able to tell a real tenant from a missing
+    /// one, nor learn a real one's name, by trying addresses.
+    /// </summary>
+    [Fact]
+    public void A_stranger_cannot_tell_a_real_tenant_from_a_missing_one()
+    {
+        db.Users.Add(new ApplicationUser { Id = "user-eve", UserName = "eve" });
+        db.SaveChanges();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("user-eve"));
+
+        IRenderedComponent<SupportDesk> real = Open(null);
+        IRenderedComponent<SupportDesk> missing = Render<SupportDesk>(p => p.Add(c => c.Slug, "no-such-tenant"));
+
+        real.WaitForAssertion(() => real.Find("[data-test=support-no-access]"));
+        missing.WaitForAssertion(() => missing.Find("[data-test=support-no-access]"));
+        real.Find("[data-test=support-no-access]").TextContent.Should().Be(missing.Find("[data-test=support-no-access]").TextContent);
+        real.Markup.Should().NotContain("ENTIT");
+    }
+
     [Fact]
     public void A_section_the_desk_does_not_have_says_so()
     {

@@ -2,7 +2,7 @@
 
 ## The queue
 
-Open **Support › Tickets › Ticket queue** in the tenant's menu. The queue lists every ticket
+Open **Support** in the top menu and choose the tenant's **Ticket queue** (or go to `/support/<tenant>/tickets`). The queue lists every ticket
 that is not yet closed, across all of the tenant's customers, **worst first**: by priority,
 then by how long it has waited.
 
@@ -36,7 +36,7 @@ many tickets it holds right now.
 Click a row to open the ticket. Every ticket has its own address:
 
 ```
-https://<entkube>/tenants/<tenant>?section=tickets&ticket=1042
+https://<entkube>/support/<tenant>/tickets?ticket=1042
 ```
 
 You can bookmark it, paste it to a colleague or open it in another browser tab, and the back

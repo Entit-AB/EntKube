@@ -18,7 +18,8 @@
    a section opened by its address is refused rather than shown.
    ═══════════════════════════════════════════════════════════════════ *@
 
-<PageTitle>Support · @(tenant?.Name ?? Slug)</PageTitle>
+@* The tenant's name only once this person may see its desk: a name is already something to learn. *@
+<PageTitle>@(SupportSections.OpensFor(permissions) && tenant is not null ? $"Support · {tenant.Name}" : "Support")</PageTitle>
 
 @if (loading)
 {
@@ -27,20 +28,14 @@
         <p class="text-muted mt-2">Loading support…</p>
     </div>
 }
-else if (tenant is null)
+else if (tenant is null || !SupportSections.OpensFor(permissions))
 {
-    <div class="alert alert-warning" data-test="support-no-tenant">
-        <i class="bi bi-question-circle me-1"></i>There is no tenant called <strong>@Slug</strong>.
-        <a href="/support">Choose another</a>.
-    </div>
-}
-else if (!SupportSections.OpensFor(permissions))
-{
-    @* Not a member, or a member whose role grants no support permission: there is no support
-       desk for them here, and saying which sections exist would already say too much. *@
+    @* No such tenant, not a member, or a member whose role grants no support permission: one
+       answer for all three. Telling them apart would let anybody signed in find out which
+       tenants exist and what they are called. *@
     <div class="alert alert-warning" data-test="support-no-access">
-        <i class="bi bi-lock me-1"></i>Your role in <strong>@tenant.Name</strong> does not include support.
-        <a href="/support">Choose another tenant</a>.
+        <i class="bi bi-lock me-1"></i>There is no support desk here that your roles include.
+        <a href="/support">Choose a tenant</a>.
     </div>
 }
 else

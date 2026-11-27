@@ -8,7 +8,7 @@
 @inject SupportDutyService Duty
 @inject ToastService Toasts
 @inject CurrentActor ActorService
-@inject UserAccessService Access
+@inject TenantRoleService Roles
 @inject AuthenticationStateProvider AuthState
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject TicketWorkService Work
@@ -848,11 +848,13 @@
     }
 
     /// <summary>
-    /// The tenants this person may move a ticket into: the ones they can already reach.
+    /// The tenants this person may move a ticket into: the ones where their role lets them work
+    /// tickets, since that is whose queue it lands in.
     ///
-    /// <para>A global admin gets all of them. Anyone else gets what their memberships give
-    /// them, which for most people is one — and one tenant with the ticket already in it
-    /// means the button does not appear at all.</para>
+    /// <para>A global admin gets all of them. Anyone else gets the tenants their roles give
+    /// "Tickets: Edit" or more — being a member, as a developer say, is not enough. For most
+    /// people that is one, and one tenant with the ticket already in it means the button does
+    /// not appear at all.</para>
     /// </summary>
     private async Task<List<Tenant>> ReachableTenantsAsync()
     {
@@ -863,7 +865,11 @@
             string? userId = state.User.FindFirst(
                 System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
-            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+            return userId is null
+                ? []
+                : [.. (await Roles.TenantsHoldingAsync(userId, PermissionArea.Support))
+                    .Where(t => t.Permissions.Allows(TenantFeature.SupportTickets, AccessLevel.Edit))
+                    .Select(t => t.Tenant)];
         }
         catch
         {

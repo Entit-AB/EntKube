@@ -91,7 +91,7 @@ and time range. A panel showing a partial result says so.
 
 ## Alerting on a query
 
-Under **Support › Alerting › Telemetry alerts**, create a rule of type **Log: query result**.
+On the tenant page, under **Operations › Alerting › Telemetry alerts**, create a rule of type **Log: query result**.
 
 The rule runs the query over its window every minute and raises an incident when the answer goes
 over the threshold. The answer is the single value if the query ends in an aggregate with no `by`,

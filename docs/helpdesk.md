@@ -172,7 +172,7 @@ the existing `TicketNotifier`.
   had none. Assessing a report as a duplicate of a ticket being worked *is* the assessment
   §14.4 waits for. Without that, a merged duplicate's response clock kept running and turned
   into a breach a week later. A merge made after the deadline is recorded as late.
-- **The deep link is `?section=tickets&ticket=N`** inside the tenant explorer, rather than a
+- **The deep link was `?section=tickets&ticket=N`** inside the tenant explorer (since the support desk got its own menu it is `/support/{tenant}/tickets?ticket=N`, and the old form is sent on), rather than a
   route of its own, so that tenant access is checked where it already is.
 - **Follower mail is a digest driven by the history** (`TicketEvent.RecordedAt`), not a hook in
   every write path. It is sent once the ticket has been quiet for two minutes, and the claim is

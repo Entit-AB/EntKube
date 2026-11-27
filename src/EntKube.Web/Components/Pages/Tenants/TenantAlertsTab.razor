@@ -5,6 +5,7 @@
 @inject PrometheusService PrometheusService
 @inject RemediationService RemediationService
 @inject IncidentService IncidentService
+@inject TenantRoleService Roles
 @inject ToastService Toasts
 @* ⚠️ Telemetry's context, and the reason is worth stating because the tables cannot settle it.
    This page reads exactly one table — KubernetesClusters — and that is a HUB, exposed as a
@@ -389,6 +390,7 @@ else
     private bool isLoading = true;
     private DateTime? lastRefreshed;
     private string? currentUser;
+    private string? userId;
     private Timer? refreshTimer;
 
     // Silence form
@@ -451,6 +453,7 @@ else
     {
         AuthenticationState auth = await AuthStateProvider.GetAuthenticationStateAsync();
         currentUser = auth.User.Identity?.Name ?? "Unknown";
+        userId = auth.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
         await Refresh();
         refreshTimer = new Timer(_ => InvokeAsync(async () =>
         {
@@ -554,12 +557,24 @@ else
 
     private async Task AcknowledgeIncident(AlertIncident incident)
     {
+        // Working an incident is the incidents permission's, here as in the support desk.
+        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.AcknowledgeAsync(TenantId, incident.Id, currentUser!);
         await Refresh();
     }
 
     private async Task ResolveIncident(AlertIncident incident)
     {
+        // Working an incident is the incidents permission's, here as in the support desk.
+        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await IncidentService.ResolveAsync(TenantId, incident.Id, currentUser!);
         await Refresh();
     }
@@ -582,6 +597,12 @@ else
 
     private async Task BulkAcknowledge()
     {
+        // Working an incident is the incidents permission's, here as in the support desk.
+        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, TenantId, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         List<Guid> incidentIds = Filtered
             .Where(r => selectedKeys.Contains(r.Key)
                      && r.Incident?.Status == IncidentStatus.Active)

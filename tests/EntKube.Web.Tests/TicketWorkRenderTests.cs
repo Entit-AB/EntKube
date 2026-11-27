@@ -946,6 +946,30 @@ public class TicketWorkRenderTests : BunitContext, IDisposable
     }
 
     /// <summary>
+    /// Writing answers is Edit; running the categories (and deleting help answers) is Manage —
+    /// which is what an editor could do before, and what the carry-across gave them.
+    /// </summary>
+    [Theory]
+    [InlineData(AccessLevel.Edit, false)]
+    [InlineData(AccessLevel.Manage, true)]
+    public async Task Categories_are_offered_only_at_Manage(AccessLevel level, bool offered)
+    {
+        await new KnowledgeBaseService(new TestDbContextFactory(connection)).SaveCategoryAsync(tenantId, null, "Allmänt", null);
+        Guid agents = Guid.NewGuid();
+        db.TenantRoles.Add(new TenantRole { Id = agents, TenantId = tenantId, Name = "Agents",
+            PermissionsJson = $"{{\"{(int)TenantFeature.KnowledgeBase}\":{(int)level}}}" });
+        db.Users.Add(new ApplicationUser { Id = "user-nils", UserName = "nils" });
+        db.TenantMemberships.Add(new TenantMembership { UserId = "user-nils", TenantId = tenantId, RoleId = agents });
+        await db.SaveChangesAsync();
+        Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils", "user-nils"));
+
+        IRenderedComponent<KnowledgeBaseTab> tab = RenderKnowledgeBase();
+
+        tab.WaitForAssertion(() => tab.FindAll("button").Should().Contain(b => b.TextContent.Contains("New answer")));
+        tab.FindAll("button").Any(b => b.TextContent.Contains("Add category")).Should().Be(offered);
+    }
+
+    /// <summary>
     /// The knowledge base used to be opt-in: while no role in the tenant had been made its editor,
     /// everybody edited. Permissions are enforced now, and a role that does not grant editing does
     /// not edit — the roles that existed before were carried across with the grant instead.
