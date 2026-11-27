@@ -12,17 +12,13 @@ using Moq;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// Which of CustomerTab's three levels it opens on.
+/// The application page, as a customer's apps open it.
 ///
-/// <para>The tenant tree lists the customers as leaves of their own heading, so clicking one
-/// has to land on <em>that</em> customer rather than on the list of all of them — otherwise
-/// the leaf is a decoration and the operator still has to pick the customer a second time,
-/// from a page that cannot tell them which one they just clicked.</para>
-///
-/// <para>The list is still the right answer when nothing was named: <c>?section=customers</c>,
-/// which is what the top-nav mega menu links to, asks for all of them.</para>
+/// <para>This class tested the tenant page's customer view, which has gone: a customer has pages
+/// of their own now (<see cref="CustomerPageRenderTests"/>). What is left is the application
+/// page's side of the contract move.</para>
 /// </summary>
-public class CustomerTabRenderTests : BunitContext, IDisposable
+public class AppDetailContractButtonTests : BunitContext, IDisposable
 {
     private static readonly byte[] TestRootKey = Convert.FromBase64String(
         "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
@@ -34,7 +30,7 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
     private readonly Customer acme;
     private readonly Customer boliden;
 
-    public CustomerTabRenderTests()
+    public AppDetailContractButtonTests()
     {
         testDb = new InterceptingTestDb(TestRootKey);
         db = testDb.CreateContext();
@@ -70,57 +66,6 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
         testDb.Dispose();
         base.Dispose();
         GC.SuppressFinalize(this);
-    }
-
-    /// <summary>
-    /// <b>The one that matters.</b> Selecting a customer in the tree opens that customer,
-    /// not the list — the whole point of giving them a heading of their own.
-    /// </summary>
-    [Fact]
-    public void Naming_a_customer_opens_that_customer()
-    {
-        IRenderedComponent<CustomerTab> tab = Render<CustomerTab>(p => p
-            .Add(c => c.TenantId, tenantId)
-            .Add(c => c.InitialCustomerId, acme.Id));
-
-        // Level 2 is the only level with a way back to the list.
-        tab.Markup.Should().Contain("All Customers");
-        tab.Markup.Should().Contain("Acme AB");
-        tab.Markup.Should().Contain("Journalportalen");
-
-        // And it is one customer's page, not both customers listed.
-        tab.Markup.Should().NotContain("Gruvdata");
-    }
-
-    /// <summary>
-    /// A customer id that does not belong to this tenant — a stale link, or one hand-edited —
-    /// falls back to the list rather than rendering an empty page about nobody.
-    /// </summary>
-    [Fact]
-    public void An_unknown_customer_falls_back_to_the_list()
-    {
-        IRenderedComponent<CustomerTab> tab = Render<CustomerTab>(p => p
-            .Add(c => c.TenantId, tenantId)
-            .Add(c => c.InitialCustomerId, Guid.NewGuid()));
-
-        tab.Markup.Should().NotContain("All Customers");
-        tab.Markup.Should().Contain("Acme AB");
-        tab.Markup.Should().Contain("Boliden");
-    }
-
-    /// <summary>
-    /// Naming nobody still asks for everybody: this is <c>?section=customers</c>, which the
-    /// top-nav mega menu links to and which must keep showing the whole list.
-    /// </summary>
-    [Fact]
-    public void Naming_nobody_opens_the_list()
-    {
-        IRenderedComponent<CustomerTab> tab = Render<CustomerTab>(p => p
-            .Add(c => c.TenantId, tenantId));
-
-        tab.Markup.Should().NotContain("All Customers");
-        tab.Markup.Should().Contain("Acme AB");
-        tab.Markup.Should().Contain("Boliden");
     }
 
     /// <summary>

@@ -1,12 +1,13 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 
-namespace EntKube.Web.Components.Pages.Support;
+namespace EntKube.Web.Components.Pages.Shared;
 
 /// <summary>
-/// The check every write in the support desk makes before it writes.
+/// The check every guarded write makes before it writes — in the support desk and on the
+/// customer pages alike.
 ///
-/// <para>The desk works out once what the person may do in the tenant and hands it down to
+/// <para>The page works out once what the person may do in the tenant and hands it down to
 /// every section as a cascading value. Each handler that changes something asks here first. It
 /// has to be asked in the handler, not only where buttons are drawn: a Blazor event runs on the
 /// server whatever the page showed, so a stale page or an event sent by hand reaches it all the
@@ -15,7 +16,7 @@ namespace EntKube.Web.Components.Pages.Support;
 /// <para>A component shown anywhere else was handed nothing, and nothing means no access —
 /// a forgotten wiring refuses instead of quietly allowing everything.</para>
 /// </summary>
-public static class SupportGuard
+public static class PermissionGuard
 {
     /// <summary>
     /// Whether the write is refused. When it is, and a toast service was given, the person is

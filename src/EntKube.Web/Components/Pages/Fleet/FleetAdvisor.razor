@@ -447,7 +447,7 @@
         if (incident is null) return;
 
         // The fleet view spans tenants; the incident's own tenant decides.
-        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (await PermissionGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -463,7 +463,7 @@
         if (incident is null) return;
 
         // The fleet view spans tenants; the incident's own tenant decides.
-        if (await EntKube.Web.Components.Pages.Support.SupportGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (await PermissionGuard.RefusesAsync(Roles, incidentRow!.Tenant.Id, userId, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }

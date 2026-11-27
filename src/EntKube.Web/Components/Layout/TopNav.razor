@@ -5,6 +5,7 @@
 @inject EntKube.Web.Services.UserAccessService UserAccessService
 @inject EntKube.Web.Services.CustomerAccessService CustomerAccessService
 @inject EntKube.Web.Services.TenantRoleService TenantRoleService
+@inject EntKube.Web.Services.TenantService TenantService
 @inject IConfiguration Configuration
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -63,9 +64,6 @@
                                         <a class="mega-link" href="@($"tenants/{t.Slug}?section=clusters")">
                                             <i class="bi bi-hexagon-fill"></i> Clusters
                                         </a>
-                                        <a class="mega-link" href="@($"tenants/{t.Slug}?section=customers")">
-                                            <i class="bi bi-people"></i> Customers
-                                        </a>
                                         <a class="mega-link" href="@($"tenants/{t.Slug}?section=overview")">
                                             <i class="bi bi-speedometer2"></i> Monitoring
                                         </a>
@@ -120,6 +118,38 @@
                             </div>
                             <div class="mega-foot">
                                 <a class="ms-auto" href="support">All support <i class="bi bi-arrow-right"></i></a>
+                            </div>
+                        </div>
+                    </li>
+                }
+
+                @* Customers: one column per tenant whose customers this person may see — a few by
+                   name, and the way to all of them. *@
+                @if (customerDesks.Count > 0)
+                {
+                    <li class="nav-item dropdown position-static">
+                        <a class="nav-link dropdown-toggle @(IsActive("customers"))" href="#" role="button"
+                           data-bs-toggle="dropdown" aria-expanded="false">Customers</a>
+                        <div class="dropdown-menu entit-mega">
+                            <div class="mega-grid">
+                                @foreach ((Data.Tenant t, List<Data.Customer> some, int total) in customerDesks)
+                                {
+                                    <div class="mega-col">
+                                        <a class="mega-title" href="@CustomerLinks.List(t.Slug)">
+                                            <i class="bi bi-people"></i> @t.Name
+                                        </a>
+                                        @foreach (Data.Customer c in some)
+                                        {
+                                            <a class="mega-link" href="@CustomerLinks.Customer(t.Slug, c.Id)">
+                                                <i class="bi bi-person-badge"></i> @c.Name
+                                            </a>
+                                        }
+                                        @if (total > some.Count)
+                                        {
+                                            <a class="mega-link" href="@CustomerLinks.List(t.Slug)">All @total customers…</a>
+                                        }
+                                    </div>
+                                }
                             </div>
                         </div>
                     </li>
@@ -234,6 +264,10 @@
     private List<Data.Customer> customers = [];
     private List<EntKube.Web.Services.TenantPermissions> supportDesks = [];
 
+    // Per tenant whose customers this person may see: the first few by name, and how many there are.
+    private List<(Data.Tenant Tenant, List<Data.Customer> Some, int Total)> customerDesks = [];
+    private const int CustomersShownPerTenant = 8;
+
     // What the Support menu offers under each tenant: the sections people go to most. Everything
     // else is one click further, in the desk's own menu.
     private static readonly string[] SupportMenuShortcuts = ["tickets", "support-dashboard", "knowledge-base", "incidents"];
@@ -258,6 +292,17 @@
         tenants = await UserAccessService.GetAccessibleTenantsAsync(userId);
         customers = await CustomerAccessService.GetAccessibleCustomersAsync(userId);
         supportDesks = await TenantRoleService.TenantsHoldingAsync(userId, EntKube.Web.Services.PermissionArea.Support);
+
+        foreach (EntKube.Web.Services.TenantPermissions held in await TenantRoleService.TenantsHoldingAsync(userId, EntKube.Web.Services.PermissionArea.Customers))
+        {
+            if (!CustomerSections.OpensFor(held.Permissions))
+            {
+                continue;
+            }
+
+            List<Data.Customer> all = await TenantService.GetCustomersAsync(held.Tenant.Id);
+            customerDesks.Add((held.Tenant, [.. all.Take(CustomersShownPerTenant)], all.Count));
+        }
     }
 
     // "active" highlight — a link is active when the current path is (or starts with) its prefix.

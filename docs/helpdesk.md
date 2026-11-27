@@ -48,7 +48,7 @@ sections are sent on to the same place, including `ticket=`, `q=`, `answer=` and
 Alerting stayed with the tenant, under Operations; on-call, incidents and subconsultants moved.
 
 Each section asks for a role permission (`SupportSections`), and every write in it checks again
-before writing (`SupportGuard`, with the permissions the desk hands down). The support
+before writing (`PermissionGuard`, with the permissions the desk hands down). The support
 permissions, and what their levels allow:
 
 | Permission | View | Edit | Manage |
@@ -62,6 +62,14 @@ permissions, and what their levels allow:
 | Service levels | see SLA targets | change them | — |
 | Incidents & on-call | see them | work incidents, handover notes | schedules, subconsultant register |
 
+**Customers** moved the same way, to `/customers/{tenant}/{customer}/{tab}`
+(`Components/Pages/Customers/`). The tenant tree keeps customers only as the way apps are grouped
+under each environment; `?section=customers` and `?customer=…` are sent on. The tabs and what opens
+them: Overview and Apps at Customers: View; Agreement (contract, contacts, support address, mail
+domains, price lists), Hours and Monthly report at Agreements: View; Portal access at Portal
+access: View. Creating or unregistering a customer is Customers: Manage; adding apps and changing
+contacts, support addresses and mail domains is Customers: Edit; contracts, Annex A and price lists
+are Agreements: Edit; granting or revoking portal access is Portal access: Manage.
 Beyond the desk's own pages, the same permissions decide:
 
 - **Who works support.** The roster, the rotation and ticket notifications cover only members whose

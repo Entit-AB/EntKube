@@ -163,8 +163,8 @@
 
     private bool Refuses(SupportTechnician technician) =>
         technician.Name == actor
-            ? SupportGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts)
-            : SupportGuard.Refuses(Permissions, TenantFeature.SupportRoster, AccessLevel.Manage, Toasts);
+            ? PermissionGuard.Refuses(Permissions, TenantFeature.SupportTickets, AccessLevel.Edit, Toasts)
+            : PermissionGuard.Refuses(Permissions, TenantFeature.SupportRoster, AccessLevel.Manage, Toasts);
 
     [Parameter] public Guid TenantId { get; set; }
 

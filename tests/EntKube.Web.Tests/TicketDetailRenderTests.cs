@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using AngleSharp.Dom;
 using Bunit;
+using EntKube.Web.Components.Pages.Shared;
 using EntKube.Web.Components.Pages.Support;
 using EntKube.Web.Components.Pages.Tenants;
 using EntKube.Web.Data;
@@ -285,9 +286,9 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     [Fact]
     public void Somebody_handed_no_permissions_is_refused_too()
     {
-        SupportGuard.Refuses(null, TenantFeature.SupportTickets, AccessLevel.View).Should().BeTrue();
-        SupportGuard.Refuses(EffectivePermissions.Everything, TenantFeature.SupportTickets, AccessLevel.Manage).Should().BeFalse();
-        SupportGuard.RefusalFor(TenantFeature.SupportTickets, AccessLevel.Manage).Should().Contain("Tickets: Manage");
+        PermissionGuard.Refuses(null, TenantFeature.SupportTickets, AccessLevel.View).Should().BeTrue();
+        PermissionGuard.Refuses(EffectivePermissions.Everything, TenantFeature.SupportTickets, AccessLevel.Manage).Should().BeFalse();
+        PermissionGuard.RefusalFor(TenantFeature.SupportTickets, AccessLevel.Manage).Should().Contain("Tickets: Manage");
     }
 
     // ---- What the screen shows ----------------------------------------------------------------

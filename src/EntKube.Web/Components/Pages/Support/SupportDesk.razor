@@ -87,7 +87,7 @@ else
             }
             else if (open is not null)
             {
-                @* Every write in the section asks SupportGuard against this before it writes. *@
+                @* Every write in the section asks PermissionGuard against this before it writes. *@
                 @* Not IsFixed: moving to another tenant reuses this page, and the sections must then
                    be handed that tenant's permissions, not keep the last one's. *@
                 <CascadingValue Value="permissions">

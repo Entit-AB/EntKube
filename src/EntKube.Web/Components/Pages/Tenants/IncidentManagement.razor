@@ -197,7 +197,7 @@ else if (!isLoading)
 
 @code {
     // What the person may do here, handed down by the support desk. Every write below asks
-    // SupportGuard first; nothing handed down means nothing allowed.
+    // PermissionGuard first; nothing handed down means nothing allowed.
     [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
 
     [Parameter] public required Guid TenantId { get; set; }
@@ -257,7 +257,7 @@ else if (!isLoading)
 
     private async Task AckStorm(IncidentGroup g)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -268,7 +268,7 @@ else if (!isLoading)
 
     private async Task ResolveStorm(IncidentGroup g)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -501,7 +501,7 @@ else if (!isLoading)
 
     private async Task ReNotify(AlertIncident incident)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -538,7 +538,7 @@ else if (!isLoading)
 
     private async Task SubmitAssign(AlertIncident incident)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -560,7 +560,7 @@ else if (!isLoading)
 
     private async Task Acknowledge(AlertIncident incident)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -571,7 +571,7 @@ else if (!isLoading)
 
     private async Task Resolve(AlertIncident incident)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }
@@ -582,7 +582,7 @@ else if (!isLoading)
 
     private async Task AddNote(AlertIncident incident)
     {
-        if (SupportGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Incidents, AccessLevel.Edit, Toasts))
         {
             return;
         }

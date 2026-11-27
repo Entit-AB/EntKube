@@ -1,0 +1,60 @@
+@page "/customers"
+@using Microsoft.AspNetCore.Authorization
+@using EntKube.Web.Data
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inject TenantRoleService Roles
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Nav
+
+@* The way into customers when no tenant is named: straight to the list when there is only one
+   tenant whose customers this person may see, otherwise a choice between them. *@
+
+<PageTitle>Customers</PageTitle>
+
+@if (tenants is null)
+{
+    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (tenants.Count == 0)
+{
+    <div class="alert alert-light border" data-test="customers-none">
+        <i class="bi bi-people me-1"></i>Your roles do not include customers in any tenant.
+        An administrator can grant it under Admin → Roles.
+    </div>
+}
+else
+{
+    <h1 class="h4 mb-3"><i class="bi bi-people me-2 text-primary"></i>Customers</h1>
+    <div class="list-group" style="max-width: 32rem">
+        @foreach (Tenant t in tenants.Select(d => d.Tenant))
+        {
+            <a class="list-group-item list-group-item-action d-flex align-items-center" href="@CustomerLinks.List(t.Slug)">
+                <i class="bi bi-building me-2 text-muted"></i>@t.Name
+                <i class="bi bi-arrow-right ms-auto text-muted"></i>
+            </a>
+        }
+    </div>
+}
+
+@code {
+    private List<TenantPermissions>? tenants;
+
+    protected override async Task OnInitializedAsync()
+    {
+        string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        // "Holds anything about customers" is not enough here: every customer tab hangs off seeing
+        // the customer, so only tenants where that is granted are offered.
+        tenants = userId is null
+            ? []
+            : [.. (await Roles.TenantsHoldingAsync(userId, PermissionArea.Customers)).Where(t => CustomerSections.OpensFor(t.Permissions))];
+
+        // One tenant is not a choice.
+        if (tenants.Count == 1)
+        {
+            Nav.NavigateTo(CustomerLinks.List(tenants[0].Tenant.Slug), replace: true);
+        }
+    }
+}

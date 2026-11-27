@@ -1,0 +1,239 @@
+@page "/customers/{Slug}"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.EntityFrameworkCore
+@using EntKube.Web.Data
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@inject TenantService Tenants
+@inject TenantRoleService Roles
+@inject AuthenticationStateProvider AuthState
+@inject ToastService Toasts
+
+@* A tenant's customers: the end clients or accounts it serves. Opening one shows its page;
+   adding one or unregistering it is the customer permission's top level. *@
+
+<PageTitle>@TitleFor(tenant, permissions)</PageTitle>
+
+@if (loading)
+{
+    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div></div>
+}
+else if (tenant is null || !CustomerSections.OpensFor(permissions))
+{
+    <div class="alert alert-warning" data-test="customer-no-access">
+        <i class="bi bi-lock me-1"></i>Your role does not include customers here.
+        <a href="@CustomerLinks.Home">Choose another tenant</a>.
+    </div>
+}
+else
+{
+    <div class="d-flex align-items-center mb-2">
+        <i class="bi bi-people fs-4 me-2 text-primary"></i>
+        <h4 class="mb-0">Customers <span class="text-muted fw-normal">· @tenant.Name</span></h4>
+    </div>
+    <p class="text-muted small mb-3">End clients or accounts this tenant serves.</p>
+
+    @if (mayManage)
+    {
+        <div class="card border-0 shadow-sm mb-3" data-test="customer-create">
+            <div class="card-body py-2">
+                <div class="input-group">
+                    <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                    <input type="text" class="form-control border-start-0" placeholder="New customer name (e.g. Contoso Ltd)"
+                           @bind="newName" @bind:event="oninput"
+                           @onkeydown="@(async e => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newName)) { await CreateAsync(); } })" />
+                    @* A customer belongs to the environment it is created in — not to all of them. *@
+                    <select class="form-select flex-grow-0 w-auto" @bind="newEnvironmentId">
+                        <option value="">No environment</option>
+                        @foreach (Data.Environment env in environments)
+                        {
+                            <option value="@env.Id">@env.Name</option>
+                        }
+                    </select>
+                    <button class="btn btn-primary" @onclick="CreateAsync" disabled="@string.IsNullOrWhiteSpace(newName)">
+                        <i class="bi bi-plus-lg me-1"></i>Add
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (customers.Count == 0)
+    {
+        <EmptyState Icon="bi-people" Title="No customers yet" Message="@(mayManage ? "Add one above to get started." : "None registered.")" />
+    }
+    else
+    {
+        <div class="list-group shadow-sm">
+            @foreach (Customer c in customers)
+            {
+                <div class="list-group-item d-flex align-items-center">
+                    @if (confirmDelete == c.Id)
+                    {
+                        <span class="small flex-grow-1"><i class="bi bi-info-circle me-1"></i>Unregister <strong>@c.Name</strong> and its apps from EntKube? No cluster or workload is touched.</span>
+                        <button class="btn btn-sm btn-secondary me-1" @onclick="() => DeleteAsync(c.Id)">Unregister</button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => confirmDelete = null">Cancel</button>
+                    }
+                    else
+                    {
+                        <a class="flex-grow-1 text-decoration-none text-reset d-flex align-items-center" href="@CustomerLinks.Customer(tenant.Slug, c.Id)">
+                            <i class="bi bi-person-circle me-2 text-primary"></i>
+                            <span>
+                                <span class="fw-semibold">@c.Name</span><br />
+                                <small class="text-muted">@AppCount(c.Id) · Created @c.CreatedAt.ToString("MMM d, yyyy")</small>
+                                @* A customer in no environment appears under none in the tenant tree, so
+                                   this list is the one place it is seen — and it should be noticed. *@
+                                <div class="mt-1">
+                                    @if (environmentsOf.GetValueOrDefault(c.Id) is { Count: > 0 } names)
+                                    {
+                                        @foreach (string name in names)
+                                        {
+                                            <span class="badge bg-body-secondary text-body-secondary border me-1">@name</span>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-warning-subtle text-warning-emphasis border">No environment</span>
+                                    }
+                                </div>
+                            </span>
+                        </a>
+                        @if (mayManage)
+                        {
+                            <button class="btn btn-sm btn-outline-secondary" title="Unregister customer (no cluster is touched)"
+                                    @onclick="() => confirmDelete = c.Id"><i class="bi bi-box-arrow-right"></i></button>
+                        }
+                        <i class="bi bi-chevron-right text-muted ms-2"></i>
+                    }
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string Slug { get; set; } = "";
+
+    private bool loading = true;
+    private Tenant? tenant;
+    private EffectivePermissions permissions = EffectivePermissions.Nothing;
+    private List<Customer> customers = [];
+    private List<Data.Environment> environments = [];
+    private string newName = "";
+    private Guid? newEnvironmentId;
+    private Guid? confirmDelete;
+    private string? loadedFor;
+
+    private bool mayManage => permissions.Allows(TenantFeature.Customers, AccessLevel.Manage);
+
+    // Per customer: the names of the environments it belongs to, and how many apps it has.
+    private Dictionary<Guid, List<string>> environmentsOf = [];
+    private Dictionary<Guid, int> appCounts = [];
+
+    private string AppCount(Guid customerId) => appCounts.GetValueOrDefault(customerId) switch
+    {
+        1 => "1 app",
+        int n => $"{n} apps",
+    };
+
+    /// <summary>
+    /// The browser tab's title. The tenant's name only for those who may see its customers: a
+    /// name is already something to learn, and anybody signed in can type an address.
+    /// </summary>
+    public static string TitleFor(Tenant? tenant, EffectivePermissions permissions) =>
+        tenant is not null && CustomerSections.OpensFor(permissions) ? $"Customers · {tenant.Name}" : "Customers";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedFor == Slug)
+        {
+            return;
+        }
+
+        loading = true;
+        tenant = await Tenants.GetTenantBySlugAsync(Slug);
+
+        string? userId = (await AuthState.GetAuthenticationStateAsync()).User
+            .FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        permissions = tenant is null ? EffectivePermissions.Nothing : await Roles.PermissionsForAsync(tenant.Id, userId);
+
+        if (tenant is not null && CustomerSections.OpensFor(permissions))
+        {
+            await LoadAsync();
+
+            // Chosen afresh for every tenant: this page is reused when the menu moves to another
+            // tenant, and the last tenant's environment would otherwise stay selected — and a new
+            // customer would join an environment that is not even this tenant's.
+            newEnvironmentId = environments.FirstOrDefault()?.Id;
+        }
+
+        loadedFor = Slug;
+        loading = false;
+    }
+
+    private async Task LoadAsync()
+    {
+        customers = await Tenants.GetCustomersAsync(tenant!.Id);
+        environments = await Tenants.GetEnvironmentsAsync(tenant.Id);
+
+        // One read each for every customer's environments and apps, not one per customer.
+        Dictionary<Guid, string> names = environments.ToDictionary(e => e.Id, e => e.Name);
+
+        environmentsOf = (await Tenants.GetCustomerEnvironmentsAsync(tenant.Id))
+            .Where(link => names.ContainsKey(link.EnvironmentId))
+            .GroupBy(link => link.CustomerId)
+            .ToDictionary(g => g.Key, g => g.Select(link => names[link.EnvironmentId]).Order(StringComparer.OrdinalIgnoreCase).ToList());
+
+        appCounts = (await Tenants.GetAppsByCustomerAsync(tenant.Id)).ToDictionary(kv => kv.Key, kv => kv.Value.Count);
+    }
+
+    /// <summary>
+    /// Adds a customer to this tenant, in the environment chosen beside the name. Adding (and
+    /// unregistering) a customer is the customer permission's top level: it changes who the tenant
+    /// serves, where adding an app or a contact only changes what is known about one customer.
+    /// </summary>
+    private async Task CreateAsync()
+    {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
+        // The environment arrives from the browser as an id. Only one this page offered — one of
+        // this tenant's — may be used, or a hand-sent id could tie the customer to another tenant.
+        if (newEnvironmentId is Guid chosen && environments.All(e => e.Id != chosen))
+        {
+            Toasts.Error("Choose one of this tenant's environments.");
+            return;
+        }
+
+        try
+        {
+            await Tenants.CreateCustomerAsync(tenant!.Id, newName.Trim(), newEnvironmentId);
+            newName = "";
+            await LoadAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // Customer names are unique within a tenant; the database is what says so.
+            Toasts.Error("A customer with that name already exists.");
+        }
+    }
+
+    /// <summary>
+    /// Unregisters a customer and its apps from EntKube. Nothing in any cluster is touched; the
+    /// confirmation line above says so before this runs.
+    /// </summary>
+    private async Task DeleteAsync(Guid id)
+    {
+        if (PermissionGuard.Refuses(permissions, TenantFeature.Customers, AccessLevel.Manage, Toasts))
+        {
+            return;
+        }
+
+        confirmDelete = null;
+        await Tenants.DeleteCustomerAsync(tenant!.Id, id);
+        await LoadAsync();
+    }
+}

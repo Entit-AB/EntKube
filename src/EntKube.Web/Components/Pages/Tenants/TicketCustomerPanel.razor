@@ -13,7 +13,10 @@
                 <span class="fw-semibold">@s.Customer</span>
                 @if (TenantSlug is not null)
                 {
-                    <a href="@SearchHref($"customer:\"{s.Customer}\"")" title="All of this customer's tickets">all tickets</a>
+                    <span>
+                        <a href="@SearchHref($"customer:\"{s.Customer}\"")" title="All of this customer's tickets">all tickets</a>
+                        · <a href="@CustomerLinks.Customer(TenantSlug, Ticket.CustomerId)" title="The customer's page: agreement, apps, portal access">customer</a>
+                    </span>
                 }
             </div>
             <div class="text-muted mb-2">

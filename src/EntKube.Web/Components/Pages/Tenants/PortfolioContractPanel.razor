@@ -984,6 +984,11 @@
 </LoadingPanel>
 
 @code {
+    // What the person may do here, handed down by the customer page. The people and addresses
+    // are the customer's details (Customers: Edit); what was agreed and what it costs is the
+    // commercial side (Agreements: Edit). Nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
     [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
 
     /// <summary>
@@ -1171,6 +1176,11 @@
 
     private async Task RecordAgreementAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (newAgreementFrom is null)
         {
             Toasts.Error("An effective date is required.");
@@ -1208,6 +1218,11 @@
 
     private async Task DeleteAgreementAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteAgreement is null)
         {
             return;
@@ -1229,6 +1244,11 @@
 
     private async Task SaveContactAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(newContact.Name))
         {
             Toasts.Error("A name is required.");
@@ -1259,6 +1279,11 @@
 
     private async Task AddSupportAddressAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(newAddress))
         {
             Toasts.Error("An address is required.");
@@ -1297,6 +1322,11 @@
 
     private async Task DeleteSupportAddressAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteAddress is null)
         {
             return;
@@ -1318,6 +1348,11 @@
 
     private async Task AddDomainAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(newDomain))
         {
             Toasts.Error("A domain is required.");
@@ -1354,6 +1389,11 @@
 
     private async Task DeleteDomainAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteDomain is null)
         {
             return;
@@ -1375,6 +1415,11 @@
 
     private async Task DeleteContactAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteContactId is null)
         {
             return;
@@ -1396,6 +1441,11 @@
 
     private async Task SeedStandardListAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         busy = true;
 
         try
@@ -1418,6 +1468,11 @@
 
     private async Task IndexPricesAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (indexFrom is null)
         {
             Toasts.Error("An effective date is required.");
@@ -1457,6 +1512,11 @@
 
     private async Task DeleteListAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (pendingDeleteList is null)
         {
             return;
@@ -1511,6 +1571,11 @@
 
     private async Task SaveAmountsAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (editingList is null)
         {
             return;
@@ -1548,6 +1613,11 @@
 
     private async Task SaveHeaderAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (editingList is null || headerEffectiveFrom is null)
         {
             Toasts.Error("An effective date is required.");
@@ -1565,6 +1635,11 @@
 
     private async Task AddEntryAsync()
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         if (editingList is null || string.IsNullOrWhiteSpace(newEntryKey))
         {
             Toasts.Error("Say what the amount is for.");
@@ -1590,6 +1665,11 @@
 
     private async Task RemoveEntryAsync(PriceListEntry entry)
     {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.CustomerAgreements, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
         await Contracts.DeletePriceListEntryAsync(TenantId, entry.Id);
         staged.Remove(entry.Id);
         await ReloadEditorAsync();

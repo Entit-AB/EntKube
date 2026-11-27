@@ -1,0 +1,129 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Components.Pages.Tenants
+@using Microsoft.EntityFrameworkCore
+@inject TenantService Tenants
+@inject ToastService Toasts
+
+@* The customer's applications. An application itself — its deployments, routes, knowledge — is
+   worked on the tenant page, which is where the platform is; this lists them and opens each
+   there. Adding one, or adopting a workload already running, is a change to the customer. *@
+
+@if (mayEdit)
+{
+    <div class="card border-0 shadow-sm mb-3" data-test="app-create">
+        <div class="card-body py-2">
+            <div class="input-group">
+                <span class="input-group-text bg-transparent border-end-0"><i class="bi bi-plus-circle"></i></span>
+                <input type="text" class="form-control border-start-0" placeholder="New app name (e.g. billing-api)"
+                       @bind="newAppName" @bind:event="oninput"
+                       @onkeydown="@(async e => { if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(newAppName)) { await CreateAppAsync(); } })" />
+                <button class="btn btn-primary" @onclick="CreateAppAsync" disabled="@string.IsNullOrWhiteSpace(newAppName)">
+                    <i class="bi bi-plus-lg me-1"></i>Add app
+                </button>
+                <button class="btn btn-outline-primary" @onclick="OpenImport"
+                        title="Adopt a workload already running in a cluster as a new app">
+                    <i class="bi bi-box-arrow-in-down me-1"></i>Import deployment
+                </button>
+            </div>
+            @if (!string.IsNullOrEmpty(appError))
+            {
+                <div class="text-danger small mt-2"><i class="bi bi-exclamation-triangle me-1"></i>@appError</div>
+            }
+        </div>
+    </div>
+}
+
+@if (showImportWizard)
+{
+    <ImportDeploymentWizard TenantId="TenantId" PreselectCustomerId="Customer.Id" OnClose="OnImportClosedAsync" />
+}
+
+<LoadingPanel Loading="@(apps is null)">
+    @if (apps is not null && apps.Count == 0)
+    {
+        <EmptyState Icon="bi-app-indicator" Title="No apps yet" Message="@(mayEdit ? "Add one above to get started." : "None registered for this customer.")" />
+    }
+    else if (apps is not null)
+    {
+        <div class="row row-cols-1 row-cols-md-2 g-3">
+            @foreach (Data.App app in apps)
+            {
+                <div class="col">
+                    <a class="card shadow-sm h-100 text-decoration-none text-reset" href="@($"/tenants/{Uri.EscapeDataString(TenantSlug)}?app={app.Id}")">
+                        <div class="card-body py-3 d-flex align-items-start">
+                            <i class="bi bi-app-indicator fs-4 me-3 text-primary"></i>
+                            <div class="flex-grow-1">
+                                <h6 class="fw-semibold mb-1">@app.Name</h6>
+                                @foreach (AppEnvironment ae in app.AppEnvironments)
+                                {
+                                    <span class="badge bg-primary bg-opacity-75 me-1">@ae.Environment.Name</span>
+                                }
+                                @if (app.AppEnvironments.Count == 0)
+                                {
+                                    <small class="text-muted">No environments linked</small>
+                                }
+                                <div><small class="text-muted">Created @app.CreatedAt.ToString("MMM d, yyyy")</small></div>
+                            </div>
+                            <i class="bi bi-box-arrow-up-right text-muted"></i>
+                        </div>
+                    </a>
+                </div>
+            }
+        </div>
+    }
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public string TenantSlug { get; set; } = "";
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    // Handed down by the customer page. Nothing handed down means nothing allowed.
+    [CascadingParameter] public EffectivePermissions? Permissions { get; set; }
+
+    private bool mayEdit => (Permissions ?? EffectivePermissions.Nothing).Allows(TenantFeature.Customers, AccessLevel.Edit);
+
+    private List<Data.App>? apps;
+    private string newAppName = "";
+    private string? appError;
+    private bool showImportWizard;
+
+    protected override async Task OnParametersSetAsync() => apps = await Tenants.GetAppsAsync(TenantId, Customer.Id);
+
+    private async Task CreateAppAsync()
+    {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
+        appError = null;
+
+        try
+        {
+            await Tenants.CreateAppAsync(TenantId, Customer.Id, newAppName.Trim());
+            newAppName = "";
+            apps = await Tenants.GetAppsAsync(TenantId, Customer.Id);
+        }
+        catch (DbUpdateException)
+        {
+            appError = "An app with that name already exists for this customer.";
+        }
+    }
+
+    private void OpenImport()
+    {
+        if (PermissionGuard.Refuses(Permissions, TenantFeature.Customers, AccessLevel.Edit, Toasts))
+        {
+            return;
+        }
+
+        showImportWizard = true;
+    }
+
+    private async Task OnImportClosedAsync()
+    {
+        showImportWizard = false;
+        apps = await Tenants.GetAppsAsync(TenantId, Customer.Id);
+    }
+}
